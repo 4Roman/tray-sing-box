@@ -63,9 +63,9 @@ func New(vpnService *domain.VPNService, importService *domain.ImportService, upd
 }
 
 // OnReady is called when the system tray is ready
-func (a *Application) OnReady(trayIcon []byte) {
+func (a *Application) OnReady(trayIcon, trayIconOff []byte) {
 	// Initialize tray UI
-	a.trayUI = ui.New(trayIcon)
+	a.trayUI = ui.New(trayIcon, trayIconOff)
 
 	// Update autostart checkbox. If autostart is enabled, re-register the
 	// scheduled task so an entry created by an older version is refreshed

@@ -8,6 +8,10 @@ import (
 
 // TrayUI manages the system tray interface
 type TrayUI struct {
+	iconOn      []byte // tray.ico — VPN running
+	iconOff     []byte // tray-off.ico — VPN stopped (grayscale)
+	iconRunning bool   // which icon is currently shown
+
 	statusItem          *systray.MenuItem
 	toggleItem          *systray.MenuItem
 	importClipboardItem *systray.MenuItem
@@ -29,9 +33,13 @@ type TrayUI struct {
 	QuitCh            chan bool
 }
 
-// New creates a new tray UI instance
-func New(trayIcon []byte) *TrayUI {
+// New creates a new tray UI instance. iconOn is shown while the VPN is
+// running, iconOff while it is stopped; either may be nil (that state then
+// keeps whatever icon is already set).
+func New(iconOn, iconOff []byte) *TrayUI {
 	ui := &TrayUI{
+		iconOn:            iconOn,
+		iconOff:           iconOff,
 		ToggleCh:          make(chan bool),
 		ImportClipboardCh: make(chan bool),
 		ImportQRCh:        make(chan bool),
@@ -42,9 +50,13 @@ func New(trayIcon []byte) *TrayUI {
 		QuitCh:            make(chan bool),
 	}
 
-	// Set the application icon (.ico only on Windows; skip if loading failed)
-	if len(trayIcon) > 0 {
-		systray.SetIcon(trayIcon)
+	// Set the application icon (.ico only on Windows; skip if loading failed).
+	// The VPN state is unknown yet, start with the "stopped" icon —
+	// UpdateStatus corrects it right after the state is restored.
+	if len(iconOff) > 0 {
+		systray.SetIcon(iconOff)
+	} else if len(iconOn) > 0 {
+		systray.SetIcon(iconOn)
 	}
 	systray.SetTitle(TrayTitle)
 	systray.SetTooltip(TrayTooltip)
@@ -103,14 +115,24 @@ func (t *TrayUI) listenEvents() {
 	}
 }
 
-// UpdateStatus updates the VPN status display
+// UpdateStatus updates the VPN status display: menu item texts and the tray
+// icon (color = running, grayscale = stopped). The icon is only re-set when
+// the state actually changes — systray.SetIcon writes a temp file each call.
 func (t *TrayUI) UpdateStatus(status domain.VPNStatus) {
 	if status.IsRunning() {
 		t.statusItem.SetTitle(StatusRunning)
 		t.toggleItem.SetTitle(ActionStop)
+		if !t.iconRunning && len(t.iconOn) > 0 {
+			systray.SetIcon(t.iconOn)
+			t.iconRunning = true
+		}
 	} else {
 		t.statusItem.SetTitle(StatusStopped)
 		t.toggleItem.SetTitle(ActionStart)
+		if t.iconRunning && len(t.iconOff) > 0 {
+			systray.SetIcon(t.iconOff)
+			t.iconRunning = false
+		}
 	}
 }
 

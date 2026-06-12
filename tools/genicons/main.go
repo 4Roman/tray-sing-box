@@ -1,10 +1,11 @@
-// genicons renders assets/icons/tray.svg into assets/icons/tray.ico.
-// Run from the repo root (build.bat does): go run ./tools/genicons
+// genicons renders assets/icons/tray.svg into assets/icons/tray.ico and a
+// desaturated assets/icons/tray-off.ico (tray icon for the "VPN stopped"
+// state). Run from the repo root (make build does): go run ./tools/genicons
 //
 // Windows cannot consume SVG directly: the tray icon goes through
 // LoadImageW(IMAGE_ICON, LR_LOADFROMFILE) and the exe icon is embedded by
 // go-winres — both want ICO. So the SVG is the editable source of truth and
-// this tool produces the single ICO artifact used by both pipelines.
+// this tool produces the ICO artifacts used by both pipelines.
 //
 // ICO layout: 16/32/48 px entries are stored as uncompressed 32-bit BMP
 // (LoadImageW-safe on every Windows version), 256 px as PNG (supported since
@@ -25,8 +26,9 @@ import (
 )
 
 const (
-	svgPath = "assets/icons/tray.svg"
-	icoPath = "assets/icons/tray.ico"
+	svgPath    = "assets/icons/tray.svg"
+	icoPath    = "assets/icons/tray.ico"
+	icoOffPath = "assets/icons/tray-off.ico"
 )
 
 var bmpSizes = []int{16, 32, 48}
@@ -38,17 +40,32 @@ func main() {
 		log.Fatalf("parse %s: %v", svgPath, err)
 	}
 
+	writeICO(icoPath, icon, nil)
+	writeICO(icoOffPath, icon, desaturate)
+}
+
+// writeICO renders the SVG at every size, optionally post-processing each
+// raster with transform, and packs the results into one ICO file.
+func writeICO(path string, icon *oksvg.SvgIcon, transform func(*image.RGBA)) {
+	rendered := func(size int) *image.RGBA {
+		img := render(icon, size)
+		if transform != nil {
+			transform(img)
+		}
+		return img
+	}
+
 	type entry struct {
 		size int
 		data []byte
 	}
 	var entries []entry
 	for _, s := range bmpSizes {
-		entries = append(entries, entry{s, encodeBMP(render(icon, s))})
+		entries = append(entries, entry{s, encodeBMP(rendered(s))})
 	}
 	for _, s := range pngSizes {
 		var buf bytes.Buffer
-		if err := png.Encode(&buf, render(icon, s)); err != nil {
+		if err := png.Encode(&buf, rendered(s)); err != nil {
 			log.Fatalf("png encode %dpx: %v", s, err)
 		}
 		entries = append(entries, entry{s, buf.Bytes()})
@@ -71,10 +88,20 @@ func main() {
 		ico.Write(e.data)
 	}
 
-	if err := os.WriteFile(icoPath, ico.Bytes(), 0644); err != nil {
-		log.Fatalf("write %s: %v", icoPath, err)
+	if err := os.WriteFile(path, ico.Bytes(), 0644); err != nil {
+		log.Fatalf("write %s: %v", path, err)
 	}
-	fmt.Printf("wrote %s (%d bytes, sizes %v+%v)\n", icoPath, ico.Len(), bmpSizes, pngSizes)
+	fmt.Printf("wrote %s (%d bytes, sizes %v+%v)\n", path, ico.Len(), bmpSizes, pngSizes)
+}
+
+// desaturate converts the image to grayscale (Rec. 601 luma, alpha kept) —
+// the "VPN stopped" tray icon is a dimmed version of the normal one.
+func desaturate(img *image.RGBA) {
+	for i := 0; i < len(img.Pix); i += 4 {
+		r, g, b := int(img.Pix[i]), int(img.Pix[i+1]), int(img.Pix[i+2])
+		y := byte((299*r + 587*g + 114*b) / 1000)
+		img.Pix[i], img.Pix[i+1], img.Pix[i+2] = y, y, y
+	}
 }
 
 func render(icon *oksvg.SvgIcon, size int) *image.RGBA {

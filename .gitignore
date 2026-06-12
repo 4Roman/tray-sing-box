@@ -40,8 +40,8 @@ cache.db
 # Build artifacts
 *.log
 
-# Generated icon (rendered from assets/icons/tray.svg by tools/genicons)
-/assets/icons/tray.ico
+# Generated icons (rendered from assets/icons/tray.svg by tools/genicons)
+/assets/icons/*.ico
 
 # Claude Code local state
 /.claude/

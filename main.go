@@ -97,15 +97,20 @@ func main() {
 }
 
 func onReady() {
-	// Must be a real .ico: on Windows systray loads icons via
+	// Must be real .ico files: on Windows systray loads icons via
 	// LoadImageW(IMAGE_ICON, LR_LOADFROMFILE), which rejects PNG/JPEG bytes.
 	trayIcon, err := loadIcon("tray.ico")
 	if err != nil {
 		log.Printf("Warning: failed to load tray icon: %v", err)
 		trayIcon = nil // tray is created without an icon
 	}
+	trayIconOff, err := loadIcon("tray-off.ico")
+	if err != nil {
+		log.Printf("Warning: failed to load stopped-state tray icon: %v", err)
+		trayIconOff = nil // status is still visible in the menu text
+	}
 
-	application.OnReady(trayIcon)
+	application.OnReady(trayIcon, trayIconOff)
 }
 
 func onExit() {
