@@ -57,6 +57,18 @@
   }
   #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
   #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+  .autorefresh {
+    display: flex; align-items: center; gap: 6px; margin-top: 10px;
+    font-size: 13px; color: #8b929e; cursor: pointer;
+  }
+  .loghead { font-size: 13px; color: #aeb4c0; margin: 14px 0 6px; }
+  .loghead .path { color: #8b929e; font-size: 12px; }
+  pre.logpre {
+    background: #14161b; color: #d6e2f0; border: 1px solid #2a2e37;
+    border-radius: 8px; padding: 10px; margin: 0;
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px;
+    line-height: 1.4; max-height: 320px; overflow: auto; white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -109,6 +121,15 @@
   <h2>Route (JSON)</h2>
   <textarea id="route" spellcheck="false"></textarea>
   <button onclick="saveSection('route', this)">Сохранить route</button>
+</section>
+
+<section>
+  <h2>Логи</h2>
+  <div class="row">
+    <button class="secondary" onclick="refreshLogs(this)">Обновить</button>
+    <label class="autorefresh"><input type="checkbox" id="logs-auto" onchange="toggleLogsAuto()"> автообновление (3 с)</label>
+  </div>
+  <div id="logs-box"></div>
 </section>
 
 <script>
@@ -289,7 +310,69 @@ function importFrom(source, btn) {
   });
 }
 
+const LOG_LABELS = { app: 'Приложение', singbox: 'sing-box' };
+let logsTimer = null;
+
+async function refreshLogs(btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const d = await api('/api/logs');
+    renderLogs(d.files || []);
+  } catch (e) {
+    show('err', 'Не удалось загрузить логи: ' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderLogs(files) {
+  const box = document.getElementById('logs-box');
+  // Rebuild in place, keeping scroll positions of the <pre> blocks
+  const scroll = {};
+  for (const pre of box.querySelectorAll('pre[data-id]')) {
+    scroll[pre.dataset.id] = {
+      top: pre.scrollTop,
+      atBottom: pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4,
+    };
+  }
+  box.innerHTML = '';
+  for (const f of files) {
+    const head = document.createElement('div');
+    head.className = 'loghead';
+    head.innerHTML = '<b></b> · <span class="path"></span>';
+    head.querySelector('b').textContent = LOG_LABELS[f.id] || f.id;
+    head.querySelector('.path').textContent = f.path;
+    const pre = document.createElement('pre');
+    pre.className = 'logpre';
+    pre.dataset.id = f.id;
+    pre.textContent = f.missing ? '(файл ещё не создан)' : (f.content || '(пусто)');
+    box.append(head, pre);
+    const s = scroll[f.id];
+    // First render and tail-following stick to the end; otherwise keep place
+    pre.scrollTop = (!s || s.atBottom) ? pre.scrollHeight : s.top;
+  }
+  if (!files.some(f => f.id === 'singbox')) {
+    const hint = document.createElement('div');
+    hint.className = 'vpn-state';
+    hint.style.marginTop = '10px';
+    hint.textContent = 'Лог sing-box не настроен: добавьте "output": "sing-box.log" в секцию log конфига, и он появится здесь.';
+    box.append(hint);
+  }
+}
+
+function toggleLogsAuto() {
+  const on = document.getElementById('logs-auto').checked;
+  if (on && !logsTimer) {
+    logsTimer = setInterval(() => refreshLogs(null), 3000);
+    refreshLogs(null);
+  } else if (!on && logsTimer) {
+    clearInterval(logsTimer);
+    logsTimer = null;
+  }
+}
+
 refresh();
+refreshLogs(null);
 </script>
 </body>
 </html>

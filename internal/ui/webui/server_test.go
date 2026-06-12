@@ -48,7 +48,7 @@ func newTestServer(t *testing.T, clip TextSource) (*Server, string) {
 	settings := domain.NewSettingsService(editor, vpn)
 	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
 
-	server := New(settings, importer, nil, nil, Sources{Clipboard: clip})
+	server := New(settings, importer, nil, nil, Sources{Clipboard: clip}, LogAccess{})
 	pageURL, err := server.start()
 	if err != nil {
 		t.Fatalf("start: %v", err)

@@ -30,6 +30,19 @@ type Sources struct {
 	ScreenQR  TextSource
 }
 
+// LogFile identifies one log file the UI can show
+type LogFile struct {
+	ID   string // "app" or "singbox"
+	Path string
+}
+
+// LogAccess lists the known log files and reads their tails
+// (implemented by infrastructure/logtail; either func may be nil)
+type LogAccess struct {
+	Files func() []LogFile
+	Tail  func(path string, maxBytes int64) (string, error)
+}
+
 // Server is the local settings web server
 type Server struct {
 	settings *domain.SettingsService
@@ -37,6 +50,7 @@ type Server struct {
 	updater  *domain.UpdateService
 	dpi      *domain.DPIBypassService
 	sources  Sources
+	logs     LogAccess
 
 	mu    sync.Mutex
 	opMu  sync.Mutex // serializes config/binary mutations
@@ -46,13 +60,14 @@ type Server struct {
 }
 
 // New creates the settings server (not yet listening)
-func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, sources Sources) *Server {
+func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, sources Sources, logs LogAccess) *Server {
 	return &Server{
 		settings: settings,
 		importer: importer,
 		updater:  updater,
 		dpi:      dpi,
 		sources:  sources,
+		logs:     logs,
 	}
 }
 
@@ -98,6 +113,7 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
+	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc("GET /api/dpi", s.auth(s.handleDPIStatus))
 	mux.HandleFunc("POST /api/dpi/chain", s.auth(s.handleDPIChain))
 	mux.HandleFunc("POST /api/dpi/direct", s.auth(s.handleDPIDirect))
@@ -232,6 +248,33 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		"updated":   result.Updated,
 		"restarted": result.Restarted,
 	})
+}
+
+// handleLogs returns the tails of the known log files. A file that cannot be
+// read is reported as missing rather than failing the whole response.
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	const maxTail = 64 * 1024
+
+	type logEntry struct {
+		ID      string `json:"id"`
+		Path    string `json:"path"`
+		Content string `json:"content"`
+		Missing bool   `json:"missing"`
+	}
+	entries := []logEntry{}
+	if s.logs.Files != nil && s.logs.Tail != nil {
+		for _, f := range s.logs.Files() {
+			e := logEntry{ID: f.ID, Path: f.Path}
+			content, err := s.logs.Tail(f.Path, maxTail)
+			if err != nil {
+				e.Missing = true
+			} else {
+				e.Content = content
+			}
+			entries = append(entries, e)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": entries})
 }
 
 func (s *Server) handleDPIStatus(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,7 @@ import (
 	"tray-sing-box/internal/infrastructure/configfile"
 	"tray-sing-box/internal/infrastructure/dpibypass"
 	"tray-sing-box/internal/infrastructure/logger"
+	"tray-sing-box/internal/infrastructure/logtail"
 	"tray-sing-box/internal/infrastructure/process"
 	"tray-sing-box/internal/infrastructure/qr"
 	"tray-sing-box/internal/infrastructure/sharelink"
@@ -84,9 +85,19 @@ func main() {
 
 	// Settings web UI (opened from the tray menu)
 	settingsService := domain.NewSettingsService(configEditor, vpnService)
+	logReader := logtail.New(exeDir)
 	settingsUI := webui.New(settingsService, importService, updateService, dpiService, webui.Sources{
 		Clipboard: clipboard.ReadText,
 		ScreenQR:  qr.ScanScreen,
+	}, webui.LogAccess{
+		Files: func() []webui.LogFile {
+			var files []webui.LogFile
+			for _, f := range logReader.Files() {
+				files = append(files, webui.LogFile{ID: f.ID, Path: f.Path})
+			}
+			return files
+		},
+		Tail: logtail.Tail,
 	})
 
 	// Create application
