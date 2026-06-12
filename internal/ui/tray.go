@@ -11,6 +11,8 @@ type TrayUI struct {
 	iconOn      []byte // tray.ico — VPN running
 	iconOff     []byte // tray-off.ico — VPN stopped (grayscale)
 	iconRunning bool   // which icon is currently shown
+	running     bool   // last shown VPN state
+	connBad     bool   // a connectivity verdict exists and it is negative
 
 	statusItem          *systray.MenuItem
 	toggleItem          *systray.MenuItem
@@ -125,8 +127,9 @@ func (t *TrayUI) listenEvents() {
 // icon (color = running, grayscale = stopped). The icon is only re-set when
 // the state actually changes — systray.SetIcon writes a temp file each call.
 func (t *TrayUI) UpdateStatus(status domain.VPNStatus) {
-	if status.IsRunning() {
-		t.statusItem.SetTitle(StatusRunning)
+	t.running = status.IsRunning()
+	if t.running {
+		t.renderRunningTitle()
 		t.toggleItem.SetTitle(ActionStop)
 		if !t.iconRunning && len(t.iconOn) > 0 {
 			systray.SetIcon(t.iconOn)
@@ -139,6 +142,26 @@ func (t *TrayUI) UpdateStatus(status domain.VPNStatus) {
 			systray.SetIcon(t.iconOff)
 			t.iconRunning = false
 		}
+	}
+}
+
+// UpdateConnectivity reflects the latest connectivity verdict in the status
+// text; bad = a verdict exists and traffic does not flow
+func (t *TrayUI) UpdateConnectivity(bad bool) {
+	if t.connBad == bad {
+		return
+	}
+	t.connBad = bad
+	if t.running {
+		t.renderRunningTitle()
+	}
+}
+
+func (t *TrayUI) renderRunningTitle() {
+	if t.connBad {
+		t.statusItem.SetTitle(StatusRunningNoNet)
+	} else {
+		t.statusItem.SetTitle(StatusRunning)
 	}
 }
 

@@ -34,7 +34,7 @@ func TestSubscriptionEndpoints(t *testing.T) {
 	store := subscription.NewStore(filepath.Join(dir, "subscriptions.json"))
 	subs := domain.NewSubscriptionService(store, fetch, sharelink.Parser{}, editor, vpn)
 
-	server := New(settings, importer, nil, nil, subs, Sources{}, LogAccess{})
+	server := New(settings, importer, nil, nil, subs, nil, Sources{}, LogAccess{})
 	pageURL, err := server.start()
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -122,7 +122,7 @@ func TestImportDetectsSubscriptionURL(t *testing.T) {
 	subs := domain.NewSubscriptionService(store, fetch, sharelink.Parser{}, editor, vpn)
 
 	clip := func() (string, error) { return "https://p.example/sub", nil }
-	server := New(settings, importer, nil, nil, subs, Sources{Clipboard: clip}, LogAccess{})
+	server := New(settings, importer, nil, nil, subs, nil, Sources{Clipboard: clip}, LogAccess{})
 	pageURL, err := server.start()
 	if err != nil {
 		t.Fatalf("start: %v", err)

@@ -853,6 +853,42 @@ func (e *Editor) OutboundType(tag string) (string, error) {
 	return "", fmt.Errorf("outbound %q not found", tag)
 }
 
+// LocalProxyURL returns a proxy URL for the first local inbound usable as an
+// HTTP client proxy (http/mixed preferred, socks as fallback), or "" when the
+// config has none (e.g. TUN-only). Used by the connectivity check to send a
+// probe through sing-box itself.
+func (e *Editor) LocalProxyURL() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, _, err := e.load()
+	if err != nil {
+		return "", err
+	}
+
+	socksURL := ""
+	inbounds, _ := cfg["inbounds"].([]any)
+	for _, item := range inbounds {
+		in, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		port, ok := in["listen_port"].(json.Number)
+		if !ok {
+			continue
+		}
+		switch in["type"] {
+		case "mixed", "http":
+			return "http://127.0.0.1:" + port.String(), nil
+		case "socks":
+			if socksURL == "" {
+				socksURL = "socks5://127.0.0.1:" + port.String()
+			}
+		}
+	}
+	return socksURL, nil
+}
+
 // hasOutbound reports whether an outbound with the given tag exists.
 func hasOutbound(outbounds []any, tag string) bool {
 	for _, item := range outbounds {

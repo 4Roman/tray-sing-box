@@ -50,6 +50,7 @@ type Server struct {
 	updater  *domain.UpdateService
 	dpi      *domain.DPIBypassService
 	subs     *domain.SubscriptionService
+	conn     *domain.ConnectivityService
 	sources  Sources
 	logs     LogAccess
 
@@ -61,13 +62,14 @@ type Server struct {
 }
 
 // New creates the settings server (not yet listening)
-func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, subs *domain.SubscriptionService, sources Sources, logs LogAccess) *Server {
+func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, subs *domain.SubscriptionService, conn *domain.ConnectivityService, sources Sources, logs LogAccess) *Server {
 	return &Server{
 		settings: settings,
 		importer: importer,
 		updater:  updater,
 		dpi:      dpi,
 		subs:     subs,
+		conn:     conn,
 		sources:  sources,
 		logs:     logs,
 	}
@@ -192,13 +194,17 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"outbounds": outbounds,
 		"route":     route,
 		"list":      list,
 		"active":    active,
 		"running":   s.settings.IsVPNRunning(),
-	})
+	}
+	if s.conn != nil {
+		resp["connectivity"] = s.conn.Status()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSaveSection(w http.ResponseWriter, r *http.Request) {

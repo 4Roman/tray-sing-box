@@ -16,6 +16,10 @@ const (
 	RestoreCheckDelay    = 3 // seconds to wait before verifying it survived
 	RestoreRetryDelay    = 2 // seconds between attempts
 
+	// Connectivity check (is traffic actually flowing while VPN is running)
+	ConnectivityCheckInterval = 30 // seconds between probes
+	ConnectivityStartupDelay  = 10 // seconds after start before the first probe
+
 	// Config history (every config.json save archives the previous version)
 	ConfigHistoryDir  = "config-history" // next to config.json
 	ConfigHistoryKeep = 20               // versions kept, oldest pruned

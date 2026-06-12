@@ -15,6 +15,7 @@ import (
 	"tray-sing-box/internal/infrastructure/autostart"
 	"tray-sing-box/internal/infrastructure/clipboard"
 	"tray-sing-box/internal/infrastructure/configfile"
+	"tray-sing-box/internal/infrastructure/connectivity"
 	"tray-sing-box/internal/infrastructure/dpibypass"
 	"tray-sing-box/internal/infrastructure/logger"
 	"tray-sing-box/internal/infrastructure/logtail"
@@ -77,6 +78,11 @@ func main() {
 	// sing-box binary updates from official GitHub releases
 	updateService := domain.NewUpdateService(updater.New(exeDir), vpnService)
 
+	// Connectivity verification: is traffic actually flowing through the VPN
+	connectivityService := domain.NewConnectivityService(func(proxyURL string) error {
+		return connectivity.Probe(proxyURL)
+	}, configEditor, vpnService)
+
 	// Proxy subscriptions: saved URLs refreshed on demand and on a timer
 	subscriptionStore := subscription.NewStore(filepath.Join(exeDir, config.SubscriptionsFileName))
 	subscriptionService := domain.NewSubscriptionService(subscriptionStore, subscription.Fetch, sharelink.Parser{}, configEditor, vpnService)
@@ -91,7 +97,7 @@ func main() {
 	// Settings web UI (opened from the tray menu)
 	settingsService := domain.NewSettingsService(configEditor, vpnService)
 	logReader := logtail.New(exeDir)
-	settingsUI := webui.New(settingsService, importService, updateService, dpiService, subscriptionService, webui.Sources{
+	settingsUI := webui.New(settingsService, importService, updateService, dpiService, subscriptionService, connectivityService, webui.Sources{
 		Clipboard: clipboard.ReadText,
 		ScreenQR:  qr.ScanScreen,
 	}, webui.LogAccess{
@@ -106,7 +112,7 @@ func main() {
 	})
 
 	// Create application
-	application = app.New(vpnService, importService, updateService, dpiService, subscriptionService, importSources, settingsUI, autostartManager)
+	application = app.New(vpnService, importService, updateService, dpiService, subscriptionService, connectivityService, importSources, settingsUI, autostartManager)
 
 	// Run system tray
 	systray.Run(onReady, onExit)

@@ -2,9 +2,10 @@ package ui
 
 // Menu strings in Russian
 const (
-	StatusStopped = "Остановлен"
-	StatusRunning = "Запущен"
-	StatusTooltip = "Текущий статус VPN"
+	StatusStopped      = "Остановлен"
+	StatusRunning      = "Запущен"
+	StatusRunningNoNet = "Запущен (нет связи)"
+	StatusTooltip      = "Текущий статус VPN"
 
 	ActionStart   = "Включить"
 	ActionStop    = "Выключить"

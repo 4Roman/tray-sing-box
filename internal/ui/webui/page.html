@@ -233,8 +233,9 @@ async function refresh() {
     document.getElementById('outbounds').value = d.outbounds;
     document.getElementById('route').value = d.route;
     const vpn = document.getElementById('vpn');
-    vpn.textContent = d.running ? 'запущен' : 'остановлен';
-    vpn.className = d.running ? 'on' : 'off';
+    const noNet = d.running && d.connectivity && d.connectivity.checked && !d.connectivity.ok;
+    vpn.textContent = d.running ? (noNet ? 'запущен (нет связи)' : 'запущен') : 'остановлен';
+    vpn.className = (d.running && !noNet) ? 'on' : 'off';
     renderOutbounds(d.list, d.active);
   } catch (e) {
     show('err', 'Не удалось загрузить конфигурацию: ' + e.message);

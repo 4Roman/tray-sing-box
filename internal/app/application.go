@@ -42,6 +42,7 @@ type Application struct {
 	updateService       *domain.UpdateService
 	dpiService          *domain.DPIBypassService
 	subscriptionService *domain.SubscriptionService
+	connectivity        *domain.ConnectivityService
 	importSources       ImportSources
 	settingsUI          SettingsOpener
 	autostartManager    AutostartManager
@@ -53,13 +54,14 @@ type Application struct {
 }
 
 // New creates a new application instance
-func New(vpnService *domain.VPNService, importService *domain.ImportService, updateService *domain.UpdateService, dpiService *domain.DPIBypassService, subscriptionService *domain.SubscriptionService, importSources ImportSources, settingsUI SettingsOpener, autostartManager AutostartManager) *Application {
+func New(vpnService *domain.VPNService, importService *domain.ImportService, updateService *domain.UpdateService, dpiService *domain.DPIBypassService, subscriptionService *domain.SubscriptionService, connectivity *domain.ConnectivityService, importSources ImportSources, settingsUI SettingsOpener, autostartManager AutostartManager) *Application {
 	return &Application{
 		vpnService:          vpnService,
 		importService:       importService,
 		updateService:       updateService,
 		dpiService:          dpiService,
 		subscriptionService: subscriptionService,
+		connectivity:        connectivity,
 		importSources:       importSources,
 		settingsUI:          settingsUI,
 		autostartManager:    autostartManager,
@@ -117,6 +119,11 @@ func (a *Application) OnReady(trayIcon, trayIconOff []byte) {
 		go a.subscriptionLoop()
 	}
 
+	// Periodic connectivity verification while the VPN runs
+	if a.connectivity != nil {
+		go a.connectivityLoop()
+	}
+
 	// Start event loop
 	go a.eventLoop()
 }
@@ -157,6 +164,17 @@ func (a *Application) autoRefreshSubscriptions() {
 	}
 	if a.trayUI != nil {
 		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+	}
+}
+
+// connectivityLoop periodically verifies traffic flows while the VPN runs
+// and reflects the verdict in the tray status text
+func (a *Application) connectivityLoop() {
+	time.Sleep(config.ConnectivityStartupDelay * time.Second)
+	for {
+		status := a.connectivity.Check()
+		a.trayUI.UpdateConnectivity(status.Checked && !status.OK)
+		time.Sleep(config.ConnectivityCheckInterval * time.Second)
 	}
 }
 

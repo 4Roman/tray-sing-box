@@ -35,7 +35,7 @@ func TestLogsEndpoint(t *testing.T) {
 	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
 
 	reader := logtail.New(dir)
-	server := New(settings, importer, nil, nil, nil, Sources{}, LogAccess{
+	server := New(settings, importer, nil, nil, nil, nil, Sources{}, LogAccess{
 		Files: func() []LogFile {
 			var files []LogFile
 			for _, f := range reader.Files() {
