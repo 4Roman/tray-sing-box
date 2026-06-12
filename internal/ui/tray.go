@@ -16,6 +16,7 @@ type TrayUI struct {
 	toggleItem          *systray.MenuItem
 	importClipboardItem *systray.MenuItem
 	importQRItem        *systray.MenuItem
+	subsUpdateItem      *systray.MenuItem
 	settingsItem        *systray.MenuItem
 	updateItem          *systray.MenuItem
 	dpiItem             *systray.MenuItem
@@ -26,6 +27,7 @@ type TrayUI struct {
 	ToggleCh          chan bool
 	ImportClipboardCh chan bool
 	ImportQRCh        chan bool
+	SubsUpdateCh      chan bool
 	SettingsCh        chan bool
 	UpdateCh          chan bool
 	DPICh             chan bool
@@ -43,6 +45,7 @@ func New(iconOn, iconOff []byte) *TrayUI {
 		ToggleCh:          make(chan bool),
 		ImportClipboardCh: make(chan bool),
 		ImportQRCh:        make(chan bool),
+		SubsUpdateCh:      make(chan bool),
 		SettingsCh:        make(chan bool),
 		UpdateCh:          make(chan bool),
 		DPICh:             make(chan bool),
@@ -72,6 +75,7 @@ func New(iconOn, iconOff []byte) *TrayUI {
 
 	ui.importClipboardItem = systray.AddMenuItem(ImportClipboardTitle, ImportClipboardTooltip)
 	ui.importQRItem = systray.AddMenuItem(ImportQRTitle, ImportQRTooltip)
+	ui.subsUpdateItem = systray.AddMenuItem(SubsUpdateTitle, SubsUpdateTooltip)
 	ui.settingsItem = systray.AddMenuItem(SettingsTitle, SettingsTooltip)
 	ui.updateItem = systray.AddMenuItem(UpdateTitle, UpdateTooltip)
 
@@ -100,6 +104,8 @@ func (t *TrayUI) listenEvents() {
 			t.ImportClipboardCh <- true
 		case <-t.importQRItem.ClickedCh:
 			t.ImportQRCh <- true
+		case <-t.subsUpdateItem.ClickedCh:
+			t.SubsUpdateCh <- true
 		case <-t.settingsItem.ClickedCh:
 			t.SettingsCh <- true
 		case <-t.updateItem.ClickedCh:

@@ -19,8 +19,8 @@ func (f *fakeDPIManager) State() (ContainerState, error) {
 	}
 	return f.state, nil
 }
-func (f *fakeDPIManager) Start() error          { f.started = true; f.state = ContainerRunning; return nil }
-func (f *fakeDPIManager) Stop() error           { f.stopped = true; f.state = ContainerStopped; return nil }
+func (f *fakeDPIManager) Start() error             { f.started = true; f.state = ContainerRunning; return nil }
+func (f *fakeDPIManager) Stop() error              { f.stopped = true; f.state = ContainerStopped; return nil }
 func (f *fakeDPIManager) ProxyAddr() (string, int) { return "127.0.0.1", 3128 }
 
 type fakeBypassStore struct {

@@ -16,6 +16,11 @@ const (
 	RestoreCheckDelay    = 3 // seconds to wait before verifying it survived
 	RestoreRetryDelay    = 2 // seconds between attempts
 
+	// Subscriptions
+	SubscriptionsFileName    = "subscriptions.json" // next to the exe
+	SubscriptionRefreshHours = 6                    // periodic auto-refresh interval
+	SubscriptionStartupDelay = 60                   // seconds after start before the first auto-refresh
+
 	// DPI bypass (zapret running in a Docker container)
 	DPIImage         = "8hrsk/zapret-docker-proxy:latest"
 	DPIContainerName = "singbox-dpi"

@@ -5,9 +5,11 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/getlantern/systray"
 
+	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
 	"tray-sing-box/internal/ui"
 )
@@ -35,14 +37,15 @@ type SettingsOpener interface {
 
 // Application coordinates all components
 type Application struct {
-	vpnService       *domain.VPNService
-	importService    *domain.ImportService
-	updateService    *domain.UpdateService
-	dpiService       *domain.DPIBypassService
-	importSources    ImportSources
-	settingsUI       SettingsOpener
-	autostartManager AutostartManager
-	trayUI           *ui.TrayUI
+	vpnService          *domain.VPNService
+	importService       *domain.ImportService
+	updateService       *domain.UpdateService
+	dpiService          *domain.DPIBypassService
+	subscriptionService *domain.SubscriptionService
+	importSources       ImportSources
+	settingsUI          SettingsOpener
+	autostartManager    AutostartManager
+	trayUI              *ui.TrayUI
 
 	// opMu serializes long-running operations (import, binary update) so
 	// they cannot interleave config and binary modifications
@@ -50,15 +53,16 @@ type Application struct {
 }
 
 // New creates a new application instance
-func New(vpnService *domain.VPNService, importService *domain.ImportService, updateService *domain.UpdateService, dpiService *domain.DPIBypassService, importSources ImportSources, settingsUI SettingsOpener, autostartManager AutostartManager) *Application {
+func New(vpnService *domain.VPNService, importService *domain.ImportService, updateService *domain.UpdateService, dpiService *domain.DPIBypassService, subscriptionService *domain.SubscriptionService, importSources ImportSources, settingsUI SettingsOpener, autostartManager AutostartManager) *Application {
 	return &Application{
-		vpnService:       vpnService,
-		importService:    importService,
-		updateService:    updateService,
-		dpiService:       dpiService,
-		importSources:    importSources,
-		settingsUI:       settingsUI,
-		autostartManager: autostartManager,
+		vpnService:          vpnService,
+		importService:       importService,
+		updateService:       updateService,
+		dpiService:          dpiService,
+		subscriptionService: subscriptionService,
+		importSources:       importSources,
+		settingsUI:          settingsUI,
+		autostartManager:    autostartManager,
 	}
 }
 
@@ -102,8 +106,52 @@ func (a *Application) OnReady(trayIcon, trayIconOff []byte) {
 	// Start monitoring
 	a.vpnService.StartMonitoring()
 
+	// Periodic subscription auto-refresh
+	if a.subscriptionService != nil {
+		go a.subscriptionLoop()
+	}
+
 	// Start event loop
 	go a.eventLoop()
+}
+
+// subscriptionLoop refreshes the saved subscriptions shortly after start and
+// then on a fixed interval. Results are only logged: an unattended refresh
+// must not pop dialogs, and failures will repeat on the next tick anyway.
+func (a *Application) subscriptionLoop() {
+	time.Sleep(config.SubscriptionStartupDelay * time.Second)
+	for {
+		a.autoRefreshSubscriptions()
+		time.Sleep(config.SubscriptionRefreshHours * time.Hour)
+	}
+}
+
+func (a *Application) autoRefreshSubscriptions() {
+	subs, err := a.subscriptionService.List()
+	if err != nil {
+		log.Printf("Subscription auto-refresh: failed to list: %v", err)
+		return
+	}
+	if len(subs) == 0 {
+		return
+	}
+
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+
+	result, err := a.subscriptionService.UpdateAll()
+	if err != nil {
+		log.Printf("Subscription auto-refresh failed: %v", err)
+		return
+	}
+	for _, u := range result.Updates {
+		if u.Err != nil {
+			log.Printf("Subscription auto-refresh: %s: %v", u.URL, u.Err)
+		}
+	}
+	if a.trayUI != nil {
+		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+	}
 }
 
 // OnExit is called when the application is about to exit
@@ -125,6 +173,8 @@ func (a *Application) eventLoop() {
 			go a.handleImport(a.importSources.Clipboard)
 		case <-a.trayUI.ImportQRCh:
 			go a.handleImport(a.importSources.ScreenQR)
+		case <-a.trayUI.SubsUpdateCh:
+			go a.handleUpdateSubscriptions()
 		case <-a.trayUI.SettingsCh:
 			go a.handleOpenSettings()
 		case <-a.trayUI.UpdateCh:
@@ -185,6 +235,20 @@ func (a *Application) handleImport(source TextSource) {
 		return
 	}
 
+	// A bare http(s) URL is a subscription, not a share link: register it so
+	// it can be refreshed later instead of importing its nodes one-off
+	if a.subscriptionService != nil && domain.IsSubscriptionURL(text) {
+		result, err := a.subscriptionService.Add(text)
+		if err != nil {
+			log.Printf("Subscription add failed: %v", err)
+			ui.ShowError(ui.SubsErrorTitle, err.Error())
+			return
+		}
+		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+		ui.ShowInfo(ui.SubsAddedTitle, subscriptionMessage(result))
+		return
+	}
+
 	result, err := a.importService.ImportFromText(text)
 	if err != nil {
 		log.Printf("Import failed: %v", err)
@@ -210,6 +274,58 @@ func importMessage(result *domain.ImportResult) string {
 		return fmt.Sprintf(ui.ImportManyRestarted, len(result.Tags), list)
 	}
 	return fmt.Sprintf(ui.ImportManyAdded, len(result.Tags), list)
+}
+
+// handleUpdateSubscriptions refreshes all saved subscriptions on demand.
+// Runs outside the event loop: downloads take a while and the message box
+// blocks until dismissed.
+func (a *Application) handleUpdateSubscriptions() {
+	if a.subscriptionService == nil {
+		return
+	}
+
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+
+	subs, err := a.subscriptionService.List()
+	if err == nil && len(subs) == 0 {
+		ui.ShowInfo(ui.SubsUpdateDoneTitle, ui.SubsNoneMsg)
+		return
+	}
+
+	result, err := a.subscriptionService.UpdateAll()
+	if err != nil {
+		log.Printf("Subscription update failed: %v", err)
+		ui.ShowError(ui.SubsErrorTitle, err.Error())
+		return
+	}
+
+	a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+	ui.ShowInfo(ui.SubsUpdateDoneTitle, subscriptionMessage(result))
+}
+
+// subscriptionMessage formats the popup text for finished subscription work
+func subscriptionMessage(result *domain.SubscriptionResult) string {
+	var lines []string
+	for _, u := range result.Updates {
+		if u.Err != nil {
+			lines = append(lines, fmt.Sprintf(ui.SubsLineError, u.URL, u.Err))
+			continue
+		}
+		line := fmt.Sprintf(ui.SubsLineOK, u.URL, len(u.Tags))
+		if len(u.Added) > 0 {
+			line += fmt.Sprintf(ui.SubsLineAdded, len(u.Added))
+		}
+		if len(u.Removed) > 0 {
+			line += fmt.Sprintf(ui.SubsLineRemoved, len(u.Removed))
+		}
+		lines = append(lines, line)
+	}
+	message := strings.Join(lines, "\n")
+	if result.Restarted {
+		message += ui.SubsRestartedSuffix
+	}
+	return message
 }
 
 // handleUpdate downloads and installs the latest sing-box release.

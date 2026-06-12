@@ -57,6 +57,24 @@
   }
   #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
   #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+  input[type=text] {
+    flex: 1; min-width: 240px; margin-top: 10px;
+    background: #14161b; color: #d6e2f0; border: 1px solid #2a2e37;
+    border-radius: 8px; padding: 8px 10px; font-size: 14px;
+  }
+  input[type=text]:focus { outline: 1px solid #3b82f6; }
+  .sub {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 10px; border-radius: 8px;
+  }
+  .sub:hover { background: #262a33; }
+  .sub .url {
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  .sub .meta { font-size: 12px; color: #8b929e; }
+  .sub button { margin-top: 0; padding: 4px 10px; font-size: 12px; }
+  .sub .spacer { margin-left: auto; }
   .autorefresh {
     display: flex; align-items: center; gap: 6px; margin-top: 10px;
     font-size: 13px; color: #8b929e; cursor: pointer;
@@ -87,6 +105,19 @@
   <div class="row">
     <button class="secondary" onclick="importFrom('clipboard', this)">Из буфера обмена</button>
     <button class="secondary" onclick="importFrom('qr', this)">QR с экрана</button>
+  </div>
+</section>
+
+<section>
+  <h2>Подписки</h2>
+  <div id="subs-list"></div>
+  <div class="row">
+    <input id="sub-url" type="text" placeholder="https://… (URL подписки)">
+    <button class="secondary" onclick="addSubscription(this)">Добавить</button>
+    <button class="secondary" onclick="updateSubscription('', this)">Обновить все</button>
+  </div>
+  <div class="vpn-state" style="margin-top:10px">
+    Серверы подписки добавляются в конфиг и обновляются автоматически каждые 6 часов (и при запуске приложения). Подписку также можно добавить, скопировав её URL и нажав «Импорт из буфера обмена».
   </div>
 </section>
 
@@ -305,8 +336,95 @@ function importFrom(source, btn) {
       show('ok', 'Ищу QR-код на экране…');
     }
     const d = await api('/api/import', { source });
+    if (d.subscription) {
+      show('ok', subsSummary('Подписка добавлена', d));
+      await refresh();
+      await refreshSubs();
+      return;
+    }
     show('ok', 'Импортировано: ' + d.tags.join(', ') + restartedSuffix(d));
     await refresh();
+  });
+}
+
+function subsSummary(prefix, d) {
+  const lines = (d.updates || []).map(u => u.error
+    ? u.url + ' — ошибка: ' + u.error
+    : u.url + ' — серверов: ' + u.count +
+      (u.added ? ', новых: ' + u.added : '') +
+      (u.removed ? ', удалено: ' + u.removed : ''));
+  return prefix + restartedSuffix(d) + '\n' + lines.join('\n');
+}
+
+async function refreshSubs() {
+  try {
+    const d = await api('/api/subscriptions');
+    renderSubs(d.subscriptions || []);
+  } catch (e) {
+    show('err', 'Не удалось загрузить подписки: ' + e.message);
+  }
+}
+
+function renderSubs(subs) {
+  const box = document.getElementById('subs-list');
+  box.innerHTML = '';
+  for (const sub of subs) {
+    const row = document.createElement('div');
+    row.className = 'sub';
+    const url = document.createElement('span');
+    url.className = 'url';
+    url.textContent = sub.url;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    meta.textContent = 'серверов: ' + sub.count +
+      (sub.updated ? ' · обновлена ' + new Date(sub.updated).toLocaleString() : '');
+    const spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    const upd = document.createElement('button');
+    upd.className = 'secondary';
+    upd.textContent = 'Обновить';
+    upd.onclick = () => updateSubscription(sub.url, upd);
+    const del = document.createElement('button');
+    del.className = 'secondary';
+    del.textContent = 'Удалить';
+    del.onclick = () => removeSubscription(sub.url, del);
+    row.append(url, meta, spacer, upd, del);
+    box.append(row);
+  }
+  if (!subs.length) box.textContent = 'Нет сохранённых подписок';
+}
+
+function addSubscription(btn) {
+  const input = document.getElementById('sub-url');
+  const url = input.value.trim();
+  if (!url) { show('err', 'Введите URL подписки'); return; }
+  run(btn, async () => {
+    show('ok', 'Скачиваю подписку…');
+    const d = await api('/api/subscriptions/add', { url });
+    input.value = '';
+    show('ok', subsSummary('Подписка добавлена', d));
+    await refresh();
+    await refreshSubs();
+  });
+}
+
+function updateSubscription(url, btn) {
+  run(btn, async () => {
+    show('ok', 'Обновляю подписки…');
+    const d = await api('/api/subscriptions/update', { url });
+    show('ok', subsSummary('Подписки обновлены', d));
+    await refresh();
+    await refreshSubs();
+  });
+}
+
+function removeSubscription(url, btn) {
+  if (!confirm('Удалить подписку и все её серверы из конфига?\n' + url)) return;
+  run(btn, async () => {
+    const d = await api('/api/subscriptions/remove', { url });
+    show('ok', subsSummary('Подписка удалена', d));
+    await refresh();
+    await refreshSubs();
   });
 }
 
@@ -372,6 +490,7 @@ function toggleLogsAuto() {
 }
 
 refresh();
+refreshSubs();
 refreshLogs(null);
 </script>
 </body>

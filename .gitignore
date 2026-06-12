@@ -36,6 +36,7 @@ sing-box.exe.old
 config.json
 config.json.bak
 cache.db
+subscriptions.json
 
 # Build artifacts
 *.log

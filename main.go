@@ -23,6 +23,7 @@ import (
 	"tray-sing-box/internal/infrastructure/sharelink"
 	"tray-sing-box/internal/infrastructure/singboxcheck"
 	"tray-sing-box/internal/infrastructure/storage"
+	"tray-sing-box/internal/infrastructure/subscription"
 	"tray-sing-box/internal/infrastructure/updater"
 	"tray-sing-box/internal/ui/webui"
 )
@@ -76,6 +77,10 @@ func main() {
 	// sing-box binary updates from official GitHub releases
 	updateService := domain.NewUpdateService(updater.New(exeDir), vpnService)
 
+	// Proxy subscriptions: saved URLs refreshed on demand and on a timer
+	subscriptionStore := subscription.NewStore(filepath.Join(exeDir, config.SubscriptionsFileName))
+	subscriptionService := domain.NewSubscriptionService(subscriptionStore, subscription.Fetch, sharelink.Parser{}, configEditor, vpnService)
+
 	// DPI bypass: zapret running in a Docker container, chained into the config
 	dpiManager := dpibypass.New()
 	if params, err := os.ReadFile(filepath.Join(exeDir, "dpi-params.txt")); err == nil {
@@ -86,7 +91,7 @@ func main() {
 	// Settings web UI (opened from the tray menu)
 	settingsService := domain.NewSettingsService(configEditor, vpnService)
 	logReader := logtail.New(exeDir)
-	settingsUI := webui.New(settingsService, importService, updateService, dpiService, webui.Sources{
+	settingsUI := webui.New(settingsService, importService, updateService, dpiService, subscriptionService, webui.Sources{
 		Clipboard: clipboard.ReadText,
 		ScreenQR:  qr.ScanScreen,
 	}, webui.LogAccess{
@@ -101,7 +106,7 @@ func main() {
 	})
 
 	// Create application
-	application = app.New(vpnService, importService, updateService, dpiService, importSources, settingsUI, autostartManager)
+	application = app.New(vpnService, importService, updateService, dpiService, subscriptionService, importSources, settingsUI, autostartManager)
 
 	// Run system tray
 	systray.Run(onReady, onExit)

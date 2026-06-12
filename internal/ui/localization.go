@@ -30,6 +30,18 @@ const (
 	ImportQRTitle          = "Импорт QR с экрана"
 	ImportQRTooltip        = "Найти QR-код на экране и импортировать сервер"
 
+	SubsUpdateTitle     = "Обновить подписки"
+	SubsUpdateTooltip   = "Скачать заново все сохранённые подписки"
+	SubsUpdateDoneTitle = "Обновление подписок"
+	SubsAddedTitle      = "Подписка добавлена"
+	SubsErrorTitle      = "Ошибка подписки"
+	SubsNoneMsg         = "Нет сохранённых подписок.\n\nЧтобы добавить подписку, скопируйте её URL и выберите «Импорт из буфера обмена», либо откройте «Настройки»."
+	SubsLineOK          = "%s — серверов: %d"
+	SubsLineAdded       = ", новых: %d"
+	SubsLineRemoved     = ", удалено: %d"
+	SubsLineError       = "%s — ошибка: %v"
+	SubsRestartedSuffix = "\n\nVPN перезапущен"
+
 	DPITitle           = "Обход DPI (zapret)"
 	DPITooltip         = "Подключаться к VPN-серверу через zapret в Docker для обхода DPI"
 	DPIDoneTitle       = "Обход DPI"

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 
 	"tray-sing-box/internal/domain"
@@ -106,7 +107,15 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any) error {
 	if err != nil {
 		return err
 	}
+	if err := upsertOutbounds(cfg, newOutbounds); err != nil {
+		return err
+	}
+	return e.save(cfg, raw)
+}
 
+// upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
+// replace by tag or append, then register each tag in selector/urltest groups.
+func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
 	outbounds, _ := cfg["outbounds"].([]any)
 
 	for _, outbound := range newOutbounds {
@@ -155,7 +164,177 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any) error {
 	}
 
 	cfg["outbounds"] = outbounds
-	return e.save(cfg, raw)
+	return nil
+}
+
+// SyncOutbounds reconciles the set of outbounds owned by one subscription:
+// outbounds from ownedTags that are absent from newOutbounds are deleted
+// (including their selector/urltest registrations, detour references and
+// route references — the latter are repointed to a surviving outbound), the
+// rest of newOutbounds are added or replaced as in AddOutbounds. The file is
+// only rewritten when the config actually changed.
+func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any) (*domain.SyncResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	cfg, raw, err := e.load()
+	if err != nil {
+		return nil, err
+	}
+	before, err := marshalIndent(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize config: %w", err)
+	}
+
+	newTags := map[string]bool{}
+	for _, o := range newOutbounds {
+		tag, _ := o["tag"].(string)
+		if tag == "" {
+			return nil, fmt.Errorf("outbound has no tag")
+		}
+		newTags[tag] = true
+	}
+	owned := map[string]bool{}
+	for _, t := range ownedTags {
+		owned[t] = true
+	}
+
+	// Tags that existed before the sync, to report what was actually added
+	outbounds, _ := cfg["outbounds"].([]any)
+	presentBefore := map[string]bool{}
+	for _, item := range outbounds {
+		if o, ok := item.(map[string]any); ok {
+			if tag, _ := o["tag"].(string); tag != "" {
+				presentBefore[tag] = true
+			}
+		}
+	}
+
+	// Drop owned outbounds that disappeared from the subscription
+	removedSet := map[string]bool{}
+	kept := make([]any, 0, len(outbounds))
+	for _, item := range outbounds {
+		if o, ok := item.(map[string]any); ok {
+			tag, _ := o["tag"].(string)
+			if owned[tag] && !newTags[tag] {
+				removedSet[tag] = true
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	cfg["outbounds"] = kept
+
+	if err := upsertOutbounds(cfg, newOutbounds); err != nil {
+		return nil, err
+	}
+
+	if len(removedSet) > 0 {
+		pruneOutboundReferences(cfg, removedSet, newOutbounds)
+	}
+
+	result := &domain.SyncResult{}
+	for _, o := range newOutbounds {
+		if tag, _ := o["tag"].(string); !presentBefore[tag] {
+			result.Added = append(result.Added, tag)
+		}
+	}
+	for tag := range removedSet {
+		result.Removed = append(result.Removed, tag)
+	}
+	sort.Strings(result.Removed)
+
+	after, err := marshalIndent(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize config: %w", err)
+	}
+	if bytes.Equal(before, after) {
+		return result, nil
+	}
+	result.Changed = true
+	return result, e.save(cfg, raw)
+}
+
+// pruneOutboundReferences removes every reference to the removed tags:
+// selector/urltest membership, detour fields, and route rules/final (those
+// are repointed to the first new outbound, else any surviving proxy, else a
+// direct outbound; a rule with no usable replacement is dropped).
+func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOutbounds []map[string]any) {
+	outbounds, _ := cfg["outbounds"].([]any)
+
+	for _, item := range outbounds {
+		o, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if groupTypes[fmt.Sprint(o["type"])] {
+			members, _ := o["outbounds"].([]any)
+			filtered := make([]any, 0, len(members))
+			for _, m := range members {
+				if tag, _ := m.(string); !removed[tag] {
+					filtered = append(filtered, m)
+				}
+			}
+			o["outbounds"] = filtered
+		}
+		if detour, _ := o["detour"].(string); removed[detour] {
+			delete(o, "detour")
+		}
+	}
+
+	// Pick the replacement for route references that pointed at removed tags
+	replacement := ""
+	if len(newOutbounds) > 0 {
+		replacement, _ = newOutbounds[0]["tag"].(string)
+	}
+	if replacement == "" {
+		proxies := proxyTags(cfg)
+		for _, item := range outbounds {
+			if o, ok := item.(map[string]any); ok {
+				if tag, _ := o["tag"].(string); proxies[tag] {
+					replacement = tag
+					break
+				}
+			}
+		}
+	}
+	if replacement == "" {
+		for _, item := range outbounds {
+			if o, ok := item.(map[string]any); ok && o["type"] == "direct" {
+				replacement, _ = o["tag"].(string)
+				break
+			}
+		}
+	}
+
+	route, _ := cfg["route"].(map[string]any)
+	if route == nil {
+		return
+	}
+	rules, _ := route["rules"].([]any)
+	keptRules := make([]any, 0, len(rules))
+	for _, item := range rules {
+		rule, ok := item.(map[string]any)
+		if ok {
+			if out, _ := rule["outbound"].(string); removed[out] {
+				if replacement == "" {
+					continue // no outbound left to point at — drop the rule
+				}
+				rule["outbound"] = replacement
+			}
+		}
+		keptRules = append(keptRules, item)
+	}
+	if rules != nil {
+		route["rules"] = keptRules
+	}
+	if final, _ := route["final"].(string); removed[final] {
+		if replacement == "" {
+			delete(route, "final")
+		} else {
+			route["final"] = replacement
+		}
+	}
 }
 
 // ReadSection returns a config section as pretty-printed JSON text

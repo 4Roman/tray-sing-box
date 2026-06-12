@@ -37,7 +37,7 @@ func newDPITestServer(t *testing.T) (*Server, string) {
 	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
 	dpi := domain.NewDPIBypassService(&stubDPIManager{}, editor, vpn)
 
-	server := New(settings, importer, nil, dpi, Sources{}, LogAccess{})
+	server := New(settings, importer, nil, dpi, nil, Sources{}, LogAccess{})
 	pageURL, err := server.start()
 	if err != nil {
 		t.Fatalf("start: %v", err)

@@ -49,6 +49,7 @@ type Server struct {
 	importer *domain.ImportService
 	updater  *domain.UpdateService
 	dpi      *domain.DPIBypassService
+	subs     *domain.SubscriptionService
 	sources  Sources
 	logs     LogAccess
 
@@ -60,12 +61,13 @@ type Server struct {
 }
 
 // New creates the settings server (not yet listening)
-func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, sources Sources, logs LogAccess) *Server {
+func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, subs *domain.SubscriptionService, sources Sources, logs LogAccess) *Server {
 	return &Server{
 		settings: settings,
 		importer: importer,
 		updater:  updater,
 		dpi:      dpi,
+		subs:     subs,
 		sources:  sources,
 		logs:     logs,
 	}
@@ -114,6 +116,10 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
+	mux.HandleFunc("GET /api/subscriptions", s.auth(s.handleSubscriptions))
+	mux.HandleFunc("POST /api/subscriptions/add", s.auth(s.handleSubscriptionAdd))
+	mux.HandleFunc("POST /api/subscriptions/update", s.auth(s.handleSubscriptionUpdate))
+	mux.HandleFunc("POST /api/subscriptions/remove", s.auth(s.handleSubscriptionRemove))
 	mux.HandleFunc("GET /api/dpi", s.auth(s.handleDPIStatus))
 	mux.HandleFunc("POST /api/dpi/chain", s.auth(s.handleDPIChain))
 	mux.HandleFunc("POST /api/dpi/direct", s.auth(s.handleDPIDirect))
@@ -350,6 +356,127 @@ func (s *Server) handleDPIDirect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
+// subscriptionResponse converts a domain result into the JSON shape the page
+// renders (errors become strings)
+func subscriptionResponse(result *domain.SubscriptionResult) map[string]any {
+	updates := make([]map[string]any, 0, len(result.Updates))
+	for _, u := range result.Updates {
+		entry := map[string]any{
+			"url":     u.URL,
+			"count":   len(u.Tags),
+			"added":   len(u.Added),
+			"removed": len(u.Removed),
+		}
+		if u.Err != nil {
+			entry["error"] = u.Err.Error()
+		}
+		updates = append(updates, entry)
+	}
+	return map[string]any{"updates": updates, "restarted": result.Restarted}
+}
+
+func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
+	if s.subs == nil {
+		fail(w, fmt.Errorf("подписки недоступны"))
+		return
+	}
+	subs, err := s.subs.List()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	list := make([]map[string]any, 0, len(subs))
+	for _, sub := range subs {
+		entry := map[string]any{"url": sub.URL, "count": len(sub.Tags)}
+		if !sub.Updated.IsZero() {
+			entry["updated"] = sub.Updated
+		}
+		list = append(list, entry)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": list})
+}
+
+func (s *Server) handleSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
+	if s.subs == nil {
+		fail(w, fmt.Errorf("подписки недоступны"))
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	result, err := s.subs.Add(req.URL)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+}
+
+// handleSubscriptionUpdate refreshes one subscription (url set) or all
+func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.subs == nil {
+		fail(w, fmt.Errorf("подписки недоступны"))
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	var (
+		result *domain.SubscriptionResult
+		err    error
+	)
+	if req.URL == "" {
+		result, err = s.subs.UpdateAll()
+	} else {
+		result, err = s.subs.Update(req.URL)
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+}
+
+func (s *Server) handleSubscriptionRemove(w http.ResponseWriter, r *http.Request) {
+	if s.subs == nil {
+		fail(w, fmt.Errorf("подписки недоступны"))
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	result, err := s.subs.Remove(req.URL)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+}
+
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Source string `json:"source"`
@@ -377,6 +504,20 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	text, err := source()
 	if err != nil {
 		fail(w, err)
+		return
+	}
+
+	// A bare http(s) URL is a subscription: register it instead of a one-off
+	// import (same behavior as the tray import items)
+	if s.subs != nil && domain.IsSubscriptionURL(text) {
+		result, err := s.subs.Add(text)
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		resp := subscriptionResponse(result)
+		resp["subscription"] = true
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
