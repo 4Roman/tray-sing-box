@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"tray-sing-box/internal/config"
@@ -26,6 +27,15 @@ type VPNService struct {
 	processManager ProcessManager
 	storage        Storage
 	statusChangeCh chan VPNStatus
+
+	// OnAutoRestartFailed, when set before StartMonitoring, is called once
+	// per crash loop after the monitor gives up auto-restarting sing-box
+	OnAutoRestartFailed func(err error)
+
+	restartMu    sync.Mutex
+	autoRestarts int       // consecutive crash auto-restart attempts
+	gaveUp       bool      // already reported the exhausted crash loop
+	runningSince time.Time // observed running continuously since
 }
 
 // NewVPNService creates a new VPN service instance
@@ -143,6 +153,7 @@ func (s *VPNService) StartMonitoring() {
 	go func() {
 		defer ticker.Stop()
 		lastStatus := s.GetStatus()
+		s.markRunning(lastStatus.IsRunning())
 
 		for range ticker.C {
 			currentStatus := s.GetStatus()
@@ -156,9 +167,86 @@ func (s *VPNService) StartMonitoring() {
 				// the system kills sing-box before this app exits — saving the
 				// observed "stopped" here would erase the intent and break
 				// auto-start restore on next boot.
+
+				s.markRunning(currentStatus.IsRunning())
+				if !currentStatus.IsRunning() {
+					s.autoRestartIfCrashed()
+				}
+			} else if currentStatus.IsRunning() {
+				s.maybeResetAutoRestarts()
 			}
 		}
 	}()
+}
+
+// markRunning records when the process was last observed transitioning into
+// the running state (zero time when stopped)
+func (s *VPNService) markRunning(running bool) {
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+	if running {
+		s.runningSince = time.Now()
+	} else {
+		s.runningSince = time.Time{}
+	}
+}
+
+// maybeResetAutoRestarts clears the crash counter after the process has
+// stayed up long enough — only a *loop* of quick crashes should give up
+func (s *VPNService) maybeResetAutoRestarts() {
+	s.restartMu.Lock()
+	defer s.restartMu.Unlock()
+	if s.autoRestarts == 0 && !s.gaveUp {
+		return
+	}
+	if !s.runningSince.IsZero() && time.Since(s.runningSince) >= config.AutoRestartResetAfter*time.Second {
+		log.Printf("sing-box stable for %ds, crash auto-restart counter reset", config.AutoRestartResetAfter)
+		s.autoRestarts = 0
+		s.gaveUp = false
+	}
+}
+
+// autoRestartIfCrashed restarts sing-box after an unexpected death: the
+// process is gone but the stored intent (last explicit Start/Stop) says it
+// should be running. A user stop saves intent=false first, so it never
+// triggers this. After AutoRestartMaxAttempts consecutive failures the
+// monitor gives up and reports once via OnAutoRestartFailed.
+func (s *VPNService) autoRestartIfCrashed() {
+	intent, err := s.storage.LoadVPNState()
+	if err != nil {
+		log.Printf("Crash auto-restart: failed to load intent: %v", err)
+		return
+	}
+	if !intent {
+		return
+	}
+
+	s.restartMu.Lock()
+	if s.autoRestarts >= config.AutoRestartMaxAttempts {
+		report := !s.gaveUp
+		s.gaveUp = true
+		s.restartMu.Unlock()
+		if report {
+			err := fmt.Errorf("sing-box неожиданно завершается; автоперезапуск не помог после %d попыток — проверьте логи", config.AutoRestartMaxAttempts)
+			log.Printf("Crash auto-restart: giving up: %v", err)
+			if s.OnAutoRestartFailed != nil {
+				s.OnAutoRestartFailed(err)
+			}
+		}
+		return
+	}
+	s.autoRestarts++
+	attempt := s.autoRestarts
+	s.restartMu.Unlock()
+
+	log.Printf("sing-box died unexpectedly, auto-restarting (attempt %d/%d)", attempt, config.AutoRestartMaxAttempts)
+	// Start the process directly, NOT via s.Start(): the stored state is the
+	// user's intent and the monitor must never write it (see StartMonitoring)
+	if err := s.processManager.Start(); err != nil {
+		log.Printf("Crash auto-restart attempt %d failed: %v", attempt, err)
+		return
+	}
+	s.notifyStatusChange(VPNStatusRunning)
 }
 
 // StatusChangeCh returns a channel that receives status change notifications

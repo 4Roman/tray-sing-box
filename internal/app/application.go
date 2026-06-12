@@ -103,6 +103,12 @@ func (a *Application) OnReady(trayIcon, trayIconOff []byte) {
 		}()
 	}
 
+	// Surface an exhausted crash-restart loop to the user (popup from a
+	// goroutine: it blocks until dismissed and must not stall the monitor)
+	a.vpnService.OnAutoRestartFailed = func(err error) {
+		go ui.ShowError(ui.VPNErrorTitle, err.Error())
+	}
+
 	// Start monitoring
 	a.vpnService.StartMonitoring()
 

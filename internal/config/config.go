@@ -16,6 +16,11 @@ const (
 	RestoreCheckDelay    = 3 // seconds to wait before verifying it survived
 	RestoreRetryDelay    = 2 // seconds between attempts
 
+	// Crash auto-restart (monitor restarts sing-box when it dies while the
+	// stored intent is "running")
+	AutoRestartMaxAttempts = 3  // consecutive attempts before giving up
+	AutoRestartResetAfter  = 60 // seconds of uptime that reset the counter
+
 	// Subscriptions
 	SubscriptionsFileName    = "subscriptions.json" // next to the exe
 	SubscriptionRefreshHours = 6                    // periodic auto-refresh interval
