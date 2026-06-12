@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Настройки sing-box</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background: #16181d; color: #e4e6eb;
+    margin: 0; padding: 24px;
+    max-width: 980px; margin-inline: auto;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 10px; color: #aeb4c0; font-weight: 600; }
+  .vpn-state { font-size: 13px; color: #8b929e; margin-bottom: 20px; }
+  .vpn-state b.on { color: #4cc36a; }
+  .vpn-state b.off { color: #e05c5c; }
+  section {
+    background: #1e2128; border: 1px solid #2a2e37; border-radius: 10px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  textarea {
+    width: 100%; min-height: 240px; resize: vertical;
+    background: #14161b; color: #d6e2f0; border: 1px solid #2a2e37;
+    border-radius: 8px; padding: 10px;
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+    line-height: 1.45; tab-size: 2;
+  }
+  textarea:focus { outline: 1px solid #3b82f6; }
+  button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 8px;
+    padding: 8px 16px; font-size: 14px; cursor: pointer; margin-top: 10px;
+  }
+  button.secondary { background: #353b46; }
+  button:hover { filter: brightness(1.15); }
+  button:disabled { opacity: .5; cursor: wait; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .outbound {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  }
+  .outbound:hover { background: #262a33; }
+  .outbound .type {
+    font-size: 12px; color: #8b929e; background: #14161b;
+    border-radius: 6px; padding: 2px 8px;
+  }
+  .outbound .badge {
+    font-size: 12px; color: #4cc36a; margin-left: auto;
+  }
+  #msg {
+    position: sticky; top: 12px; z-index: 5;
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    display: none; font-size: 14px; white-space: pre-wrap;
+  }
+  #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
+  #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+</style>
+</head>
+<body>
+<h1>Настройки sing-box</h1>
+<div class="vpn-state">VPN: <b id="vpn">—</b></div>
+<div id="msg"></div>
+
+<section>
+  <h2>Активный сервер</h2>
+  <div id="outbound-list"></div>
+  <button id="switch-btn" onclick="switchOutbound()">Использовать выбранный</button>
+</section>
+
+<section>
+  <h2>Импорт сервера</h2>
+  <div class="row">
+    <button class="secondary" onclick="importFrom('clipboard', this)">Из буфера обмена</button>
+    <button class="secondary" onclick="importFrom('qr', this)">QR с экрана</button>
+  </div>
+</section>
+
+<section>
+  <h2>Обновление sing-box</h2>
+  <div class="row">
+    <button class="secondary" onclick="updateSingBox(this)">Проверить и обновить с GitHub</button>
+  </div>
+</section>
+
+<section>
+  <h2>Обход DPI (zapret в Docker)</h2>
+  <div class="vpn-state">
+    Docker: <b id="dpi-docker">—</b> · Контейнер: <b id="dpi-container">—</b> · Цепочка: <b id="dpi-chain">—</b>
+  </div>
+  <div class="row">
+    <button class="secondary" onclick="toggleDPIChain(this)">Включить/выключить цепочку (VPN через zapret)</button>
+    <button class="secondary" onclick="prepareDPIDirect(this)">Подготовить прямой обход (без VPN)</button>
+  </div>
+  <div class="vpn-state" style="margin-top:10px">
+    Цепочка заворачивает подключение активного TCP-сервера (vless/trojan/vmess) через zapret. Прямой обход: нажмите кнопку, затем выберите «dpi-bypass» в списке серверов выше. Требуется запущенный Docker Desktop; контейнер работает в privileged-режиме.
+  </div>
+</section>
+
+<section>
+  <h2>Outbounds (JSON)</h2>
+  <textarea id="outbounds" spellcheck="false"></textarea>
+  <button onclick="saveSection('outbounds', this)">Сохранить outbounds</button>
+</section>
+
+<section>
+  <h2>Route (JSON)</h2>
+  <textarea id="route" spellcheck="false"></textarea>
+  <button onclick="saveSection('route', this)">Сохранить route</button>
+</section>
+
+<script>
+const TOKEN = "{{.Token}}";
+
+function show(kind, text) {
+  const el = document.getElementById('msg');
+  el.className = kind;
+  el.textContent = text;
+  if (kind === 'ok') setTimeout(() => { el.className = ''; }, 6000);
+}
+
+async function api(path, body) {
+  const opts = {
+    headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' },
+    method: body ? 'POST' : 'GET',
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const resp = await fetch(path, opts);
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+  return data;
+}
+
+function renderOutbounds(list, active) {
+  const box = document.getElementById('outbound-list');
+  box.innerHTML = '';
+  for (const o of list) {
+    const label = document.createElement('label');
+    label.className = 'outbound';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'outbound';
+    radio.value = o.tag;
+    radio.checked = o.tag === active;
+    const tag = document.createElement('span');
+    tag.textContent = o.tag;
+    const type = document.createElement('span');
+    type.className = 'type';
+    type.textContent = o.type;
+    label.append(radio, tag, type);
+    if (o.tag === 'dpi-bypass') {
+      const hint = document.createElement('span');
+      hint.className = 'type';
+      hint.textContent = 'обход DPI без VPN';
+      label.append(hint);
+    }
+    if (o.tag === active) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = '● активный';
+      label.append(badge);
+    }
+    box.append(label);
+  }
+  if (!list.length) box.textContent = 'Нет outbounds в конфиге';
+}
+
+async function refresh() {
+  try {
+    const d = await api('/api/config');
+    document.getElementById('outbounds').value = d.outbounds;
+    document.getElementById('route').value = d.route;
+    const vpn = document.getElementById('vpn');
+    vpn.textContent = d.running ? 'запущен' : 'остановлен';
+    vpn.className = d.running ? 'on' : 'off';
+    renderOutbounds(d.list, d.active);
+  } catch (e) {
+    show('err', 'Не удалось загрузить конфигурацию: ' + e.message);
+  }
+  // Fetch DPI status separately: a slow/absent Docker must not block config load
+  refreshDPI();
+}
+
+const DPI_STATE_RU = { running: 'запущен', stopped: 'остановлен', absent: 'не создан' };
+
+async function refreshDPI() {
+  const dockerEl = document.getElementById('dpi-docker');
+  const contEl = document.getElementById('dpi-container');
+  const chainEl = document.getElementById('dpi-chain');
+  try {
+    const d = await api('/api/dpi');
+    dockerEl.textContent = d.docker ? 'доступен' : 'не запущен';
+    dockerEl.className = d.docker ? 'on' : 'off';
+    contEl.textContent = DPI_STATE_RU[d.container] || d.container;
+    if (d.chain) {
+      chainEl.textContent = 'включена (' + d.chainTarget + ')';
+      chainEl.className = 'on';
+    } else {
+      chainEl.textContent = 'выключена';
+      chainEl.className = 'off';
+    }
+  } catch (e) {
+    dockerEl.textContent = 'недоступен';
+    dockerEl.className = 'off';
+    contEl.textContent = '—';
+    chainEl.textContent = '—';
+  }
+}
+
+function toggleDPIChain(btn) {
+  run(btn, async () => {
+    show('ok', 'Настраиваю обход DPI (первый запуск скачивает Docker-образ)…');
+    const cur = await api('/api/dpi');
+    const d = await api('/api/dpi/chain', { enable: !cur.chain });
+    if (d.chain) {
+      show('ok', 'Обход DPI включён: сервер «' + d.chainTarget + '» через zapret' + restartedSuffix(d));
+    } else {
+      show('ok', 'Обход DPI выключен' + restartedSuffix(d));
+    }
+    await refresh();
+  });
+}
+
+function prepareDPIDirect(btn) {
+  run(btn, async () => {
+    show('ok', 'Поднимаю контейнер zapret…');
+    await api('/api/dpi/direct', { enable: true });
+    show('ok', 'Контейнер готов. Выберите «dpi-bypass» в списке серверов и нажмите «Использовать выбранный».');
+    await refresh();
+  });
+}
+
+function restartedSuffix(d) {
+  return d.restarted ? ', VPN перезапущен' : '';
+}
+
+async function run(btn, action) {
+  if (btn) btn.disabled = true;
+  try { await action(); }
+  catch (e) { show('err', e.message); }
+  finally { if (btn) btn.disabled = false; }
+}
+
+function saveSection(name, btn) {
+  run(btn, async () => {
+    const d = await api('/api/section', {
+      name, content: document.getElementById(name).value,
+    });
+    show('ok', 'Секция ' + name + ' сохранена' + restartedSuffix(d));
+    await refresh();
+  });
+}
+
+function switchOutbound() {
+  const chosen = document.querySelector('input[name=outbound]:checked');
+  if (!chosen) { show('err', 'Выберите сервер из списка'); return; }
+  run(document.getElementById('switch-btn'), async () => {
+    const d = await api('/api/switch', { tag: chosen.value });
+    show('ok', 'Трафик переключён на «' + chosen.value + '»' + restartedSuffix(d));
+    await refresh();
+  });
+}
+
+function updateSingBox(btn) {
+  run(btn, async () => {
+    show('ok', 'Проверяю последний релиз и скачиваю обновление…');
+    const d = await api('/api/update', {});
+    if (!d.updated) {
+      show('ok', 'Обновление не требуется: установлена версия ' + d.current +
+        ', последний релиз ' + d.latest);
+      return;
+    }
+    const from = d.current ? d.current + ' → ' : '';
+    show('ok', 'sing-box обновлён: ' + from + d.latest + restartedSuffix(d));
+    await refresh();
+  });
+}
+
+function importFrom(source, btn) {
+  run(btn, async () => {
+    if (source === 'qr') {
+      show('ok', 'Ищу QR-код на экране…');
+    }
+    const d = await api('/api/import', { source });
+    show('ok', 'Импортировано: ' + d.tags.join(', ') + restartedSuffix(d));
+    await refresh();
+  });
+}
+
+refresh();
+</script>
+</body>
+</html>

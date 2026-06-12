@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        # -short skips e2e tests that need network/a real sing-box install;
+        # autostart/clipboard tests detect the CI session and degrade gracefully
+        run: go test -short ./...
+
+      - name: Render icon
+        run: go run ./tools/genicons
+
+      - name: Build
+        run: go build -ldflags="-H windowsgui" -o bin/tray-sing-box.exe .
+
+      - name: Embed Windows resources
+        run: |
+          go install github.com/tc-hib/go-winres@latest
+          go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
+
+      - name: Stage artifact
+        run: |
+          New-Item -ItemType Directory -Force bin/assets/icons | Out-Null
+          Copy-Item assets/icons/tray.ico bin/assets/icons/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tray-sing-box
+          path: |
+            bin/tray-sing-box.exe
+            bin/assets/icons/tray.ico

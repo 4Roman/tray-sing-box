@@ -1,0 +1,349 @@
+// Package webui serves the local settings interface: raw JSON editing of
+// config sections, outbound switching and share-link import. The server
+// listens on localhost only and every request must carry a per-run token.
+package webui
+
+import (
+	"crypto/rand"
+	_ "embed"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"log"
+	"net"
+	"net/http"
+	"sync"
+
+	"tray-sing-box/internal/domain"
+)
+
+//go:embed page.html
+var pageHTML string
+
+// TextSource produces text to import an outbound from
+type TextSource func() (string, error)
+
+// Sources groups the outbound import sources available to the UI
+type Sources struct {
+	Clipboard TextSource
+	ScreenQR  TextSource
+}
+
+// Server is the local settings web server
+type Server struct {
+	settings *domain.SettingsService
+	importer *domain.ImportService
+	updater  *domain.UpdateService
+	dpi      *domain.DPIBypassService
+	sources  Sources
+
+	mu    sync.Mutex
+	opMu  sync.Mutex // serializes config/binary mutations
+	url   string
+	token string
+	page  *template.Template
+}
+
+// New creates the settings server (not yet listening)
+func New(settings *domain.SettingsService, importer *domain.ImportService, updater *domain.UpdateService, dpi *domain.DPIBypassService, sources Sources) *Server {
+	return &Server{
+		settings: settings,
+		importer: importer,
+		updater:  updater,
+		dpi:      dpi,
+		sources:  sources,
+	}
+}
+
+// Open starts the server if needed and opens the settings page in the browser
+func (s *Server) Open() error {
+	url, err := s.start()
+	if err != nil {
+		return err
+	}
+	return openBrowser(url)
+}
+
+// start launches the HTTP listener once and returns the tokenized page URL
+func (s *Server) start() (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.url != "" {
+		return s.url, nil
+	}
+
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("failed to generate token: %w", err)
+	}
+	s.token = hex.EncodeToString(tokenBytes)
+
+	page, err := template.New("page").Parse(pageHTML)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse settings page: %w", err)
+	}
+	s.page = page
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("failed to listen: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", s.handlePage)
+	mux.HandleFunc("GET /api/config", s.auth(s.handleConfig))
+	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
+	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
+	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
+	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
+	mux.HandleFunc("GET /api/dpi", s.auth(s.handleDPIStatus))
+	mux.HandleFunc("POST /api/dpi/chain", s.auth(s.handleDPIChain))
+	mux.HandleFunc("POST /api/dpi/direct", s.auth(s.handleDPIDirect))
+
+	go func() {
+		if err := http.Serve(listener, mux); err != nil {
+			log.Printf("Settings server stopped: %v", err)
+		}
+	}()
+
+	s.url = fmt.Sprintf("http://%s/?t=%s", listener.Addr().String(), s.token)
+	log.Printf("Settings server listening on %s", listener.Addr())
+	return s.url, nil
+}
+
+// auth requires the per-run token in the X-Token header
+func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Token") != s.token {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.URL.Query().Get("t") != s.token {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := s.page.Execute(w, map[string]string{"Token": s.token}); err != nil {
+		log.Printf("Settings page render failed: %v", err)
+	}
+}
+
+// writeJSON sends a JSON response
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+// fail sends an error message the page shows to the user
+func fail(w http.ResponseWriter, err error) {
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	outbounds, err := s.settings.Section("outbounds")
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	route, err := s.settings.Section("route")
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	list, active, err := s.settings.Outbounds()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"outbounds": outbounds,
+		"route":     route,
+		"list":      list,
+		"active":    active,
+		"running":   s.settings.IsVPNRunning(),
+	})
+}
+
+func (s *Server) handleSaveSection(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	restarted, err := s.settings.SaveSection(req.Name, []byte(req.Content))
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
+}
+
+func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Tag string `json:"tag"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	restarted, err := s.settings.UseOutbound(req.Tag)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
+}
+
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.updater == nil {
+		fail(w, fmt.Errorf("update service is not available"))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	result, err := s.updater.Update()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current":   result.CurrentVersion,
+		"latest":    result.LatestVersion,
+		"updated":   result.Updated,
+		"restarted": result.Restarted,
+	})
+}
+
+func (s *Server) handleDPIStatus(w http.ResponseWriter, r *http.Request) {
+	if s.dpi == nil {
+		fail(w, fmt.Errorf("обход DPI недоступен"))
+		return
+	}
+	status, err := s.dpi.Status()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleDPIChain(w http.ResponseWriter, r *http.Request) {
+	if s.dpi == nil {
+		fail(w, fmt.Errorf("обход DPI недоступен"))
+		return
+	}
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	var (
+		status *domain.DPIBypassStatus
+		err    error
+	)
+	if req.Enable {
+		status, err = s.dpi.EnableChain()
+	} else {
+		status, err = s.dpi.DisableChain()
+	}
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleDPIDirect(w http.ResponseWriter, r *http.Request) {
+	if s.dpi == nil {
+		fail(w, fmt.Errorf("обход DPI недоступен"))
+		return
+	}
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+	if !req.Enable {
+		fail(w, fmt.Errorf("чтобы отключить прямой обход, выберите другой активный сервер в списке"))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	status, err := s.dpi.EnableDirect()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Source string `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	var source TextSource
+	switch req.Source {
+	case "clipboard":
+		source = s.sources.Clipboard
+	case "qr":
+		source = s.sources.ScreenQR
+	default:
+		fail(w, fmt.Errorf("unknown import source %q", req.Source))
+		return
+	}
+	if source == nil {
+		fail(w, fmt.Errorf("import source %q is not available", req.Source))
+		return
+	}
+
+	text, err := source()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+
+	result, err := s.importer.ImportFromText(text)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tags":      result.Tags,
+		"restarted": result.Restarted,
+	})
+}

@@ -1,0 +1,65 @@
+package storage
+
+import (
+	"fmt"
+	"log"
+
+	"golang.org/x/sys/windows/registry"
+
+	"tray-sing-box/internal/config"
+)
+
+// RegistryStorage manages VPN state persistence in Windows Registry
+type RegistryStorage struct{}
+
+// New creates a new registry storage instance
+func New() *RegistryStorage {
+	return &RegistryStorage{}
+}
+
+// SaveVPNState saves the current VPN state to registry
+func (s *RegistryStorage) SaveVPNState(running bool) error {
+	k, err := registry.OpenKey(registry.CURRENT_USER, config.RegStateKey, registry.SET_VALUE)
+	if err != nil {
+		// Try to create the key if it doesn't exist
+		k, _, err = registry.CreateKey(registry.CURRENT_USER, config.RegStateKey, registry.SET_VALUE)
+		if err != nil {
+			return fmt.Errorf("failed to create state key: %w", err)
+		}
+	}
+	defer k.Close()
+
+	var value uint32
+	if running {
+		value = 1
+	} else {
+		value = 0
+	}
+
+	if err := k.SetDWordValue("VPNRunning", value); err != nil {
+		return fmt.Errorf("failed to save VPN state: %w", err)
+	}
+
+	log.Printf("VPN state saved: running=%v", running)
+	return nil
+}
+
+// LoadVPNState loads the last VPN state from registry
+func (s *RegistryStorage) LoadVPNState() (bool, error) {
+	k, err := registry.OpenKey(registry.CURRENT_USER, config.RegStateKey, registry.QUERY_VALUE)
+	if err != nil {
+		// Key doesn't exist, default to false
+		return false, nil
+	}
+	defer k.Close()
+
+	value, _, err := k.GetIntegerValue("VPNRunning")
+	if err != nil {
+		// Value doesn't exist, default to false
+		return false, nil
+	}
+
+	running := value == 1
+	log.Printf("VPN state loaded: running=%v", running)
+	return running, nil
+}
