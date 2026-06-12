@@ -3,12 +3,20 @@ package domain
 import (
 	"fmt"
 	"log"
+	"time"
 )
 
 // OutboundInfo describes a configured outbound for UI listing
 type OutboundInfo struct {
 	Tag  string `json:"tag"`
 	Type string `json:"type"`
+}
+
+// ConfigVersion describes one archived config.json version
+type ConfigVersion struct {
+	Name  string    `json:"name"`
+	Saved time.Time `json:"saved"`
+	Size  int64     `json:"size"`
 }
 
 // SettingsStore reads and edits sections of the sing-box configuration
@@ -18,6 +26,8 @@ type SettingsStore interface {
 	ListOutbounds() ([]OutboundInfo, error)
 	ActiveOutbound() (string, error)
 	SwitchOutbound(tag string) error
+	ListHistory() ([]ConfigVersion, error)
+	RestoreVersion(name string) error
 }
 
 // SettingsService exposes configuration editing to the UI and applies
@@ -83,4 +93,24 @@ func (s *SettingsService) UseOutbound(tag string) (restarted bool, err error) {
 // IsVPNRunning reports the current VPN status for UI display
 func (s *SettingsService) IsVPNRunning() bool {
 	return s.vpn.GetStatus().IsRunning()
+}
+
+// History returns the archived config versions, newest first
+func (s *SettingsService) History() ([]ConfigVersion, error) {
+	return s.store.ListHistory()
+}
+
+// Rollback replaces the current config with an archived version and
+// restarts the VPN if it is running.
+func (s *SettingsService) Rollback(name string) (restarted bool, err error) {
+	if err := s.store.RestoreVersion(name); err != nil {
+		return false, err
+	}
+	log.Printf("Settings: config rolled back to %q", name)
+
+	restarted, err = s.vpn.RestartIfRunning()
+	if err != nil {
+		return false, fmt.Errorf("конфиг восстановлен, но VPN %w", err)
+	}
+	return restarted, nil
 }

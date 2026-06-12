@@ -7,10 +7,15 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"sync"
+	"time"
 
+	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
 )
 
@@ -84,10 +89,130 @@ func (e *Editor) save(cfg map[string]any, original []byte) error {
 	if err := os.WriteFile(e.path+".bak", original, 0644); err != nil {
 		return fmt.Errorf("failed to write config backup: %w", err)
 	}
+	e.archive(original)
 	if err := os.WriteFile(e.path, updated, 0644); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 	return nil
+}
+
+// historyName matches archived config versions, e.g.
+// config-20260612-193045.123456789.json. The fixed-width fractional part
+// keeps lexical order chronological even for saves within the same second.
+var historyName = regexp.MustCompile(`^config-\d{8}-\d{6}\.\d{9}\.json$`)
+
+func (e *Editor) historyDir() string {
+	return filepath.Join(filepath.Dir(e.path), config.ConfigHistoryDir)
+}
+
+// archive stores the pre-save config bytes in the history directory and
+// prunes old versions. Best-effort: a failed archive must not block the save
+// (the .bak copy above still exists).
+func (e *Editor) archive(original []byte) {
+	dir := e.historyDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("Config history: failed to create %s: %v", dir, err)
+		return
+	}
+
+	// The Windows clock is coarse enough for two quick saves to get the same
+	// timestamp — bump the nanoseconds until the name is free
+	now := time.Now()
+	var name string
+	for i := 0; ; i++ {
+		name = "config-" + now.Add(time.Duration(i)).Format("20060102-150405.000000000") + ".json"
+		if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
+			break
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), original, 0644); err != nil {
+		log.Printf("Config history: failed to write %s: %v", name, err)
+		return
+	}
+
+	// Prune the oldest versions beyond the cap (names sort chronologically)
+	names, err := e.historyNames()
+	if err != nil {
+		log.Printf("Config history: failed to list for pruning: %v", err)
+		return
+	}
+	for len(names) > config.ConfigHistoryKeep {
+		if err := os.Remove(filepath.Join(dir, names[0])); err != nil {
+			log.Printf("Config history: failed to prune %s: %v", names[0], err)
+			return
+		}
+		names = names[1:]
+	}
+}
+
+// historyNames returns archived version file names sorted oldest first
+func (e *Editor) historyNames() ([]string, error) {
+	entries, err := os.ReadDir(e.historyDir())
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && historyName.MatchString(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// ListHistory returns the archived config versions, newest first
+func (e *Editor) ListHistory() ([]domain.ConfigVersion, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	names, err := e.historyNames()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list config history: %w", err)
+	}
+	versions := make([]domain.ConfigVersion, 0, len(names))
+	for i := len(names) - 1; i >= 0; i-- {
+		v := domain.ConfigVersion{Name: names[i]}
+		if info, err := os.Stat(filepath.Join(e.historyDir(), names[i])); err == nil {
+			v.Saved = info.ModTime()
+			v.Size = info.Size()
+		}
+		versions = append(versions, v)
+	}
+	return versions, nil
+}
+
+// RestoreVersion replaces the current config with an archived version. The
+// replaced config goes through the normal save path, so it is validated,
+// backed up and archived itself — a rollback can be rolled back.
+func (e *Editor) RestoreVersion(name string) error {
+	if !historyName.MatchString(name) {
+		return fmt.Errorf("unknown config version %q", name)
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	raw, err := os.ReadFile(filepath.Join(e.historyDir(), name))
+	if err != nil {
+		return fmt.Errorf("failed to read config version: %w", err)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var cfg map[string]any
+	if err := decoder.Decode(&cfg); err != nil {
+		return fmt.Errorf("archived config is not valid JSON: %w", err)
+	}
+
+	_, original, err := e.load()
+	if err != nil {
+		return err
+	}
+	return e.save(cfg, original)
 }
 
 // AddOutbound inserts a single outbound into the config; see AddOutbounds.

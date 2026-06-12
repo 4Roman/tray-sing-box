@@ -116,6 +116,8 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
+	mux.HandleFunc("GET /api/history", s.auth(s.handleHistory))
+	mux.HandleFunc("POST /api/history/restore", s.auth(s.handleHistoryRestore))
 	mux.HandleFunc("GET /api/subscriptions", s.auth(s.handleSubscriptions))
 	mux.HandleFunc("POST /api/subscriptions/add", s.auth(s.handleSubscriptionAdd))
 	mux.HandleFunc("POST /api/subscriptions/update", s.auth(s.handleSubscriptionUpdate))
@@ -354,6 +356,38 @@ func (s *Server) handleDPIDirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	versions, err := s.settings.History()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	if versions == nil {
+		versions = []domain.ConfigVersion{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": versions})
+}
+
+func (s *Server) handleHistoryRestore(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	restarted, err := s.settings.Rollback(req.Name)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
 }
 
 // subscriptionResponse converts a domain result into the JSON shape the page

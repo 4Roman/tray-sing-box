@@ -46,3 +46,4 @@ subscriptions.json
 
 # Claude Code local state
 /.claude/
+config-history/
