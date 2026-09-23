@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -119,10 +120,26 @@ func main() {
 			os.Exit(1)
 		}
 		if err := runMode(mode, layout); err != nil {
+			if errors.Is(err, errNoInstance) {
+				// Not a failure: the installer reads it as "nothing was
+				// running" (the mutex is in a private namespace, invisible
+				// to its CheckForMutexes)
+				os.Exit(exitNoInstance)
+			}
 			log.Printf("%s failed: %v", mode, err)
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// The tray app belongs to an interactive user. As SYSTEM — a deployment
+	// tool relaunching it after a silent upgrade — it would sit invisible in
+	// session 0 holding the machine-wide single-instance mutex (the user's
+	// own instance would then exit as "already running"), with SYSTEM's
+	// empty VPN intent
+	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		log.Println("Running as SYSTEM: the tray app is not started for this account, exiting")
 		return
 	}
 
@@ -267,17 +284,25 @@ func takeOver(layout paths.Layout, carry bool) {
 	}
 }
 
+// errNoInstance: --quit found no running instance to ask (exit code
+// exitNoInstance; 0 means an instance was running and has exited). Not 2:
+// that is what the Go runtime exits with on a panic or a fatal error, and
+// the installer must not read a crashed helper as "nothing was running".
+var errNoInstance = errors.New("no running instance")
+
+const exitNoInstance = 10
+
 // runMode executes one of the command-line helper modes
 func runMode(mode string, layout paths.Layout) error {
 	switch mode {
 	case "--quit", "--quit-installation":
 		// --quit-installation (the uninstaller): only when the running
-		// instance is this installation's — the quit event is global, and
+		// instance is this installation's — the quit event is machine-wide, and
 		// a portable copy the user runs must survive the uninstall of an
 		// unused installed one
 		if mode == "--quit-installation" && !process.InstallationRunning(layout.Bin) {
 			log.Println("--quit-installation: this installation's tray app is not running")
-			return nil
+			return errNoInstance
 		}
 		// An instance that is still starting holds the mutex but has no
 		// quit event yet: keep asking until it listens, or it is gone
@@ -292,7 +317,7 @@ func runMode(mode string, layout paths.Layout) error {
 			}
 			if !process.InstanceRunning() {
 				log.Println("--quit: no running instance")
-				return nil
+				return errNoInstance
 			}
 			if time.Now().After(deadline) {
 				return fmt.Errorf("the running instance is starting up and did not accept the quit request")

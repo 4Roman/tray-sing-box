@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 
 	"tray-sing-box/internal/config"
 )
@@ -30,7 +35,26 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
 		os.Exit(3)
 	}
+	if name := os.Getenv(quitChildEnv); name != "" {
+		quitChild(name)
+		return
+	}
+	// The fakes this test starts run at the test's own level (below High on
+	// a developer machine): they must count as elevated, like the real
+	// sing-box started by the elevated app
+	if level, err := ownIntegrity(); err == nil {
+		trustedIntegrity = level
+	}
 	os.Exit(m.Run())
+}
+
+func ownIntegrity() (uint32, error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return 0, err
+	}
+	defer token.Close()
+	return integrityLevel(token)
 }
 
 func fakeSingBox(mode string) {
@@ -105,9 +129,12 @@ func TestFindProcessesMatchesByFullPath(t *testing.T) {
 		t.Fatalf("findProcesses: %v", err)
 	}
 	found := false
-	for _, pid := range pids {
-		if pid == uint32(os.Getpid()) {
+	for _, p := range pids {
+		if p.pid == uint32(os.Getpid()) {
 			found = true
+			if !p.elevated {
+				t.Fatal("own process (at the trusted level) not reported as elevated")
+			}
 		}
 	}
 	if !found {
@@ -342,6 +369,121 @@ func TestManagerIgnoresForeignInstallation(t *testing.T) {
 	if !mA.IsRunning() {
 		t.Fatal("A no longer running after B was stopped")
 	}
+}
+
+// A copy reached through a junction (a portable folder moved to another
+// drive and linked back): the image path the system reports is the target,
+// the manager's path goes through the link — it must still find, adopt and
+// stop its own sing-box (finalPath)
+func TestManagerThroughAJunction(t *testing.T) {
+	dir := installFakeSingBox(t, "run")
+	link := filepath.Join(t.TempDir(), "link")
+	cmd := exec.Command(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"), "/c", "mklink", "/J", link, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("cannot create a junction: %v %s", err, out)
+	}
+	t.Cleanup(func() { os.Remove(link) }) // the junction, not what it points at
+	if got, want := finalPath(filepath.Join(link, config.SingBoxExe)), finalPath(filepath.Join(dir, config.SingBoxExe)); !strings.EqualFold(got, want) || strings.Contains(got, `\link\`) {
+		t.Fatalf("finalPath through the junction = %q, want %q", got, want)
+	}
+
+	m := NewAt(link)
+	t.Cleanup(func() { m.Stop() })
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if found, _ := findProcesses(m.singBoxPath()); len(found) != 1 {
+		t.Fatalf("own process not found through the junction: %v", found)
+	}
+	adopter := NewAt(link)
+	if !adopter.IsRunning() {
+		t.Fatal("a fresh manager does not see the running instance through the junction")
+	}
+	if err := adopter.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if found, _ := findProcesses(filepath.Join(dir, config.SingBoxExe)); len(found) != 0 {
+		t.Fatalf("still running after a Stop through the junction: %v", found)
+	}
+}
+
+// A sing-box.exe of the installation started by a non-elevated program —
+// the installed one is executable by every user, with any config — is not
+// the VPN: not adopted (the app would never start the real one), and ended
+// by a start (it would hold the ports and the TUN interface name)
+func TestManagerIgnoresUnelevatedInstance(t *testing.T) {
+	dir := installFakeSingBox(t, "run")
+	m := NewAt(dir)
+	t.Cleanup(func() { m.Stop() })
+
+	spoof := startBelowOwnIntegrity(t, m.singBoxPath(), "run")
+	exited := make(chan struct{})
+	go func() { spoof.Wait(); close(exited) }()
+	if !eventually(10*time.Second, func() bool {
+		found, _ := findProcesses(m.singBoxPath())
+		return len(found) == 1
+	}) {
+		t.Fatal("the lower-integrity instance did not start")
+	}
+	found, _ := findProcesses(m.singBoxPath())
+	if found[0].elevated {
+		t.Fatal("a process below the trusted integrity level counted as elevated")
+	}
+	if m.IsRunning() {
+		t.Fatal("an instance started by a non-elevated program was taken for the VPN")
+	}
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start left the non-elevated instance running")
+	}
+	found, _ = findProcesses(m.singBoxPath())
+	if len(found) != 1 || !found[0].elevated || found[0].pid == uint32(spoof.Process.Pid) {
+		t.Fatalf("want exactly the manager's own instance, got %v", found)
+	}
+}
+
+// startBelowOwnIntegrity starts exe as the fake sing-box one integrity level
+// below this process (Medium -> Low on a developer machine, High -> Medium
+// on an elevated CI runner): what a non-elevated program's launch looks like
+// to the elevated app
+func startBelowOwnIntegrity(t *testing.T, exe string, args ...string) *exec.Cmd {
+	t.Helper()
+	var own windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY, &own); err != nil {
+		t.Fatal(err)
+	}
+	defer own.Close()
+	level, err := integrityLevel(own)
+	if err != nil || level < 2*securityMandatoryLowRID {
+		t.Skipf("own integrity level %#x (%v): nothing lower to start at", level, err)
+	}
+	var lower windows.Token
+	if err := windows.DuplicateTokenEx(own, windows.MAXIMUM_ALLOWED, nil, windows.SecurityImpersonation, windows.TokenPrimary, &lower); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lower.Close() })
+	sid, err := windows.StringToSid(fmt.Sprintf("S-1-16-%d", level-securityMandatoryLowRID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: sid, Attributes: windows.SE_GROUP_INTEGRITY}}
+	if err := windows.SetTokenInformation(lower, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), uint32(unsafe.Sizeof(label))+windows.GetLengthSid(sid)); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), fakeModeEnv+"=run")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(lower), HideWindow: true, CreationFlags: CREATE_NO_WINDOW}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start at a lower integrity level: %v", err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill() })
+	return cmd
 }
 
 // `sing-box check` / `sing-box version` run the very same exe. They must not

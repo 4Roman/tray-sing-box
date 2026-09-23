@@ -110,8 +110,12 @@ var
 // A running copy — in {app} (upgrade) or anywhere else (a portable copy of
 // this rework, which holds the same single-instance mutex) — is asked to
 // exit before the exe is copied: `--quit` of the NEW exe, extracted to
-// {tmp}, signals the global quit event and waits. The VPN (sing-box) keeps
-// running and is adopted again, or taken over by --migrate.
+// {tmp}, signals the machine-wide quit event and waits. The VPN (sing-box)
+// keeps running and is adopted again, or taken over by --migrate. The app's
+// kernel objects live in a private namespace that only elevated
+// administrators can open (CheckForMutexes cannot see them): whether a copy
+// was running comes from the exit code — 0 it was and has exited, 10 none
+// was (not 2: the Go runtime's exit code on a crash).
 // Only under Program Files: elsewhere the folder is usually writable without
 // elevation (an elevated autostart exe there would hand administrator rights
 // to any program), and the app would run portable — no takeover, while the
@@ -141,14 +145,19 @@ begin
     Result := 'В папке установки лежит config.json переносной копии: ' + ExpandConstant('{app}');
     exit;
   end;
-  WasRunning := CheckForMutexes('Global\SingBoxTray-single-instance');
+  WasRunning := False;
   ExtractTemporaryFile('{#ExeName}');
-  // Non-zero: the copy did not exit within 30 s (a long operation such as a
-  // sing-box download holds it) — stop here instead of failing on the
+  // Any other code: the copy did not exit within 30 s (a long operation such
+  // as a sing-box download holds it) — stop here instead of failing on the
   // locked exe. A helper that could not be started at all is not a reason
   // to stop: then nothing of ours can be running a quit event either.
-  if Exec(ExpandConstant('{tmp}\{#ExeName}'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode <> 0) then
-    Result := 'Работающее приложение Sing-Box VPN Tray Manager не завершилось: вероятно, идёт долгая операция (обновление sing-box, подписок). Дождитесь её окончания и запустите установку снова.';
+  if Exec(ExpandConstant('{tmp}\{#ExeName}'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode = 0 then
+      WasRunning := True
+    else if ResultCode <> 10 then
+      Result := 'Работающее приложение Sing-Box VPN Tray Manager не завершилось: вероятно, идёт долгая операция (обновление sing-box, подписок). Дождитесь её окончания и запустите установку снова.';
+  end;
 end;
 
 function RelaunchAfterSilentUpgrade: Boolean;

@@ -3,8 +3,10 @@
 package process
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -184,25 +186,150 @@ func TestStopProcessesOfSkipsTheCallingProcess(t *testing.T) {
 	// Still alive, obviously — the assertion is the line above being reached
 }
 
-// usePrivateObjectNames points the kernel object names at per-process,
-// per-test names for the duration of the test (a mutex taken by
+// usePrivateObjectNames moves the app's kernel objects into a per-process,
+// per-test namespace for the duration of the test (a mutex taken by
 // AcquireSingleInstance lives until the process exits, so tests must not
-// share names)
+// share one); see testBoundary
 func usePrivateObjectNames(t *testing.T) {
 	t.Helper()
-	oldMutex, oldEvent, oldMarker, oldSDDL, oldTrust := instanceMutexName, quitEventName, markerPrefix, objectSDDL, trustCurrentUser
-	suffix := fmt.Sprintf("-test-%d-%s", os.Getpid(), t.Name())
-	instanceMutexName, quitEventName, markerPrefix = oldMutex+suffix, oldEvent+suffix, oldMarker+suffix+"-"
-	// A non-elevated test process cannot make Administrators the owner
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil {
-			objectSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + user.User.Sid.String() + ")"
-		}
-		trustCurrentUser = true
-	}
+	oldName, oldSIDs, oldIntegrity, oldSDDL := namespaceName, boundarySIDs, boundaryIntegrity, objectSDDL
+	closeNamespace()
+	namespaceName = fmt.Sprintf("SingBoxTray-test-%d-%s", os.Getpid(), t.Name())
+	boundarySIDs, boundaryIntegrity, objectSDDL = testBoundary()
 	t.Cleanup(func() {
-		instanceMutexName, quitEventName, markerPrefix, objectSDDL, trustCurrentUser = oldMutex, oldEvent, oldMarker, oldSDDL, oldTrust
+		closeNamespace()
+		namespaceName, boundarySIDs, boundaryIntegrity, objectSDDL = oldName, oldSIDs, oldIntegrity, oldSDDL
 	})
+}
+
+// testBoundary returns the boundary and the descriptor of a test namespace.
+// Elevated (a CI runner): the production ones, so that the tests create the
+// namespace exactly as the app does. Not elevated (a developer machine): the
+// current user as the boundary — the production one refuses this process,
+// which is TestNamespaceRefusesNonElevated's subject — and no Administrators
+// owner, which only an elevated token can set.
+func testBoundary() (sids []string, integrity, sddl string) {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		return boundarySIDs, boundaryIntegrity, objectSDDL
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		panic(err)
+	}
+	return []string{user.User.Sid.String()}, "",
+		"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + user.User.Sid.String() + ")"
+}
+
+// closeNamespace drops this process's handle to the namespace (the tests
+// switch between namespaces; the app keeps its handle for life)
+func closeNamespace() {
+	namespace.Lock()
+	defer namespace.Unlock()
+	if namespace.handle != 0 {
+		procClosePrivateNamespace.Call(namespace.handle, 0)
+		namespace.handle = 0
+	}
+}
+
+// The real boundary — Administrators and the High integrity level: a
+// non-elevated token (this test process on a developer machine, where the
+// Administrators group is deny-only) cannot create the namespace, so no
+// non-elevated program can create it first with a descriptor of its own.
+// Opening one the app created is decided by that descriptor (objectSDDL),
+// not by the boundary — nothing to test without an elevated creator. Under
+// a private name: nothing of a real instance is touched.
+func TestNamespaceRefusesNonElevated(t *testing.T) {
+	if windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("needs a non-elevated token: the kernel's boundary check is what is tested")
+	}
+	oldName := namespaceName
+	closeNamespace()
+	namespaceName = fmt.Sprintf("SingBoxTray-test-%d-%s", os.Getpid(), t.Name())
+	t.Cleanup(func() { closeNamespace(); namespaceName = oldName })
+
+	if _, err := objectName(quitEventName, true); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("creating the namespace without elevation: %v, want access denied", err)
+	}
+	// The refusal left nothing behind: the helpers' view is "no instance"
+	if _, err := objectName(quitEventName, false); !errors.Is(err, errNoNamespace) {
+		t.Fatalf("after the refused creation: %v, want no namespace", err)
+	}
+}
+
+// quitChildEnv turns the test binary into a running "instance" in another
+// process (see quitChild): the real --quit path is cross-process
+const quitChildEnv = "TRAY_TEST_QUIT_CHILD"
+
+// testInstallation is the directory quitChild marks as its installation
+const testInstallation = `C:\tray-sing-box-test-installation`
+
+// quitChild plays the tray app: takes the single-instance mutex in the given
+// test namespace, marks an installation, waits for the quit request, exits
+func quitChild(name string) {
+	namespaceName = name
+	boundarySIDs, boundaryIntegrity, objectSDDL = testBoundary()
+	if !AcquireSingleInstance() {
+		os.Exit(4)
+	}
+	if err := MarkInstallation(testInstallation); err != nil {
+		os.Exit(5)
+	}
+	quit := make(chan struct{})
+	if err := WatchQuitRequest(func() { close(quit) }); err != nil {
+		os.Exit(6)
+	}
+	select {
+	case <-quit:
+		os.Exit(0)
+	case <-time.After(time.Minute):
+		os.Exit(7)
+	}
+}
+
+// The --quit handshake across processes, as the installer uses it: the
+// instance in another process is seen (mutex, marker) through the namespace
+// it created, asked to quit, and gone afterwards
+func TestQuitRequestAcrossProcesses(t *testing.T) {
+	usePrivateObjectNames(t)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(self)
+	child.Env = append(os.Environ(), quitChildEnv+"="+namespaceName)
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { child.Process.Kill() })
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+
+	// Until the child has created the namespace, every look returns "no
+	// instance" (and caches nothing)
+	if !eventually(20*time.Second, func() bool { return InstallationRunning(testInstallation) }) {
+		t.Fatal("the other process's instance is not visible")
+	}
+	if !InstanceRunning() {
+		t.Fatal("InstanceRunning does not see the other process's mutex")
+	}
+	ok, err := RequestQuit()
+	if err != nil || !ok {
+		t.Fatalf("RequestQuit = %v, %v", ok, err)
+	}
+	select {
+	case err := <-exited:
+		if err != nil {
+			t.Fatalf("instance exit: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the instance did not quit")
+	}
+	if err := WaitForInstanceExit(5 * time.Second); err != nil {
+		t.Fatalf("WaitForInstanceExit after the exit: %v", err)
+	}
+	if InstallationRunning(testInstallation) {
+		t.Fatal("the marker outlived its instance")
+	}
 }
 
 // The marker ties "the running instance" to a directory

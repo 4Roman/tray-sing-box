@@ -10,6 +10,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -18,26 +19,149 @@ import (
 	"tray-sing-box/internal/config"
 )
 
-// Names of the kernel objects that let another process talk to the running
-// instance: the single-instance mutex (see AcquireSingleInstance) and the
-// "please quit" event used by the installer and `tray-sing-box.exe --quit`.
-// Variables so that the tests can use private names: a test must never
-// signal the quit event of a real instance running on the machine
+// The kernel objects that let another process talk to the running instance
+// — the single-instance mutex (see AcquireSingleInstance), the "please quit"
+// event of the installer and `tray-sing-box.exe --quit`, the installation
+// marker — live in a private namespace, not under Global\ names: any user
+// may create a Global\ name first, and the installer could then not ask the
+// app to quit. Two gates, both verified by probes on Windows 11:
+//   - creating: the boundary names Administrators and the High integrity
+//     level, and the kernel creates the namespace only for a token that
+//     satisfies both — an elevated administrator or SYSTEM. A non-elevated
+//     program (of this user, whose Administrators group is then deny-only,
+//     or of another) cannot create it first, with a descriptor of its own
+//     (the MS16-118 squatting).
+//   - opening an existing one: the kernel does NOT check the boundary then,
+//     only the namespace's descriptor, objectSDDL: owner Administrators,
+//     access for SYSTEM and Administrators. A deny-only Administrators group
+//     matches neither an allow entry nor the owner.
+//
+// Variables so that the tests can use a namespace of their own: a test must
+// never signal the quit event of a real instance running on the machine.
 var (
-	instanceMutexName = `Global\SingBoxTray-single-instance`
-	quitEventName     = `Global\SingBoxTray-quit`
-	markerPrefix      = `Global\SingBoxTray-instance-`
+	namespaceName     = "SingBoxTray"            // boundary name and alias prefix
+	boundarySIDs      = []string{"S-1-5-32-544"} // BUILTIN\Administrators
+	boundaryIntegrity = "S-1-16-12288"           // High mandatory level; "" = none
 
-	// objectSDDL: owner Administrators — which only an elevated token can
-	// set, so a genuine instance's objects are told apart from a squatter's
-	// (even the same user's non-elevated programs) — and access for
-	// SYSTEM and Administrators only
+	instanceMutexName = "single-instance"
+	quitEventName     = "quit"
+	markerPrefix      = "instance-"
+
+	// objectSDDL: the namespace and the objects in it — owner
+	// Administrators, access for SYSTEM and Administrators only. For the
+	// namespace this is what keeps non-elevated programs from opening it.
 	objectSDDL = "O:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)"
-
-	// trustCurrentUser: tests only (a non-elevated test process cannot set
-	// the Administrators owner)
-	trustCurrentUser = false
 )
+
+var (
+	modkernel32                               = windows.NewLazySystemDLL("kernel32.dll")
+	procCreateBoundaryDescriptorW             = modkernel32.NewProc("CreateBoundaryDescriptorW")
+	procAddSIDToBoundaryDescriptor            = modkernel32.NewProc("AddSIDToBoundaryDescriptor")
+	procAddIntegrityLabelToBoundaryDescriptor = modkernel32.NewProc("AddIntegrityLabelToBoundaryDescriptor")
+	procDeleteBoundaryDescriptor              = modkernel32.NewProc("DeleteBoundaryDescriptor")
+	procCreatePrivateNamespaceW               = modkernel32.NewProc("CreatePrivateNamespaceW")
+	procOpenPrivateNamespaceW                 = modkernel32.NewProc("OpenPrivateNamespaceW")
+	procClosePrivateNamespace                 = modkernel32.NewProc("ClosePrivateNamespace")
+)
+
+// errNoNamespace: nobody has created the namespace, i.e. no instance runs
+var errNoNamespace = errors.New("the app's namespace does not exist")
+
+// namespace is this process's handle to the private namespace. Kept open for
+// the life of the process: an alias can be registered once per process, and
+// the namespace lives as long as ANY process holds it (verified — the
+// documentation suggests it ends with its creator's handle).
+var namespace struct {
+	sync.Mutex
+	handle uintptr
+}
+
+// objectName returns the name of one of the app's kernel objects inside the
+// namespace. The namespace is opened on first use; create (the instance
+// itself, not the helpers asking about it) also creates it when it does not
+// exist yet.
+func objectName(name string, create bool) (*uint16, error) {
+	namespace.Lock()
+	defer namespace.Unlock()
+	if namespace.handle == 0 {
+		h, err := openNamespace(create)
+		if err != nil {
+			return nil, err
+		}
+		namespace.handle = h
+	}
+	return windows.UTF16PtrFromString(namespaceName + `\` + name)
+}
+
+func openNamespace(create bool) (uintptr, error) {
+	boundary, err := newBoundary()
+	if err != nil {
+		return 0, err
+	}
+	defer procDeleteBoundaryDescriptor.Call(boundary)
+	alias, err := windows.UTF16PtrFromString(namespaceName)
+	if err != nil {
+		return 0, err
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		h, _, err := procOpenPrivateNamespaceW.Call(boundary, uintptr(unsafe.Pointer(alias)))
+		if h != 0 {
+			return h, nil
+		}
+		if !errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return 0, fmt.Errorf("open namespace: %w", err)
+		}
+		if !create {
+			return 0, errNoNamespace
+		}
+		h, _, err = procCreatePrivateNamespaceW.Call(uintptr(unsafe.Pointer(objectAttributes())), boundary, uintptr(unsafe.Pointer(alias)))
+		if h != 0 {
+			return h, nil
+		}
+		if !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return 0, fmt.Errorf("create namespace: %w", err)
+		}
+		// Another process created it in between: open that one
+	}
+	return 0, errors.New("create namespace: it keeps appearing and vanishing")
+}
+
+// newBoundary builds the namespace's boundary descriptor (to be freed with
+// DeleteBoundaryDescriptor)
+func newBoundary() (uintptr, error) {
+	name, err := windows.UTF16PtrFromString(namespaceName)
+	if err != nil {
+		return 0, err
+	}
+	boundary, _, callErr := procCreateBoundaryDescriptorW.Call(uintptr(unsafe.Pointer(name)), 0)
+	if boundary == 0 {
+		return 0, fmt.Errorf("boundary descriptor: %w", callErr)
+	}
+	add := func(proc *windows.LazyProc, sidString string) error {
+		sid, err := windows.StringToSid(sidString)
+		if err != nil {
+			return err
+		}
+		// The descriptor may be reallocated: the call takes its address
+		if ok, _, callErr := proc.Call(uintptr(unsafe.Pointer(&boundary)), uintptr(unsafe.Pointer(sid))); ok == 0 {
+			return fmt.Errorf("boundary descriptor %s: %w", sidString, callErr)
+		}
+		return nil
+	}
+	for _, s := range boundarySIDs {
+		if err := add(procAddSIDToBoundaryDescriptor, s); err != nil {
+			procDeleteBoundaryDescriptor.Call(boundary)
+			return 0, err
+		}
+	}
+	if boundaryIntegrity != "" {
+		if err := add(procAddIntegrityLabelToBoundaryDescriptor, boundaryIntegrity); err != nil {
+			procDeleteBoundaryDescriptor.Call(boundary)
+			return 0, err
+		}
+	}
+	return boundary, nil
+}
 
 // objectAttributes builds the security attributes for the app's kernel
 // objects; nil when the descriptor cannot be built (then the default one)
@@ -54,9 +178,9 @@ func objectAttributes() *windows.SecurityAttributes {
 // to replace the exe of a running copy; a killed tray app would leave the
 // VPN in whatever state a running operation was in, this lets it finish.
 func WatchQuitRequest(onQuit func()) error {
-	name, err := windows.UTF16PtrFromString(quitEventName)
+	name, err := objectName(quitEventName, true)
 	if err != nil {
-		return err
+		return fmt.Errorf("quit event: %w", err)
 	}
 	// Manual-reset: stays signalled, so a request that arrives a moment
 	// before the wait starts is not lost
@@ -78,7 +202,10 @@ func WatchQuitRequest(onQuit func()) error {
 // RequestQuit signals the running instance to exit. ok is false when no
 // instance is running (nothing to quit).
 func RequestQuit() (ok bool, err error) {
-	name, err := windows.UTF16PtrFromString(quitEventName)
+	name, err := objectName(quitEventName, false)
+	if errors.Is(err, errNoNamespace) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -100,44 +227,16 @@ func RequestQuit() (ok bool, err error) {
 // mutex. An instance that is still starting up holds it before it creates
 // the quit event, so "no quit event" alone does not mean "no instance".
 func InstanceRunning() bool {
-	name, err := windows.UTF16PtrFromString(instanceMutexName)
+	name, err := objectName(instanceMutexName, false)
+	if err != nil {
+		return false // no namespace: no instance (the callers are elevated)
+	}
+	h, err := windows.OpenMutex(windows.SYNCHRONIZE, false, name)
 	if err != nil {
 		return false
 	}
-	h, err := windows.OpenMutex(windows.SYNCHRONIZE|windows.READ_CONTROL, false, name)
-	if err != nil {
-		// Not found — or ACCESS_DENIED: a genuine instance's mutex grants
-		// Administrators, so that is a non-administrator's object squatting
-		// the name (see AcquireSingleInstance), not an instance. The callers
-		// (--quit, the installer) are elevated.
-		return false
-	}
-	defer windows.CloseHandle(h)
-	return trustedObjectOwner(h)
-}
-
-// trustedObjectOwner reports whether a kernel object was created by an
-// instance of this app: owned by Administrators or SYSTEM. Instances set the
-// owner explicitly (objectSDDL), so this holds under any owner policy, and a
-// non-elevated program — of another user or of this one — cannot produce it.
-func trustedObjectOwner(h windows.Handle) bool {
-	sd, err := windows.GetSecurityInfo(h, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION)
-	if err != nil {
-		return false
-	}
-	owner, _, err := sd.Owner()
-	if err != nil || owner == nil {
-		return false
-	}
-	if owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || owner.IsWellKnown(windows.WinLocalSystemSid) {
-		return true
-	}
-	if trustCurrentUser {
-		if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid != nil {
-			return owner.Equals(user.User.Sid)
-		}
-	}
-	return false
+	windows.CloseHandle(h)
+	return true
 }
 
 // installationMarker is the name of the object the running instance of the
@@ -155,9 +254,9 @@ var markerHandle windows.Handle // kept for the life of the process
 // MarkInstallation is called by the instance that won the single-instance
 // mutex, with its Bin directory
 func MarkInstallation(dir string) error {
-	name, err := windows.UTF16PtrFromString(installationMarker(dir))
+	name, err := objectName(installationMarker(dir), true)
 	if err != nil {
-		return err
+		return fmt.Errorf("installation marker: %w", err)
 	}
 	h, err := windows.CreateEvent(objectAttributes(), 1, 0, name)
 	if err != nil {
@@ -171,18 +270,18 @@ func MarkInstallation(dir string) error {
 }
 
 // InstallationRunning reports whether the running instance is the one of
-// the installation in dir (its marker exists and is genuine)
+// the installation in dir (its marker exists)
 func InstallationRunning(dir string) bool {
-	name, err := windows.UTF16PtrFromString(installationMarker(dir))
+	name, err := objectName(installationMarker(dir), false)
 	if err != nil {
 		return false
 	}
-	h, err := windows.OpenEvent(windows.SYNCHRONIZE|windows.READ_CONTROL, false, name)
+	h, err := windows.OpenEvent(windows.SYNCHRONIZE, false, name)
 	if err != nil {
 		return false
 	}
-	defer windows.CloseHandle(h)
-	return trustedObjectOwner(h)
+	windows.CloseHandle(h)
+	return true
 }
 
 // WaitForInstanceExit waits until no instance holds the single-instance
@@ -229,29 +328,36 @@ func StopInstallation(dir string) (int, error) {
 }
 
 // StopProcessesOf terminates every running instance of the given exe names
-// located in dir
+// located in dir, one name after the other in the given order — the tray app
+// first: until it is gone it may start another sing-box, which a snapshot
+// taken before would miss. The instances of one name end together, with one
+// bounded wait (see terminateAll: anyone may start the installation's
+// sing-box.exe, and a debugger can keep a terminated one from ending).
 func StopProcessesOf(dir string, exes ...string) (int, error) {
 	stopped := 0
 	var firstErr error
 	for _, exe := range exes {
-		pids, err := findProcesses(filepath.Join(dir, exe))
+		found, err := findProcesses(filepath.Join(dir, exe))
 		if err != nil {
 			return stopped, err
 		}
-		for _, pid := range pids {
-			if pid == windows.GetCurrentProcessId() {
+		var procs []foundProcess
+		for _, p := range found {
+			if p.pid == windows.GetCurrentProcessId() {
 				// `--uninstall-cleanup` runs from the installation it cleans
 				// up: the helper itself is not what has to be stopped
 				continue
 			}
-			log.Printf("Stopping %s (PID %d) of the installation in %s", exe, pid, dir)
-			if err := terminateProcess(pid, config.StopWaitTimeout*time.Second); err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
-				continue
-			}
-			stopped++
+			log.Printf("Stopping %s (PID %d) of the installation in %s", exe, p.pid, dir)
+			procs = append(procs, p)
+		}
+		if len(procs) == 0 {
+			continue
+		}
+		n, err := terminateAll(procs, config.StopWaitTimeout*time.Second)
+		stopped += n
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return stopped, firstErr

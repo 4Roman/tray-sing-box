@@ -31,6 +31,7 @@ var ansiEscapes = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // Manager manages the sing-box VPN process
 type Manager struct {
 	cmd      *exec.Cmd
+	cmdDone  <-chan struct{} // closed when cmd has exited (valid with cmd)
 	mu       sync.Mutex
 	binDir   string // sing-box.exe
 	dataDir  string // config.json, console log, working directory of sing-box
@@ -142,6 +143,7 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 		m.running = true
 		return nil, nil
 	}
+	m.endUnelevated()
 
 	log.Println("sing-box.exe is not running, starting new instance")
 
@@ -180,6 +182,7 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 	log.Printf("sing-box process started successfully (PID: %d)", cmd.Process.Pid)
 
 	m.cmd = cmd
+	m.cmdDone = proc.done
 	m.running = false // set by Start once the grace is over
 
 	// Monitor the process. m.cmd may be replaced or nilled (Stop, restart)
@@ -346,22 +349,56 @@ func (m *Manager) Stop() error {
 
 	// Only the instances of OUR sing-box.exe (full path), by PID — never
 	// "taskkill /IM", which kills every sing-box.exe on the machine
-	pids, err := findProcesses(m.singBoxPath())
+	found, err := findProcesses(m.singBoxPath())
 	if err != nil {
 		return fmt.Errorf("failed to stop sing-box: %w", err)
 	}
-	if len(pids) == 0 {
+	if len(found) == 0 {
 		log.Println("sing-box.exe is not running, nothing to stop")
 	}
 
-	var firstErr error
-	for _, pid := range pids {
-		log.Printf("Terminating sing-box (PID: %d)...", pid)
-		if err := terminateProcess(pid, config.StopWaitTimeout*time.Second); err != nil {
+	var (
+		firstErr   error
+		unelevated []foundProcess
+		ownSeen    bool
+	)
+	for _, p := range found {
+		if m.cmd != nil && m.cmd.Process != nil && p.pid == uint32(m.cmd.Process.Pid) {
+			ownSeen = true
+		}
+		if !p.elevated {
+			unelevated = append(unelevated, p)
+			continue
+		}
+		log.Printf("Terminating sing-box (PID: %d)...", p.pid)
+		if err := terminateProcess(p, config.StopWaitTimeout*time.Second); err != nil {
 			log.Printf("Failed to stop sing-box: %v", err)
 			if firstErr == nil {
 				firstErr = err
 			}
+		}
+	}
+	// The process this manager started is ended through its own handle even
+	// when the path match missed it — a Stop that reports success must not
+	// leave the VPN running
+	if m.cmd != nil && m.cmd.Process != nil && !ownSeen {
+		log.Printf("Terminating sing-box started by this app (PID: %d), not found by path", m.cmd.Process.Pid)
+		m.cmd.Process.Kill()
+		select {
+		case <-m.cmdDone:
+		case <-time.After(config.StopWaitTimeout * time.Second):
+			if firstErr == nil {
+				firstErr = fmt.Errorf("process %d is still running after it was killed", m.cmd.Process.Pid)
+			}
+		}
+	}
+	// A non-elevated instance is not the VPN (see endUnelevated): ended too,
+	// but one that cannot be ended — another user's, or frozen — must not
+	// make the user's "stop" fail or wait
+	if len(unelevated) > 0 {
+		log.Printf("Terminating %d sing-box instance(s) not started by this app", len(unelevated))
+		if _, err := terminateAll(unelevated, unownedStopWait); err != nil {
+			log.Printf("Warning: %v", err)
 		}
 	}
 	if firstErr != nil {
@@ -400,14 +437,55 @@ func (m *Manager) IsRunning() bool {
 // called with lock held). Called on every monitor tick while the process is
 // not owned, so it must stay cheap and must not log per call. When the check
 // itself fails the last known state is kept: reporting "stopped" would make
-// the monitor take a live VPN for a crashed one.
+// the monitor take a live VPN for a crashed one. Only an elevated instance
+// counts: every sing-box this app starts is elevated, one started by a
+// non-elevated program is not the VPN (see endUnelevated).
 func (m *Manager) isRunning() bool {
-	pids, err := findProcesses(m.singBoxPath())
+	found, err := findProcesses(m.singBoxPath())
 	if err != nil {
 		log.Printf("ERROR: Failed to check for sing-box process: %v", err)
 		return m.running
 	}
-	return len(pids) > 0
+	for _, p := range found {
+		if p.elevated {
+			return true
+		}
+	}
+	return false
+}
+
+// unownedStopWait bounds the wait for sing-box instances this app did not
+// start (see terminateAll): all of them together, not each
+const unownedStopWait = 2 * time.Second
+
+// endUnelevated terminates instances of our sing-box.exe that a
+// non-elevated program started (must be called with lock held, before a
+// start). The installed sing-box.exe is executable by every user: such an
+// instance runs a config of its own, and it is in the way of the real VPN —
+// same ports, same TUN interface name. Best effort, with one short wait for
+// all of them: one that cannot be ended (another user's, or frozen by a
+// debugger) makes the start fail with sing-box's own error, which the user
+// then sees.
+func (m *Manager) endUnelevated() {
+	found, err := findProcesses(m.singBoxPath())
+	if err != nil {
+		return
+	}
+	var procs []foundProcess
+	var pids []uint32
+	for _, p := range found {
+		if !p.elevated {
+			procs = append(procs, p)
+			pids = append(pids, p.pid)
+		}
+	}
+	if len(procs) == 0 {
+		return
+	}
+	log.Printf("Warning: %s runs without elevation (PIDs %v) — started by another program, not by this app; terminating it", m.singBoxPath(), pids)
+	if _, err := terminateAll(procs, unownedStopWait); err != nil {
+		log.Printf("Warning: %v", err)
+	}
 }
 
 // WaitForExplorer waits for the Windows shell (system tray) to be ready.
