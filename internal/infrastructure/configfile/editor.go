@@ -467,7 +467,10 @@ func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOut
 	}
 }
 
-// ReadSection returns a config section as pretty-printed JSON text
+// ReadSection returns a config section as pretty-printed JSON text for
+// display: every credential (password, uuid, private key...) is replaced by
+// SecretPlaceholder, the file itself is not touched. WriteSection turns a kept
+// placeholder back into the stored value (secrets.go).
 func (e *Editor) ReadSection(name string) (string, error) {
 	isArray, ok := editableSections[name]
 	if !ok {
@@ -490,14 +493,17 @@ func (e *Editor) ReadSection(name string) (string, error) {
 		return "{}", nil
 	}
 
-	text, err := marshalIndent(section)
+	text, err := marshalIndent(maskSecrets(section))
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize section %q: %w", name, err)
 	}
 	return string(bytes.TrimSpace(text)), nil
 }
 
-// WriteSection replaces a config section with user-provided JSON text
+// WriteSection replaces a config section with user-provided JSON text. A
+// SecretPlaceholder kept from ReadSection gets the stored value back, but only
+// in an outbound that is otherwise unchanged (secrets.go); a placeholder that
+// cannot be restored refuses the save.
 func (e *Editor) WriteSection(name string, raw []byte) error {
 	isArray, ok := editableSections[name]
 	if !ok {
@@ -533,6 +539,12 @@ func (e *Editor) WriteSection(name string, raw []byte) error {
 
 	cfg, original, err := e.load()
 	if err != nil {
+		return err
+	}
+	// The page shows the section masked: the placeholders it sends back
+	// must turn into the stored credentials before anything else looks at
+	// the config (the guard and sing-box check below see the real one)
+	if err := restorePlaceholders(name, value, cfg[name]); err != nil {
 		return err
 	}
 	cfg[name] = value

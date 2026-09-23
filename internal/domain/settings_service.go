@@ -21,7 +21,13 @@ type ConfigVersion struct {
 
 // SettingsStore reads and edits sections of the sing-box configuration
 type SettingsStore interface {
+	// ReadSection returns a section as text for display: credentials
+	// (passwords, UUIDs, private keys) are replaced by a placeholder — the
+	// text goes to the non-elevated browser
 	ReadSection(name string) (string, error)
+	// WriteSection saves a section; a placeholder kept from ReadSection gets
+	// the stored credential back, but only in an outbound that is otherwise
+	// unchanged — anything else must carry the real value
 	WriteSection(name string, raw []byte) error
 	ListOutbounds() ([]OutboundInfo, error)
 	ActiveOutbound() (string, error)
@@ -42,7 +48,8 @@ func NewSettingsService(store SettingsStore, vpn *VPNService) *SettingsService {
 	return &SettingsService{store: store, vpn: vpn}
 }
 
-// Section returns the JSON text of a config section (outbounds, route)
+// Section returns the JSON text of a config section (outbounds, route) for
+// display, credentials masked (see SettingsStore.ReadSection)
 func (s *SettingsService) Section(name string) (string, error) {
 	return s.store.ReadSection(name)
 }
