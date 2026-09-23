@@ -11,11 +11,13 @@ type fakeProcessManager struct {
 	running  bool
 	startErr error
 	stopErr  error
+	starts   int // Start calls, successful or not
 }
 
 func (f *fakeProcessManager) Start() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.starts++
 	if f.startErr != nil {
 		return f.startErr
 	}
@@ -43,6 +45,12 @@ func (f *fakeProcessManager) setRunning(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.running = v
+}
+
+func (f *fakeProcessManager) startCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.starts
 }
 
 type fakeStorage struct {

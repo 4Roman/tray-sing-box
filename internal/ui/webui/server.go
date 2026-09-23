@@ -14,7 +14,9 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
+	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
 )
 
@@ -48,6 +50,8 @@ type Server struct {
 	settings *domain.SettingsService
 	importer *domain.ImportService
 	updater  *domain.UpdateService
+	app      *domain.AppUpdateService // nil: self-update not configured
+	relaunch func()                   // quits into the installed version
 	dpi      *domain.DPIBypassService
 	subs     *domain.SubscriptionService
 	conn     *domain.ConnectivityService
@@ -55,7 +59,7 @@ type Server struct {
 	logs     LogAccess
 
 	mu    sync.Mutex
-	opMu  sync.Mutex // serializes config/binary mutations
+	opMu  *sync.Mutex // serializes config/binary mutations, see ShareOpLock
 	url   string
 	token string
 	page  *template.Template
@@ -72,7 +76,23 @@ func New(settings *domain.SettingsService, importer *domain.ImportService, updat
 		conn:     conn,
 		sources:  sources,
 		logs:     logs,
+		opMu:     &sync.Mutex{},
 	}
+}
+
+// SetAppUpdater enables self-update of the application from the page.
+// relaunch is called (from a goroutine, after the response) when the user
+// asks to restart into an installed update.
+func (s *Server) SetAppUpdater(svc *domain.AppUpdateService, relaunch func()) {
+	s.app = svc
+	s.relaunch = relaunch
+}
+
+// ShareOpLock makes the server serialize its long operations with another
+// entry point (the tray handlers): an import from the browser and a binary
+// update from the tray must not interleave. Call before Open.
+func (s *Server) ShareOpLock(mu *sync.Mutex) {
+	s.opMu = mu
 }
 
 // Open starts the server if needed and opens the settings page in the browser
@@ -115,8 +135,12 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("GET /api/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
+	mux.HandleFunc("POST /api/vpn", s.auth(s.handleVPN))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
+	mux.HandleFunc("GET /api/app-update", s.auth(s.handleAppUpdateCheck))
+	mux.HandleFunc("POST /api/app-update", s.auth(s.handleAppUpdate))
+	mux.HandleFunc("POST /api/app-update/relaunch", s.auth(s.handleAppRelaunch))
 	mux.HandleFunc("GET /api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc("GET /api/history", s.auth(s.handleHistory))
 	mux.HandleFunc("POST /api/history/restore", s.auth(s.handleHistoryRestore))
@@ -194,12 +218,16 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One observation for both fields. "status" adds "starting" (the app is
+	// still bringing the VPN up) to what the boolean can say.
+	status := s.settings.VPNStatus()
 	resp := map[string]any{
 		"outbounds": outbounds,
 		"route":     route,
 		"list":      list,
 		"active":    active,
-		"running":   s.settings.IsVPNRunning(),
+		"running":   status.IsRunning(),
+		"status":    status.String(),
 	}
 	if s.conn != nil {
 		resp["connectivity"] = s.conn.Status()
@@ -217,12 +245,41 @@ func (s *Server) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Config edits take the operation lock too: a save from the browser must
+	// not interleave with a binary update or a subscription sync started from
+	// the tray (the lock is shared, see ShareOpLock)
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
 	restarted, err := s.settings.SaveSection(req.Name, []byte(req.Content))
 	if err != nil {
 		fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
+}
+
+// handleVPN starts or stops the VPN as asked. Like the tray toggle it takes
+// no opMu: the process life cycle is serialized inside VPNService, and a
+// "stop" must not queue behind a long download.
+func (s *Server) handleVPN(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Running bool `json:"running"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	if err := s.settings.SetVPN(req.Running); err != nil {
+		fail(w, err)
+		return
+	}
+	status := s.settings.VPNStatus()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"running": status.IsRunning(),
+		"status":  status.String(),
+	})
 }
 
 func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +290,9 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 		fail(w, fmt.Errorf("bad request: %w", err))
 		return
 	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 
 	restarted, err := s.settings.UseOutbound(req.Tag)
 	if err != nil {
@@ -262,6 +322,77 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		"updated":   result.Updated,
 		"restarted": result.Restarted,
 	})
+}
+
+// handleAppUpdateCheck reports the running version and the latest release
+func (s *Server) handleAppUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	resp := map[string]any{"version": config.Version, "configured": s.app != nil}
+	if s.app == nil {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	// A pending relaunch is reported even when GitHub is unreachable: the
+	// page must still offer the "restart into the new version" button
+	resp["installed"] = s.app.Installed()
+	if v := s.app.InstalledVersion(); v != "" {
+		resp["latest"] = v
+		resp["available"] = true
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	result, err := s.app.Check()
+	if err != nil {
+		resp["error"] = err.Error()
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["latest"] = result.LatestVersion
+	resp["available"] = result.Available
+	resp["notes"] = result.Notes
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleAppUpdate downloads and installs the latest release; the relaunch
+// is a separate call so the page can ask first
+func (s *Server) handleAppUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.app == nil {
+		fail(w, fmt.Errorf("автообновление приложения не настроено в этой сборке"))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	result, err := s.app.Update()
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":   result.CurrentVersion,
+		"latest":    result.LatestVersion,
+		"available": result.Available,
+		"installed": result.Installed,
+	})
+}
+
+// handleAppRelaunch restarts the application into an installed update. The
+// response goes out first; the process then exits and the page loses its
+// server (new port and token on the next start).
+func (s *Server) handleAppRelaunch(w http.ResponseWriter, r *http.Request) {
+	if s.app == nil || s.relaunch == nil {
+		fail(w, fmt.Errorf("автообновление приложения не настроено в этой сборке"))
+		return
+	}
+	if !s.app.Installed() {
+		fail(w, fmt.Errorf("обновление ещё не установлено"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"relaunching": true})
+	go func() {
+		time.Sleep(500 * time.Millisecond) // let the response reach the page
+		s.relaunch()
+	}()
 }
 
 // handleLogs returns the tails of the known log files. A file that cannot be
@@ -540,6 +671,9 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		fail(w, fmt.Errorf("import source %q is not available", req.Source))
 		return
 	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
 
 	text, err := source()
 	if err != nil {

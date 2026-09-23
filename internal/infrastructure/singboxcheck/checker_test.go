@@ -19,6 +19,11 @@ func realDir(t *testing.T) string {
 	if dir == "" {
 		t.Skip("SINGBOX_REAL_DIR not set")
 	}
+	// Read-only on the real installation: the scratch config goes elsewhere
+	scratch := t.TempDir()
+	old := scratchDir
+	scratchDir = func(string) string { return scratch }
+	t.Cleanup(func() { scratchDir = old })
 	if _, err := os.Stat(filepath.Join(dir, "sing-box.exe")); err != nil {
 		t.Skipf("sing-box.exe not found in %s", dir)
 	}
@@ -32,7 +37,7 @@ func TestValidatorAcceptsRealConfig(t *testing.T) {
 		t.Skipf("config.json not readable: %v", err)
 	}
 
-	if err := NewValidator(dir)(raw); err != nil {
+	if err := NewValidator(dir, dir)(raw); err != nil {
 		t.Fatalf("real config rejected: %v", err)
 	}
 }
@@ -40,7 +45,7 @@ func TestValidatorAcceptsRealConfig(t *testing.T) {
 func TestValidatorRejectsBrokenConfig(t *testing.T) {
 	dir := realDir(t)
 
-	err := NewValidator(dir)([]byte(`{"outbounds": [{"type": "no-such-type", "tag": "x"}]}`))
+	err := NewValidator(dir, dir)([]byte(`{"outbounds": [{"type": "no-such-type", "tag": "x"}]}`))
 	if err == nil {
 		t.Fatal("broken config accepted by validator")
 	}
@@ -62,7 +67,7 @@ func TestSwitchOutboundOnRealConfigCopy(t *testing.T) {
 	}
 
 	editor := configfile.New(copyPath)
-	editor.SetValidator(NewValidator(dir))
+	editor.SetValidator(NewValidator(dir, dir))
 
 	list, err := editor.ListOutbounds()
 	if err != nil {

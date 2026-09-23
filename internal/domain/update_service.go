@@ -70,30 +70,29 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 		return result, fmt.Errorf("failed to download sing-box %s: %w", latest.Version, err)
 	}
 
-	wasRunning := s.vpn.GetStatus().IsRunning()
-	if wasRunning {
-		if err := s.vpn.Stop(); err != nil {
-			return result, fmt.Errorf("failed to stop VPN for the update: %w", err)
+	// The swap is a maintenance stop, not a user decision: WithStopped leaves
+	// the stored intent alone (a failed start must not disable auto-enable on
+	// next boot) and keeps the crash monitor away from the half-swapped
+	// binary. The VPN is started again regardless of the install outcome: on
+	// failure Install restores the previous binary, so it comes back on the
+	// old version.
+	installed := false
+	restarted, err := s.vpn.WithStopped(func() error {
+		if err := s.repo.Install(staged); err != nil {
+			return fmt.Errorf("failed to install sing-box %s: %w", latest.Version, err)
 		}
-	}
-
-	installErr := s.repo.Install(staged)
-
-	if wasRunning {
-		// Start regardless of install outcome: on failure Install restores
-		// the previous binary, so the VPN comes back on the old version
-		if err := s.vpn.Start(); err != nil {
-			log.Printf("Update: failed to start VPN after update: %v", err)
-		} else {
-			result.Restarted = true
+		installed = true
+		return nil
+	})
+	result.Restarted = restarted
+	result.Updated = installed
+	if err != nil {
+		if installed {
+			return result, fmt.Errorf("sing-box updated to %s, but: %w", latest.Version, err)
 		}
+		return result, err
 	}
 
-	if installErr != nil {
-		return result, fmt.Errorf("failed to install sing-box %s: %w", latest.Version, installErr)
-	}
-
-	result.Updated = true
 	log.Printf("Update: sing-box updated %q -> %q (restarted: %v)", current, latest.Version, result.Restarted)
 	return result, nil
 }

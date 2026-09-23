@@ -92,7 +92,21 @@ func (s *SettingsService) UseOutbound(tag string) (restarted bool, err error) {
 
 // IsVPNRunning reports the current VPN status for UI display
 func (s *SettingsService) IsVPNRunning() bool {
-	return s.vpn.GetStatus().IsRunning()
+	return s.VPNStatus().IsRunning()
+}
+
+// VPNStatus reports the current VPN status, including "starting"
+func (s *SettingsService) VPNStatus() VPNStatus {
+	return s.vpn.GetStatus()
+}
+
+// SetVPN turns the VPN on or off on the user's request (same as the tray
+// toggle: an explicit action that records the intent)
+func (s *SettingsService) SetVPN(running bool) error {
+	if running {
+		return s.vpn.Start()
+	}
+	return s.vpn.Stop()
 }
 
 // History returns the archived config versions, newest first

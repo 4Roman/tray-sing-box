@@ -6,14 +6,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/windows"
+
 	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
+	"tray-sing-box/internal/infrastructure/paths"
 	"tray-sing-box/internal/infrastructure/process"
 )
 
@@ -49,11 +54,100 @@ func (m *Manager) SetParams(p string) { m.params = p }
 // ProxyAddr returns the host and port the container publishes the proxy on.
 func (m *Manager) ProxyAddr() (string, int) { return m.host, m.port }
 
+// dockerExe finds the Docker CLI the elevated app may run: Docker Desktop's
+// own copy under Program Files, and only after paths.CheckAdminOnlyFile —
+// the file and every folder above it owned by an administrator and
+// writable by no one else. Not PATH: the user's own entries follow the
+// system ones and some are writable without elevation, and even %WINDIR%
+// has user-writable subfolders; the DPI status check runs docker at every
+// start.
+func dockerExe() (string, error) {
+	f := paths.SystemFolders()
+	var tried []string
+	for _, root := range []string{f.ProgramFiles, f.ProgramFilesX86} {
+		if root == "" {
+			continue
+		}
+		exe := filepath.Join(root, "Docker", "Docker", "resources", "bin", "docker.exe")
+		if _, err := os.Stat(exe); err != nil {
+			tried = append(tried, exe)
+			continue
+		}
+		if err := paths.CheckAdminOnlyFile(exe); err != nil {
+			return "", fmt.Errorf("%s не будет запущен с правами администратора: %v", exe, err)
+		}
+		return exe, nil
+	}
+	return "", fmt.Errorf("Docker Desktop не найден — установите Docker Desktop (искали %s)", strings.Join(tried, ", "))
+}
+
+var cliConfigDir string
+
+// SetCLIConfigDir sets the directory the docker CLI uses as its
+// configuration (DOCKER_CONFIG): one of the app, in its data directory — not
+// the user's %USERPROFILE%\.docker, whose config.json (credsStore,
+// credHelpers, plugin directories) would make the elevated CLI run programs
+// the user's non-elevated software chose
+func SetCLIConfigDir(dir string) { cliConfigDir = dir }
+
+// dockerEnv is the whole environment of the elevated docker CLI: built here,
+// nothing inherited (the user's environment could point DOCKER_CONFIG,
+// DOCKER_HOST, PATH and friends anywhere)
+func dockerEnv(exe string) ([]string, error) {
+	if cliConfigDir == "" {
+		return nil, errors.New("docker CLI configuration directory not set")
+	}
+	if err := os.MkdirAll(cliConfigDir, 0755); err != nil {
+		return nil, err
+	}
+	f := paths.SystemFolders()
+	temp := filepath.Join(f.Windows, "Temp")
+	return []string{
+		"SystemRoot=" + f.Windows,
+		"windir=" + f.Windows,
+		"ProgramData=" + f.ProgramData,
+		"ProgramFiles=" + f.ProgramFiles,
+		"PATH=" + f.System32 + ";" + filepath.Dir(exe),
+		"DOCKER_CONFIG=" + cliConfigDir,
+		"USERPROFILE=" + cliConfigDir,
+		"HOME=" + cliConfigDir,
+		"TEMP=" + temp,
+		"TMP=" + temp,
+		"DOCKER_HOST=npipe:////./pipe/" + enginePipe(),
+	}, nil
+}
+
+// enginePipe: Docker Desktop's Linux engine pipe when it exists, else the
+// classic default one
+func enginePipe() string {
+	const desktop = "dockerDesktopLinuxEngine"
+	name, err := windows.UTF16PtrFromString(`\\.\pipe\` + desktop)
+	if err != nil {
+		return "docker_engine"
+	}
+	var data windows.Win32finddata
+	h, err := windows.FindFirstFile(name, &data)
+	if err != nil {
+		return "docker_engine"
+	}
+	windows.FindClose(h)
+	return desktop
+}
+
 // docker runs a docker CLI command with a hidden console window and a timeout.
 func docker(timeout time.Duration, args ...string) ([]byte, error) {
+	exe, err := dockerExe()
+	if err != nil {
+		return nil, err
+	}
+	env, err := dockerEnv(exe)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
 		CreationFlags: process.CREATE_NO_WINDOW | process.DETACHED_PROCESS,
@@ -72,11 +166,12 @@ func dockerErr(action string, out []byte, err error) error {
 
 // Available reports whether the Docker CLI exists and the daemon is reachable.
 func (m *Manager) Available() error {
+	// Missing or refused (not admin-only) — starting Docker would not help
+	if _, err := dockerExe(); err != nil {
+		return err
+	}
 	out, err := docker(shortTimeout, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("Docker CLI не найден — установите Docker Desktop")
-		}
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
 			msg = err.Error()

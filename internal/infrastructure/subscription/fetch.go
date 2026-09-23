@@ -5,13 +5,17 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"tray-sing-box/internal/infrastructure/nettrust"
 )
 
 // maxBodySize caps a subscription download; share-link lists are small, so a
 // multi-megabyte body means a wrong URL rather than a huge node list
 const maxBodySize = 8 << 20 // 8 MB
 
-var client = &http.Client{Timeout: 30 * time.Second}
+// The elevated app's client: no proxy from the (user-controlled)
+// environment, TLS against the machine's roots, no https->http redirect
+var client = nettrust.Client(30 * time.Second)
 
 // Fetch downloads the subscription body. Some providers vary the response
 // format by User-Agent; a v2ray-style UA gets the plain/base64 share-link

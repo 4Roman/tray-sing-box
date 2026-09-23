@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
 )
 
@@ -52,7 +53,7 @@ func TestInstallSwapsWithBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := New(exeDir).Install(staged); err != nil {
+	if err := New(exeDir, exeDir).Install(staged); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 
@@ -74,7 +75,7 @@ func TestInstallFreshWithoutPrevious(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := New(exeDir).Install(staged); err != nil {
+	if err := New(exeDir, exeDir).Install(staged); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	data, _ := os.ReadFile(filepath.Join(exeDir, "sing-box.exe"))
@@ -96,7 +97,17 @@ func TestEndToEndDownload(t *testing.T) {
 		t.Skip("short mode")
 	}
 
-	u := New(realDir)
+	// A copy: Download stages next to the binary, and the real installation
+	// must stay untouched
+	tmp := t.TempDir()
+	data, err := os.ReadFile(filepath.Join(realDir, config.SingBoxExe))
+	if err != nil {
+		t.Fatalf("read the real sing-box.exe: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, config.SingBoxExe), data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	u := New(tmp, tmp)
 
 	current, err := u.CurrentVersion()
 	if err != nil {
@@ -122,7 +133,7 @@ func TestEndToEndDownload(t *testing.T) {
 	}
 	defer os.RemoveAll(filepath.Dir(staged))
 
-	version, err := binaryVersion(staged)
+	version, err := binaryVersion(staged, filepath.Dir(staged))
 	if err != nil {
 		t.Fatalf("staged binary does not run: %v", err)
 	}

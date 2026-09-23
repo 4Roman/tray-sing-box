@@ -8,8 +8,9 @@ import (
 )
 
 // The crash auto-restart decision logic is tested directly (without the
-// monitoring ticker): autoRestartIfCrashed is what the monitor calls on an
-// observed running -> stopped transition.
+// monitoring ticker): autoRestartIfCrashed is what the monitor calls while
+// the process is down and the backoff allows an attempt (the backoff gate
+// lives in monitorTick, see monitor_test.go).
 
 func TestAutoRestartWhenIntentRunning(t *testing.T) {
 	pm := &fakeProcessManager{} // process died

@@ -91,7 +91,7 @@
 </head>
 <body>
 <h1>Настройки sing-box</h1>
-<div class="vpn-state">VPN: <b id="vpn">—</b></div>
+<div class="vpn-state">VPN: <b id="vpn">—</b> <button id="vpn-btn" onclick="toggleVPN()" style="margin-left:10px" disabled>…</button></div>
 <div id="msg"></div>
 
 <section>
@@ -125,6 +125,18 @@
   <h2>Обновление sing-box</h2>
   <div class="row">
     <button class="secondary" onclick="updateSingBox(this)">Проверить и обновить с GitHub</button>
+  </div>
+</section>
+
+<section id="app-update" style="display:none">
+  <h2>Обновление приложения</h2>
+  <div class="vpn-state">Версия: <b id="app-version">—</b> · Последний релиз: <b id="app-latest">—</b></div>
+  <div class="row">
+    <button class="secondary" onclick="updateApp(this)">Проверить и обновить</button>
+    <button class="secondary" id="app-relaunch" style="display:none" onclick="relaunchApp(this)">Перезапустить в новую версию</button>
+  </div>
+  <div class="vpn-state" style="margin-top:10px">
+    Релизы берутся с GitHub и принимаются только с подписью проекта. VPN при обновлении не прерывается: перезапускается только это приложение, sing-box продолжает работать.
   </div>
 </section>
 
@@ -234,14 +246,35 @@ async function refresh() {
     document.getElementById('route').value = d.route;
     const vpn = document.getElementById('vpn');
     const noNet = d.running && d.connectivity && d.connectivity.checked && !d.connectivity.ok;
-    vpn.textContent = d.running ? (noNet ? 'запущен (нет связи)' : 'запущен') : 'остановлен';
+    // "starting": VPN включён, но sing-box ещё не поднялся — приложение пробует само
+    const down = d.status === 'starting' ? 'запускается…' : 'остановлен';
+    vpn.textContent = d.running ? (noNet ? 'запущен (нет связи)' : 'запущен') : down;
     vpn.className = (d.running && !noNet) ? 'on' : 'off';
+    // Like the tray item: while the app is still bringing the VPN up the
+    // button offers "stop" — that is how the attempts are called off
+    const btn = document.getElementById('vpn-btn');
+    btn.dataset.want = (d.running || d.status === 'starting') ? 'false' : 'true';
+    btn.textContent = btn.dataset.want === 'true' ? 'Включить' : 'Выключить';
+    btn.disabled = false;
     renderOutbounds(d.list, d.active);
   } catch (e) {
     show('err', 'Не удалось загрузить конфигурацию: ' + e.message);
   }
   // Fetch DPI status separately: a slow/absent Docker must not block config load
   refreshDPI();
+}
+
+async function toggleVPN() {
+  const btn = document.getElementById('vpn-btn');
+  const want = btn.dataset.want === 'true';
+  btn.disabled = true;
+  try {
+    await api('/api/vpn', { running: want });
+    show('ok', want ? 'VPN включён' : 'VPN выключен');
+  } catch (e) {
+    show('err', (want ? 'Не удалось включить VPN: ' : 'Не удалось выключить VPN: ') + e.message);
+  }
+  await refresh();
 }
 
 const DPI_STATE_RU = { running: 'запущен', stopped: 'остановлен', absent: 'не создан' };
@@ -322,6 +355,49 @@ function switchOutbound() {
     show('ok', 'Трафик переключён на «' + chosen.value + '»' + restartedSuffix(d));
     await refresh();
   });
+}
+
+async function refreshAppUpdate() {
+  try {
+    const d = await api('/api/app-update');
+    const box = document.getElementById('app-update');
+    if (!d.configured) { box.style.display = 'none'; return; }
+    box.style.display = '';
+    document.getElementById('app-version').textContent = d.version || '—';
+    document.getElementById('app-latest').textContent = d.error ? ('не удалось проверить: ' + d.error)
+      : (d.latest ? (d.latest + (d.installed ? ' (установлена, ждёт перезапуска)' : d.available ? ' (доступно обновление)' : '')) : '—');
+    document.getElementById('app-relaunch').style.display = d.installed ? '' : 'none';
+  } catch (e) {
+    // A failed check (offline) must not spoil the page
+  }
+}
+
+async function updateApp(btn) {
+  btn.disabled = true;
+  try {
+    const d = await api('/api/app-update', {});
+    if (d.installed) {
+      show('ok', 'Установлена версия ' + d.latest + '. Нажмите «Перезапустить в новую версию» — VPN не прерывается.');
+    } else {
+      show('ok', 'Обновление не требуется: установлена версия ' + d.version + ', последний релиз ' + d.latest);
+    }
+  } catch (e) {
+    show('err', 'Обновление приложения: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    await refreshAppUpdate();
+  }
+}
+
+async function relaunchApp(btn) {
+  btn.disabled = true;
+  try {
+    await api('/api/app-update/relaunch', {});
+    show('ok', 'Приложение перезапускается. Эта вкладка перестанет работать — откройте «Настройки» из трея заново.');
+  } catch (e) {
+    show('err', 'Перезапуск: ' + e.message);
+    btn.disabled = false;
+  }
 }
 
 function updateSingBox(btn) {
@@ -437,7 +513,7 @@ function removeSubscription(url, btn) {
   });
 }
 
-const LOG_LABELS = { app: 'Приложение', singbox: 'sing-box' };
+const LOG_LABELS = { app: 'Приложение', singbox: 'sing-box', console: 'sing-box (вывод в консоль)' };
 let logsTimer = null;
 
 async function refreshLogs(btn) {
@@ -482,7 +558,7 @@ function renderLogs(files) {
     const hint = document.createElement('div');
     hint.className = 'vpn-state';
     hint.style.marginTop = '10px';
-    hint.textContent = 'Лог sing-box не настроен: добавьте "output": "sing-box.log" в секцию log конфига, и он появится здесь.';
+    hint.textContent = 'Отдельный лог sing-box не настроен (секция log, "output": "sing-box.log"): пока его нет, sing-box пишет в «вывод в консоль» — файл sing-box-console.log.';
     box.append(hint);
   }
 }
@@ -545,6 +621,7 @@ refresh();
 refreshSubs();
 refreshHistory();
 refreshLogs(null);
+refreshAppUpdate();
 </script>
 </body>
 </html>

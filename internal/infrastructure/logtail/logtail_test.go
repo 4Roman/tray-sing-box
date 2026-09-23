@@ -66,6 +66,31 @@ func TestFilesIgnoresUnsetOrBrokenConfig(t *testing.T) {
 	}
 }
 
+// sing-box's stdout/stderr capture shows up once sing-box has been started
+func TestFilesConsoleCapture(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, config.SingBoxConsoleLog), "FATAL start service\n")
+
+	files := New(dir).Files()
+	if len(files) != 2 || files[1].ID != "console" || files[1].Path != filepath.Join(dir, config.SingBoxConsoleLog) {
+		t.Fatalf("console capture not listed: %+v", files)
+	}
+
+	// With a separate log.output all three are listed, the console last
+	write(t, filepath.Join(dir, config.SingBoxConfig), `{"log":{"output":"sing-box.log"}}`)
+	files = New(dir).Files()
+	if len(files) != 3 || files[1].ID != "singbox" || files[2].ID != "console" {
+		t.Fatalf("want app, singbox, console — got %+v", files)
+	}
+
+	// log.output pointing at the very same file: listed once
+	write(t, filepath.Join(dir, config.SingBoxConfig), `{"log":{"output":"`+config.SingBoxConsoleLog+`"}}`)
+	files = New(dir).Files()
+	if len(files) != 2 || files[1].ID != "singbox" {
+		t.Fatalf("same file listed twice or lost: %+v", files)
+	}
+}
+
 func TestTailShortFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.log")
@@ -108,4 +133,18 @@ func TestTailMissingFile(t *testing.T) {
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// A log.output outside the data dir is not shown by the elevated viewer
+func TestFilesIgnoresOutputOutsideTheDataDir(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "sb.log")
+	for _, out := range []string{outside, `..\\sb.log`} {
+		write(t, filepath.Join(dir, config.SingBoxConfig), `{"log":{"output":`+jsonString(out)+`}}`)
+		for _, f := range New(dir).Files() {
+			if f.ID == "singbox" {
+				t.Fatalf("log.output %q outside the data dir listed: %+v", out, f)
+			}
+		}
+	}
 }

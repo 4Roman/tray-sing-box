@@ -7,17 +7,21 @@ EXE     := bin/tray-sing-box.exe
 ICO     := assets/icons/tray.ico
 ICO_OFF := assets/icons/tray-off.ico
 
+# Stamped into the exe (`tray-sing-box.exe --version`, first lines of the log)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -H windowsgui -X tray-sing-box/internal/config.Version=$(VERSION)
+
 .PHONY: all build icons test clean
 
 all: build
 
 # Build the exe, then patch Windows resources (icon, admin manifest, version
-# info) into it with `go-winres patch` — no .syso juggling needed.
+# info) into it with `go-winres patch` — no .syso juggling needed. The tray
+# icons are embedded (package assets), so they must exist BEFORE go build:
+# the exe is the whole app, nothing has to be copied next to it.
 build: $(ICO) $(GO_WINRES)
-	$(GO) build -ldflags="-H windowsgui" -o $(EXE) .
+	$(GO) build -ldflags="$(LDFLAGS)" -o $(EXE) .
 	$(GO_WINRES) patch --in build/winres/winres.json --no-backup $(EXE)
-	mkdir -p bin/assets/icons
-	cp $(ICO) $(ICO_OFF) bin/assets/icons/
 
 icons: $(ICO)
 
@@ -26,10 +30,10 @@ $(ICO): assets/icons/tray.svg tools/genicons/main.go
 	$(GO) run ./tools/genicons
 
 $(GO_WINRES):
-	$(GO) install github.com/tc-hib/go-winres@latest
+	$(GO) install github.com/tc-hib/go-winres@v0.3.3
 
 test:
 	$(GO) test -short ./...
 
 clean:
-	rm -f $(EXE) $(ICO) $(ICO_OFF) bin/assets/icons/*.ico
+	rm -f $(EXE) $(ICO) $(ICO_OFF)

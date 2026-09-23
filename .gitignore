@@ -47,3 +47,6 @@ subscriptions.json
 # Claude Code local state
 /.claude/
 config-history/
+
+# Release signing key (tools/relkey output) - never commit
+release-signing-key*.txt

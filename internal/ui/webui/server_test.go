@@ -147,6 +147,71 @@ func TestConfigEndpoint(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("list = %v", list)
 	}
+	if data["running"] != false || data["status"] != "stopped" {
+		t.Fatalf("running/status = %v/%v, want false/stopped", data["running"], data["status"])
+	}
+}
+
+// The page can start and stop the VPN like the tray does: an explicit action
+// that records the intent
+func TestVPNEndpointStartsAndStops(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(testConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	editor := configfile.New(path)
+	pm := &nopProcessManager{}
+	st := &nopStorage{}
+	vpn := domain.NewVPNService(pm, st)
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
+		nil, nil, nil, nil, Sources{}, LogAccess{})
+	pageURL, err := server.start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	base := baseURL(t, pageURL)
+
+	status, data := call(t, http.MethodPost, base+"/api/vpn", server.token, map[string]any{"running": true})
+	if status != http.StatusOK || data["running"] != true || data["status"] != "running" {
+		t.Fatalf("start: status %d, data %v", status, data)
+	}
+	if !pm.running || !st.state {
+		t.Fatalf("start did not start the process / record the intent: running=%v intent=%v", pm.running, st.state)
+	}
+
+	status, data = call(t, http.MethodPost, base+"/api/vpn", server.token, map[string]any{"running": false})
+	if status != http.StatusOK || data["running"] != false || data["status"] != "stopped" {
+		t.Fatalf("stop: status %d, data %v", status, data)
+	}
+	if pm.running || st.state {
+		t.Fatalf("stop did not stop the process / record the intent: running=%v intent=%v", pm.running, st.state)
+	}
+
+	if status, _ := call(t, http.MethodPost, base+"/api/vpn", "", map[string]any{"running": true}); status != http.StatusForbidden {
+		t.Fatalf("vpn without token: status %d", status)
+	}
+}
+
+// While the app is still bringing the VPN up the page must not say "stopped"
+func TestConfigEndpointReportsStarting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(testConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	editor := configfile.New(path)
+	// Down, but the stored intent says "running"
+	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{state: true})
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
+		nil, nil, nil, nil, Sources{}, LogAccess{})
+	pageURL, err := server.start()
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	_, data := call(t, "GET", baseURL(t, pageURL)+"/api/config", server.token, nil)
+	if data["running"] != false || data["status"] != "starting" {
+		t.Fatalf("running/status = %v/%v, want false/starting", data["running"], data["status"])
+	}
 }
 
 func TestSaveSectionAndSwitch(t *testing.T) {

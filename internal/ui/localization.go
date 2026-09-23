@@ -5,14 +5,16 @@ const (
 	StatusStopped      = "Остановлен"
 	StatusRunning      = "Запущен"
 	StatusRunningNoNet = "Запущен (нет связи)"
+	StatusStarting     = "Запускается…"
 	StatusTooltip      = "Текущий статус VPN"
 
 	ActionStart   = "Включить"
 	ActionStop    = "Выключить"
 	ActionTooltip = "Включить/выключить VPN"
 
-	AutostartTitle   = "Автозапуск"
-	AutostartTooltip = "Автозапуск при старте Windows"
+	AutostartTitle      = "Автозапуск"
+	AutostartTooltip    = "Автозапуск при старте Windows"
+	AutostartErrorTitle = "Ошибка автозапуска"
 
 	SettingsTitle   = "Настройки"
 	SettingsTooltip = "Открыть настройки sing-box в браузере"
@@ -51,7 +53,20 @@ const (
 	DPIDisabledMsg     = "Обход DPI выключен"
 	DPIRestartedSuffix = ", VPN перезапущен"
 
+	AppUpdateTitle        = "Обновить приложение"
+	AppUpdateTooltip      = "Проверить, есть ли новая версия Sing-Box VPN Tray Manager, и установить её"
+	AppUpdateDoneTitle    = "Обновление приложения"
+	AppUpdateErrorTitle   = "Ошибка обновления приложения"
+	AppUpdateUpToDate     = "Обновление не требуется: установлена версия %s, последний релиз %s"
+	AppUpdateInstalledMsg = "Установлена версия %s (была %s). Перезапустить приложение сейчас? VPN при этом не прерывается."
+	AppUpdateAvailableMsg = "Доступна версия %s (установлена %s).\n\n%s\n\nОбновить сейчас? VPN при этом не прерывается."
+
+	AlreadyRunningTitle = "Sing-Box VPN"
+	AlreadyRunningMsg   = "Приложение уже запущено — иконка находится в области уведомлений (возможно, среди скрытых значков)."
+
 	VPNErrorTitle = "Ошибка VPN"
+	// Appended to the "auto-restart gave up" error; "yes" records the stop
+	VPNGiveUpQuestion = "\n\nВыключить VPN, чтобы приложение больше не пыталось его запустить (в том числе при следующем входе в Windows)?"
 
 	ImportSuccessTitle     = "Импорт выполнен"
 	ImportErrorTitle       = "Ошибка импорта"

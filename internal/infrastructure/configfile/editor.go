@@ -80,6 +80,11 @@ func (e *Editor) save(cfg map[string]any, original []byte) error {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
+	// Before anything else: nothing written through the app may give the
+	// elevated sing-box a program to run or a file to write (guard.go)
+	if err := checkNoNewRisky(original, cfg); err != nil {
+		return err
+	}
 	if e.validator != nil {
 		if err := e.validator(updated); err != nil {
 			return fmt.Errorf("config validation failed: %w", err)

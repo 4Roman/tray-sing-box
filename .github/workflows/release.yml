@@ -1,0 +1,94 @@
+name: Release
+
+# Builds a DRAFT GitHub release for every "v<major>.<minor>.<patch>" tag with
+# the exe the app's self-update expects (internal/infrastructure/selfupdate)
+# and the installer:
+#   tray-sing-box-<version>-windows-amd64.exe
+#   tray-sing-box-<version>-setup.exe
+#
+# CI deliberately does NOT sign. The signature exists to protect elevated
+# clients from a compromised GitHub account — and such an account could push
+# a tag and have CI sign anything. So the private key never lives in GitHub:
+# the maintainer downloads the draft's exe, signs it OFFLINE
+#   RELEASE_SIGNING_KEY=<key> go run ./tools/relsign -dir dist
+# uploads checksums.txt + checksums.txt.sig to the draft and publishes it.
+# Clients ignore drafts and refuse releases without a valid signature, so a
+# forgotten step yields "no update", never a bad update.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The tag is data, not code: validated and passed through the
+      # environment rather than interpolated into the script
+      - name: Validate tag and configuration
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if ($env:VERSION -notmatch '^v\d+\.\d+\.\d+$') { throw "release tags must look like v1.2.3, got '$env:VERSION'" }
+          # A release built without the public key could never update itself
+          # to the next one — refuse to strand the first users
+          $cfg = Get-Content internal/config/config.go -Raw
+          if ($cfg -match 'AppUpdateRepo\s*=\s*""' -or $cfg -match 'AppUpdatePublicKey\s*=\s*""') {
+            throw "config.AppUpdateRepo / AppUpdatePublicKey are empty: run tools/relkey and fill them in before tagging a release"
+          }
+
+      - name: Test
+        run: go test -short ./...
+
+      - name: Render icons (embedded into the exe)
+        run: go run ./tools/genicons
+
+      - name: Build
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          go build -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$env:VERSION" -o bin/tray-sing-box.exe .
+          go install github.com/tc-hib/go-winres@v0.3.3
+          go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $plain = $env:VERSION.TrimStart('v')
+          Copy-Item bin/tray-sing-box.exe "dist/tray-sing-box-$plain-windows-amd64.exe"
+
+      # The installer (Program Files + %ProgramData% layout, autostart task,
+      # takeover of a portable copy) — see build/installer/tray-sing-box.iss
+      - name: Build installer
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # The runner image ships its own (newer) Inno Setup: a plain
+          # `choco install --version` would keep it and exit 0
+          choco upgrade innosetup --version=6.4.3 --allow-downgrade --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $v = (Get-Item $iscc).VersionInfo
+          Write-Host "ISCC $($v.ProductVersion) ($($v.FileVersion))"
+          if ($v.FileVersionRaw -lt [version]'6.3') { throw "Inno Setup >= 6.3 needed (x64compatible), got $($v.FileVersion)" }
+          $plain = $env:VERSION.TrimStart('v')
+          & $iscc "/DVersion=$plain" "/DSource=..\..\dist\tray-sing-box-$plain-windows-amd64.exe" build\installer\tray-sing-box.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
+          Get-ChildItem dist
+
+      - name: Publish draft (sign offline, then publish by hand)
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: dist/*
+          generate_release_notes: true

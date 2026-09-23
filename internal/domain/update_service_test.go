@@ -97,6 +97,27 @@ func TestUpdateInstallsAndRestarts(t *testing.T) {
 	}
 }
 
+// The binary swap is a maintenance stop: a VPN that fails to come back must
+// not flip the stored intent to "stopped" (it would stay off after reboots),
+// and the failure must reach the user.
+func TestUpdateFailedRestartKeepsIntentAndReports(t *testing.T) {
+	repo := &fakeRepo{current: "1.12.3", latest: ReleaseInfo{Version: "1.12.4", AssetURL: "url"}}
+	pm := &fakeProcessManager{running: true, startErr: errors.New("blocked by antivirus")}
+	st := &fakeStorage{state: true}
+	svc := NewUpdateService(repo, NewVPNService(pm, st))
+
+	result, err := svc.Update()
+	if err == nil {
+		t.Fatal("a VPN that did not start again must be reported")
+	}
+	if !result.Updated || result.Restarted {
+		t.Fatalf("result = %+v, want Updated without Restarted", result)
+	}
+	if state, saves := st.snapshot(); !state || saves != 0 {
+		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
+	}
+}
+
 func TestUpdateFreshInstall(t *testing.T) {
 	repo := &fakeRepo{current: "", latest: ReleaseInfo{Version: "1.12.4", AssetURL: "url"}}
 	svc := NewUpdateService(repo, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))

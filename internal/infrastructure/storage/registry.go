@@ -44,6 +44,15 @@ func (s *RegistryStorage) SaveVPNState(running bool) error {
 	return nil
 }
 
+// Delete removes the stored state (uninstall). A missing key is fine.
+func (s *RegistryStorage) Delete() error {
+	err := registry.DeleteKey(registry.CURRENT_USER, config.RegStateKey)
+	if err != nil && err != registry.ErrNotExist {
+		return fmt.Errorf("failed to delete state key: %w", err)
+	}
+	return nil
+}
+
 // LoadVPNState loads the last VPN state from registry
 func (s *RegistryStorage) LoadVPNState() (bool, error) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, config.RegStateKey, registry.QUERY_VALUE)
@@ -59,7 +68,7 @@ func (s *RegistryStorage) LoadVPNState() (bool, error) {
 		return false, nil
 	}
 
-	running := value == 1
-	log.Printf("VPN state loaded: running=%v", running)
-	return running, nil
+	// Not logged: the crash monitor reads the intent on every tick while the
+	// VPN is down
+	return value == 1, nil
 }

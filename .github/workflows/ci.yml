@@ -10,6 +10,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs the tags
 
       - uses: actions/setup-go@v5
         with:
@@ -21,24 +23,30 @@ jobs:
         run: go test -short ./...
 
       - name: Render icon
+        # Before the build: the icons are embedded into the exe (package assets)
         run: go run ./tools/genicons
 
+      - name: Test the systray fork
+        # A module of its own (go.mod replace): not part of ./... above. Needs
+        # the rendered icon (TestIconFromBytes builds a real HICON from it)
+        shell: pwsh
+        run: |
+          go work init . ./third_party/systray
+          go test github.com/getlantern/systray
+          Remove-Item go.work, go.work.sum -ErrorAction SilentlyContinue
+
       - name: Build
-        run: go build -ldflags="-H windowsgui" -o bin/tray-sing-box.exe .
+        shell: pwsh
+        run: |
+          $version = git describe --tags --always --dirty
+          go build -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$version" -o bin/tray-sing-box.exe .
 
       - name: Embed Windows resources
         run: |
-          go install github.com/tc-hib/go-winres@latest
+          go install github.com/tc-hib/go-winres@v0.3.3
           go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
-
-      - name: Stage artifact
-        run: |
-          New-Item -ItemType Directory -Force bin/assets/icons | Out-Null
-          Copy-Item assets/icons/*.ico bin/assets/icons/
 
       - uses: actions/upload-artifact@v4
         with:
           name: tray-sing-box
-          path: |
-            bin/tray-sing-box.exe
-            bin/assets/icons/*.ico
+          path: bin/tray-sing-box.exe
