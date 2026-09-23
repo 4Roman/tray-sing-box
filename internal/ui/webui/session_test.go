@@ -55,7 +55,7 @@ func TestLoginCodeIsSingleUse(t *testing.T) {
 	if m == nil {
 		t.Fatalf("no session secret in the login page: %s", body)
 	}
-	if !strings.Contains(body, "location.replace") {
+	if !strings.Contains(body, "history.replaceState(null, '', '/')") {
 		t.Fatalf("the login page must take the code out of the address bar: %s", body)
 	}
 	if status, _ := call(t, "GET", base+"/api/config", m[1], nil); status != http.StatusOK {
@@ -352,8 +352,9 @@ func TestSecurityHeaders(t *testing.T) {
 	}
 }
 
-// The page is the same for everyone: no secret in it; the session comes from
-// sessionStorage under the key the login page uses, sent as X-Session
+// GET / (a reload, a bookmark) carries no secret: only the page /login
+// serves has one, in a script variable — never in browser storage, which
+// browsers write to disk — and it takes the code out of the address bar
 func TestPageCarriesNoSecret(t *testing.T) {
 	server, base := newTestServer(t, nil)
 	session := login(t, server)
@@ -365,10 +366,22 @@ func TestPageCarriesNoSecret(t *testing.T) {
 	if strings.Contains(body, session) || strings.Contains(body, "{{") {
 		t.Fatal("the page carries a secret or an unrendered template")
 	}
-	for _, want := range []string{"'" + sessionStorageKey + "'", "'" + sessionHeader + "'"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("the page does not use %s", want)
+	if !strings.Contains(body, `const SESSION = "";`) || !strings.Contains(body, "'"+sessionHeader+"'") {
+		t.Fatal("the page without a session is not the empty-session page")
+	}
+
+	code, err := server.issueCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body = get(t, base+"/login?code="+code)
+	for _, forbidden := range []string{"sessionStorage", "localStorage", "document.cookie"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("the login page uses %s: browsers write it to disk", forbidden)
 		}
+	}
+	if !strings.Contains(body, "history.replaceState(null, '', '/')") {
+		t.Fatal("the login page does not take the code out of the address bar")
 	}
 
 	// An old-style URL with a token parameter is just the page
@@ -377,5 +390,54 @@ func TestPageCarriesNoSecret(t *testing.T) {
 	}
 	if status, _ := get(t, base+"/other"); status != http.StatusNotFound {
 		t.Fatalf("unknown path: status %d", status)
+	}
+}
+
+// A page that goes away ends its session (sendBeacon with the secret as the
+// body); ending an unknown one is harmless
+func TestLogoutEndsTheSession(t *testing.T) {
+	server, base := newTestServer(t, nil)
+	session, other := login(t, server), login(t, server)
+
+	resp, err := http.Post(base+"/api/logout", "text/plain;charset=UTF-8", strings.NewReader(session))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout: status %d", resp.StatusCode)
+	}
+	if status, _ := callRaw(t, http.MethodGet, base+"/api/config", session, nil); status != http.StatusUnauthorized {
+		t.Fatalf("API after logout: status %d", status)
+	}
+	if status, _ := callRaw(t, http.MethodGet, base+"/api/config", other, nil); status != http.StatusOK {
+		t.Fatalf("another session ended with it: status %d", status)
+	}
+	resp, err = http.Post(base+"/api/logout", "text/plain", strings.NewReader("not-a-session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("logout of an unknown session: status %d", resp.StatusCode)
+	}
+}
+
+// The keep-alive (typing into the editors) needs a session and keeps it
+// from idling out
+func TestKeepAliveKeepsTheSession(t *testing.T) {
+	server, base := newTestServer(t, nil)
+	now := time.Now()
+	server.now = func() time.Time { return now }
+	session := login(t, server)
+
+	if status, _ := callRaw(t, http.MethodGet, base+"/api/session", "", nil); status != http.StatusUnauthorized {
+		t.Fatalf("keep-alive without a session: status %d", status)
+	}
+	for i := 0; i < 4; i++ {
+		now = now.Add(20 * time.Minute) // under the idle limit each time, over it in total
+		if status, _ := callRaw(t, http.MethodGet, base+"/api/session", session, nil); status != http.StatusOK {
+			t.Fatalf("keep-alive %d: status %d", i, status)
+		}
 	}
 }

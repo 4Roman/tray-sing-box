@@ -96,7 +96,7 @@
 <body>
 <h1>Настройки sing-box</h1>
 <div id="nosession" class="notice" hidden>
-  Эта вкладка не выполнила вход в настройки. Откройте «Настройки» из меню значка в трее: каждая такая ссылка одноразовая и открывает свой сеанс.
+  Эта вкладка не выполнила вход в настройки (или страницу перезагрузили — сеанс живёт только в открытой странице). Откройте «Настройки» из меню значка в трее: каждая такая ссылка одноразовая и открывает свой сеанс.
 </div>
 <main id="app">
 <div class="vpn-state">VPN: <b id="vpn">—</b> <button id="vpn-btn" onclick="toggleVPN()" style="margin-left:10px" disabled>…</button></div>
@@ -196,12 +196,12 @@
 </main>
 
 <script>
-// The session secret was put here by /login (the one-time link from the
-// tray). sessionStorage belongs to this tab and this origin — port included —
-// and the secret travels only in the X-Session header, never in a URL.
-const SESSION_KEY = 'singbox-tray-session';
-let SESSION = null;
-try { SESSION = sessionStorage.getItem(SESSION_KEY); } catch (e) { /* storage disabled */ }
+// The session secret: filled in when /login (the one-time link from the tray)
+// served this page, empty otherwise. It stays in this page's memory only —
+// never in storage, which browsers write to disk — and travels only in the
+// X-Session header. The login code leaves the address bar at once.
+const SESSION = {{.Session}};
+if (SESSION) history.replaceState(null, '', '/');
 let sessionEnded = false;
 let msgTimer = null;
 
@@ -216,12 +216,11 @@ function show(kind, text) {
 }
 
 // endSession: the server answered 401 (idle too long, too old, or closed
-// because the login link was used twice)
+// because the login link was used twice). Unsaved text stays in the editors.
 function endSession() {
   if (sessionEnded) return;
-  show('err', 'Сессия завершена — откройте «Настройки» из трея заново');
+  show('err', 'Сессия завершена — откройте «Настройки» из трея заново. Несохранённый текст остался в полях этой вкладки: скопируйте его перед тем, как открыть настройки снова.');
   sessionEnded = true;
-  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) { /* storage disabled */ }
   if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
   const auto = document.getElementById('logs-auto');
   auto.checked = false;
@@ -666,9 +665,25 @@ if (SESSION) {
   refreshHistory();
   refreshLogs(null);
   refreshAppUpdate();
+  // Typing into the editors makes no request: keep the session from idling
+  // out under the user's hands (at most one ping per 5 minutes)
+  let lastPing = Date.now();
+  const keepAlive = () => {
+    if (sessionEnded || Date.now() - lastPing < 5 * 60 * 1000) return;
+    lastPing = Date.now();
+    api('/api/session').catch(() => {});
+  };
+  for (const kind of ['input', 'keydown', 'pointerdown']) {
+    document.addEventListener(kind, keepAlive, { passive: true });
+  }
+  // A closed or reloaded page ends its session (kept while the page sits in
+  // the back-forward cache: it may come back)
+  window.addEventListener('pagehide', e => {
+    if (!e.persisted && !sessionEnded) navigator.sendBeacon('/api/logout', SESSION);
+  });
 } else {
-  // Opened without the login link (a bookmark, a copied address, another
-  // tab): there is nothing to show
+  // Opened without the login link (a reload, a bookmark, a copied address,
+  // another tab): there is nothing to show
   document.getElementById('app').hidden = true;
   document.getElementById('nosession').hidden = false;
 }

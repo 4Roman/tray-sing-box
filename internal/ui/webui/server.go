@@ -27,12 +27,13 @@ import (
 //go:embed page.html
 var pageHTML string
 
+// settingsPage is page.html; its only variable is the session secret of a
+// page served by /login ("" for GET /)
+var settingsPage = template.Must(template.New("page").Parse(pageHTML))
+
 const (
 	// sessionHeader carries the session secret on every API request
 	sessionHeader = "X-Session"
-	// sessionStorageKey is where the page keeps the secret (page.html reads
-	// the same key)
-	sessionStorageKey = "singbox-tray-session"
 
 	maxPendingCodes = 4 // unused login codes kept; another one drops the oldest
 	maxSessions     = 8 // live sessions; another login evicts the one idle longest
@@ -166,6 +167,8 @@ func (s *Server) start() (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handlePage)
 	mux.HandleFunc("GET /login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	mux.HandleFunc("GET /api/session", s.auth(s.handleSession))
 	mux.HandleFunc("GET /api/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
@@ -237,18 +240,6 @@ func (s *Server) issueCode() (string, error) {
 	return code, nil
 }
 
-// loginPage puts the session secret into the tab's sessionStorage and moves
-// on to the settings page; location.replace takes /login?code= out of the
-// address bar and the back history
-var loginPage = template.Must(template.New("login").Parse(`<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>Настройки sing-box</title></head>
-<body style="background:#16181d">
-<script>
-try { sessionStorage.setItem({{.Key}}, {{.Secret}}); } catch (e) {}
-location.replace('/');
-</script>
-</body></html>`))
-
 // loginErrorPage explains a refused login code
 var loginErrorPage = template.Must(template.New("login-error").Parse(`<!DOCTYPE html>
 <html lang="ru"><head><meta charset="utf-8"><title>Настройки sing-box</title></head>
@@ -265,11 +256,18 @@ const (
 		"Откройте «Настройки» из меню значка в трее заново."
 )
 
-// handleLogin trades a login code for a session. The session secret lives in
-// the tab's sessionStorage and travels in the X-Session header — not in a
-// cookie: cookies are not port-scoped, a cookie for 127.0.0.1 would be sent
-// to every local server, one run by any program of the user included.
-// sessionStorage belongs to this origin: scheme, host and port.
+// handleLogin trades a login code for a session: the answer is the settings
+// page itself with the session secret in a script variable. It lives only in
+// that page's memory and travels in the X-Session header. Not in a cookie:
+// cookies are not port-scoped, a cookie for 127.0.0.1 would be sent to every
+// local server, one run by any program of the user included. Not in
+// sessionStorage or localStorage either: browsers write both into the
+// profile on disk within seconds (Chromium's "Session Storage" LevelDB, in
+// plain text), where any program of the user reads it — and a session taken
+// from there would never trip the replay check below. The page takes
+// /login?code= out of the address bar (history.replaceState); a reload shows
+// the "open from the tray" notice, and closing the page ends the session
+// (/api/logout).
 //
 // A code that arrives a second time was in two hands — read off a command
 // line or the history, it raced the browser. Which of the two came first
@@ -313,10 +311,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case ok:
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := loginPage.Execute(w, map[string]string{"Key": sessionStorageKey, "Secret": secret}); err != nil {
-			log.Printf("Settings login page render failed: %v", err)
-		}
+		renderPage(w, secret)
 	case replayed:
 		log.Printf("Settings: a login link was used a second time, the session opened with it is closed (another program may have read the link)")
 		loginError(w, loginUsedMsg)
@@ -416,15 +411,43 @@ func hashSecret(secret string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// handlePage serves the settings page. It carries no secret: the page takes
-// its session from sessionStorage, where the login put it.
+// handlePage serves the settings page without a session (a reload, a
+// bookmark): it tells the user to open the settings from the tray
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
+	renderPage(w, "")
+}
+
+// renderPage writes the settings page with the given session secret
+func renderPage(w http.ResponseWriter, session string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	io.WriteString(w, pageHTML)
+	if err := settingsPage.Execute(w, map[string]string{"Session": session}); err != nil {
+		log.Printf("Settings page render failed: %v", err)
+	}
+}
+
+// handleLogout ends the session whose secret is the request body. The page
+// sends it when it goes away (navigator.sendBeacon cannot set headers): a
+// session outlives no page. Knowing the secret is the authority to end it.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	secret, err := io.ReadAll(io.LimitReader(r.Body, 256))
+	if err == nil && len(secret) > 0 {
+		id := hashSecret(string(secret))
+		s.mu.Lock()
+		delete(s.sessions, id)
+		s.mu.Unlock()
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSession answers the page's keep-alive: typing into the editors makes
+// no other request, and the idle expiry must not end a session the user is
+// working in (auth has already marked it as used)
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // writeJSON sends a JSON response

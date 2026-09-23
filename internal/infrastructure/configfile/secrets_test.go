@@ -20,7 +20,7 @@ const secretsConfig = `{
     {"type": "vless", "tag": "vless-a", "server": "a.example.com", "server_port": 443,
      "uuid": "secret-vless-uuid-A", "flow": "xtls-rprx-vision",
      "tls": {"enabled": true, "server_name": "a.example.com",
-             "reality": {"enabled": true, "public_key": "visible-reality-public-key", "short_id": "visible-0123"}}},
+             "reality": {"enabled": true, "public_key": "visible-reality-public-key", "short_id": "secret-short-id-A"}}},
     {"type": "trojan", "tag": "trojan-b", "server": "b.example.com", "server_port": 443,
      "Password": "secret-trojan-B", "tls": {"enabled": true, "insecure": false}},
     {"type": "vmess", "tag": "vmess-c", "server": "c.example.com", "server_port": 443, "UUID": "secret-vmess-C",
@@ -41,7 +41,7 @@ const secretsConfig = `{
     {"type": "shadowsocks", "tag": "ss-h", "server": "h.example.com", "server_port": 8388,
      "method": "2022-blake3-aes-128-gcm", "pa\u017F\u017Fword": "secret-ss-H"},
     {"type": "socks", "tag": "socks-i", "server": "127.0.0.1", "server_port": 1080,
-     "username": "visible-user-I", "password": ""},
+     "username": "secret-user-I", "password": ""},
     {"type": "direct", "tag": "direct"}
   ],
   "route": {"rules": [{"protocol": "dns", "action": "hijack-dns"}], "final": "proxy"}
@@ -49,7 +49,7 @@ const secretsConfig = `{
 
 // secretsMasked is the number of credential strings in secretsConfig (the
 // ssh key has three lines, the empty socks password is not one)
-const secretsMasked = 16
+const secretsMasked = 18
 
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
@@ -153,8 +153,8 @@ func TestReadSectionMasksSecrets(t *testing.T) {
 		t.Fatalf("a secret reached the display text:\n%s", text)
 	}
 	for _, visible := range []string{
-		"visible-reality-public-key", "visible-0123", "visible-host-C", "visible-peer-public-key",
-		"visible-peer2-public-key", "visible-user-G", "visible-user-I",
+		"visible-reality-public-key", "visible-host-C", "visible-peer-public-key",
+		"visible-peer2-public-key", "visible-user-G",
 	} {
 		if !strings.Contains(text, visible) {
 			t.Errorf("%s masked, it is not a secret", visible)

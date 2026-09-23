@@ -64,8 +64,8 @@ func start(t *testing.T, server *Server) string {
 	return base
 }
 
-// secretInLoginPage finds the session secret the login page stores
-var secretInLoginPage = regexp.MustCompile(`sessionStorage\.setItem\([^,]*,\s*"([0-9a-f]{64})"\)`)
+// secretInLoginPage finds the session secret in the page /login serves
+var secretInLoginPage = regexp.MustCompile(`const SESSION = "([0-9a-f]{64})";`)
 
 // login gets a session the way the browser does: a code issued as for a
 // tray click, GET /login?code=, the secret out of the page it returns

@@ -6,6 +6,7 @@ package sharelink
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -152,6 +153,19 @@ func tagOrDefault(fragment, proto, host string, port int) string {
 	return fmt.Sprintf("%s-%s-%d", proto, host, port)
 }
 
+// parseURL is url.Parse without the link in its error: net/url quotes the
+// whole input (and its inner errors quote pieces of it, e.g. an "invalid
+// port" made of password characters), and a share link carries the
+// server's credentials — the error text reaches the log, the tray popups and
+// the settings page, which any program of the user can drive
+func parseURL(link string) (*url.URL, error) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return nil, errors.New("malformed link")
+	}
+	return u, nil
+}
+
 func parsePort(s string) (int, error) {
 	port, err := strconv.Atoi(s)
 	if err != nil || port < 1 || port > 65535 {
@@ -246,7 +260,7 @@ func transportConfig(q url.Values) map[string]any {
 }
 
 func parseVLESS(link string) (Outbound, error) {
-	u, err := url.Parse(link)
+	u, err := parseURL(link)
 	if err != nil {
 		return nil, fmt.Errorf("invalid vless link: %w", err)
 	}
@@ -317,11 +331,11 @@ func parseVMess(link string) (Outbound, error) {
 
 	port, err := rawInt(v.Port)
 	if err != nil || port < 1 || port > 65535 {
-		return nil, fmt.Errorf("vmess link: invalid port %q", string(v.Port))
+		return nil, fmt.Errorf("vmess link: invalid port")
 	}
 	alterID, err := rawInt(v.Aid)
 	if err != nil {
-		return nil, fmt.Errorf("vmess link: invalid aid %q", string(v.Aid))
+		return nil, fmt.Errorf("vmess link: invalid aid")
 	}
 
 	security := v.Scy
@@ -379,7 +393,7 @@ func parseVMess(link string) (Outbound, error) {
 }
 
 func parseTrojan(link string) (Outbound, error) {
-	u, err := url.Parse(link)
+	u, err := parseURL(link)
 	if err != nil {
 		return nil, fmt.Errorf("invalid trojan link: %w", err)
 	}
@@ -437,13 +451,20 @@ func parseShadowsocks(link string) (Outbound, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid ss link: %w", err)
 		}
-		raw = string(decoded)
+		// Re-encoded into the SIP002 form below: the password may contain
+		// '/', '?' or '#' (base64-generated ones do), which would end the
+		// authority of a URL
+		at := strings.LastIndex(string(decoded), "@")
+		if at < 0 {
+			return nil, fmt.Errorf("ss link is missing credentials")
+		}
+		raw = base64.RawURLEncoding.EncodeToString(decoded[:at]) + string(decoded[at:])
 		if fragment != "" {
 			raw += "#" + fragment
 		}
 	}
 
-	u, err := url.Parse("ss://" + raw)
+	u, err := parseURL("ss://" + raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid ss link: %w", err)
 	}
@@ -473,7 +494,10 @@ func parseShadowsocks(link string) (Outbound, error) {
 	}
 
 	if plugin := u.Query().Get("plugin"); plugin != "" {
-		return nil, fmt.Errorf("ss link uses plugin %q which is not supported", plugin)
+		// Named without its options: they may carry the plugin's own
+		// credential (ck-client UID, shadow-tls password, kcptun key)
+		name, _, _ := strings.Cut(plugin, ";")
+		return nil, fmt.Errorf("ss link uses plugin %q which is not supported", name)
 	}
 
 	return Outbound{
@@ -488,7 +512,7 @@ func parseShadowsocks(link string) (Outbound, error) {
 
 func parseHysteria2(link string) (Outbound, error) {
 	link = strings.Replace(link, "hy2://", "hysteria2://", 1)
-	u, err := url.Parse(link)
+	u, err := parseURL(link)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hysteria2 link: %w", err)
 	}

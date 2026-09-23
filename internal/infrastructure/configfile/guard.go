@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -58,9 +59,11 @@ func foldKey(k string) string {
 
 // riskyItems lists the risky constructs of a config as canonical strings
 // (folded key + value, no position: an item that only moved is still the
-// same)
-func riskyItems(cfg map[string]any) map[string]bool {
-	items := map[string]bool{}
+// same), each mapped to how a refusal names it — without the value: it may
+// carry a credential, and the refusal reaches the settings page (a history
+// restore can bring back an item with a secret the page never showed)
+func riskyItems(cfg map[string]any) map[string]string {
+	items := map[string]string{}
 	for key, value := range cfg {
 		section := foldKey(key)
 		if section != "outbounds" && section != "endpoints" {
@@ -80,7 +83,9 @@ func riskyItems(cfg map[string]any) map[string]bool {
 				}
 			}
 			if len(types) != 1 || !allowedOutboundTypes[types[0]] {
-				items[fmt.Sprintf("%s: type %q %s", section, strings.Join(types, ","), canonical(m))] = true
+				tag, _ := m["tag"].(string)
+				items[fmt.Sprintf("%s: type %q %s", section, strings.Join(types, ","), canonical(m))] =
+					fmt.Sprintf("%s: type %q, tag %q", section, strings.Join(types, ","), tag)
 			}
 		}
 	}
@@ -88,20 +93,20 @@ func riskyItems(cfg map[string]any) map[string]bool {
 	return items
 }
 
-func walkRisky(v any, parentKey string, items map[string]bool) {
+func walkRisky(v any, parentKey string, items map[string]string) {
 	switch x := v.(type) {
 	case map[string]any:
 		for key, child := range x {
 			k := foldKey(key)
 			switch {
 			case riskyKeys[k]:
-				items[fmt.Sprintf("%s.%s=%s", parentKey, k, canonical(child))] = true
+				items[fmt.Sprintf("%s.%s=%s", parentKey, k, canonical(child))] = parentKey + "." + k
 				continue
 			case k == "geoip" || k == "geosite":
 				// route.geoip / route.geosite (deprecated databases: a path
 				// and a download URL) — as rule conditions they are lists
 				if _, isDB := child.(map[string]any); isDB {
-					items[fmt.Sprintf("%s.%s=%s", parentKey, k, canonical(child))] = true
+					items[fmt.Sprintf("%s.%s=%s", parentKey, k, canonical(child))] = parentKey + "." + k
 					continue
 				}
 			case k == "path":
@@ -112,13 +117,13 @@ func walkRisky(v any, parentKey string, items map[string]bool) {
 					(parentKey == "rule_set" && bareFileName(child)) {
 					continue
 				}
-				items[fmt.Sprintf("%s.path=%s", parentKey, canonical(child))] = true
+				items[fmt.Sprintf("%s.path=%s", parentKey, canonical(child))] = parentKey + ".path"
 				continue
 			case k == "cache_file":
 				if m, ok := child.(map[string]any); ok {
 					for ck, p := range m {
 						if foldKey(ck) == "path" {
-							items[fmt.Sprintf("cache_file.path=%s", canonical(p))] = true
+							items[fmt.Sprintf("cache_file.path=%s", canonical(p))] = "cache_file.path"
 						}
 					}
 					continue
@@ -164,9 +169,9 @@ func checkNoNewRisky(previous []byte, updated map[string]any) error {
 	}
 	had := riskyItems(old)
 	var added []string
-	for item := range riskyItems(updated) {
-		if !had[item] {
-			added = append(added, item)
+	for item, shown := range riskyItems(updated) {
+		if _, ok := had[item]; !ok && !slices.Contains(added, shown) {
+			added = append(added, shown)
 		}
 	}
 	if len(added) == 0 {

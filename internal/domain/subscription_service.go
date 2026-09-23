@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -103,13 +105,25 @@ func IsSubscriptionURL(text string) bool {
 	return err == nil && u.Host != ""
 }
 
+// subscriptionKey keys SubscriptionID. A plain hash of the URL would let
+// whoever sees an ID (the settings page, the log) confirm a guessed URL
+// offline, and provider tokens are often short or predictable. Random per
+// process: the IDs only need to hold while the app runs (the page lists the
+// subscriptions again after a restart).
+var subscriptionKey = func() []byte {
+	key := make([]byte, 32)
+	rand.Read(key)
+	return key
+}()
+
 // SubscriptionID identifies a subscription without revealing its URL: the
-// first 16 hex digits of the URL's SHA-256. The settings page addresses
-// subscriptions by it — the URL carries the provider's access token and
-// never leaves the elevated process.
+// first 16 hex digits of a keyed hash (HMAC-SHA-256) of the URL. The settings
+// page addresses subscriptions by it — the URL carries the provider's access
+// token and never leaves the elevated process.
 func SubscriptionID(rawURL string) string {
-	sum := sha256.Sum256([]byte(rawURL))
-	return hex.EncodeToString(sum[:8])
+	mac := hmac.New(sha256.New, subscriptionKey)
+	mac.Write([]byte(rawURL))
+	return hex.EncodeToString(mac.Sum(nil)[:8])
 }
 
 // RedactURL is how a subscription is named in logs, popups, errors and on

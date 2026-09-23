@@ -2,6 +2,7 @@ package sharelink
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -229,5 +230,49 @@ func TestParseRejectsUnsupported(t *testing.T) {
 	}
 	if _, err := Parse("vless://u@h:0?x=1"); err == nil {
 		t.Fatal("expected error for invalid port")
+	}
+}
+
+// A link that fails to parse must not come back in the error: net/url quotes
+// its whole input, and the error text reaches the log and the settings page
+func TestParseErrorsDoNotQuoteTheLink(t *testing.T) {
+	const secret = "S3CRET-b831381d"
+	legacy := base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:" + secret + "@host:bad port"))
+	links := []string{
+		"vless://" + secret + "@host:bad/%zz",
+		"trojan://" + secret + "@host/%zz",
+		"ss://" + base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:"+secret)) + "@host/%zz",
+		"ss://" + legacy,
+		"hysteria2://" + secret + "@host/%zz",
+		"ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:pw")) + "@host:8388?plugin=ck-client%3BUID%3D" + secret,
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"host","port":"`+secret+`","id":"u"}`)),
+		"vmess://" + base64.StdEncoding.EncodeToString([]byte(`{"add":"host","port":443,"aid":"`+secret+`","id":"u"}`)),
+	}
+	for _, link := range links {
+		_, err := Parse(link)
+		if err == nil {
+			t.Errorf("%s: parsed, want an error", link)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("error quotes the link's credential: %v", err)
+		}
+		if _, err := (Parser{}).Parse(link); err != nil && strings.Contains(err.Error(), secret) {
+			t.Errorf("Parser.Parse error quotes the link's credential: %v", err)
+		}
+	}
+}
+
+// A legacy link whose password contains '/' (base64-generated passwords do):
+// the decoded "method:password@host:port" is not a valid URL authority as is
+func TestParseLegacyShadowsocksPasswordWithSlash(t *testing.T) {
+	const password = "Ab3/xYz+9Q=="
+	link := "ss://" + base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:"+password+"@ss.example.com:8388")) + "#legacy"
+	o, err := Parse(link)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if o["password"] != password || o["method"] != "aes-256-gcm" || o["server"] != "ss.example.com" || o["server_port"] != 8388 || o.Tag() != "legacy" {
+		t.Fatalf("parsed %v", o)
 	}
 }

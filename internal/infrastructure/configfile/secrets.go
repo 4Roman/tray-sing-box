@@ -30,15 +30,24 @@ const SecretPlaceholder = "(скрыто)"
 
 // secretKeys name credentials wherever they appear (folded, see foldKey):
 // vless/vmess/tuic uuid; shadowsocks, trojan, hysteria2 (and its obfs),
-// tuic, naive, shadowtls, anytls, socks, http, ssh password; wireguard keys
-// (peers included); hysteria auth/auth_str; ssh private key and passphrase;
-// the TLS client key; an authorization header of an http outbound or a
+// tuic, naive, shadowtls, anytls, socks, http, ssh password; the socks,
+// http and naive username; the reality short_id; wireguard keys (peers
+// included); hysteria auth/auth_str; ssh private key and passphrase; the
+// TLS client key; an authorization header of an http outbound or a
 // transport. The values may be a string or a line array (ssh private_key,
 // tls client_key).
+//
+// Only fields that do not decide where the connection goes: a secret is left
+// out of the "unchanged apart from its secrets" comparison, so a masked
+// Host header or shadowsocks plugin_opts ("host=" of v2ray-plugin: which
+// backend behind a CDN) could be pointed elsewhere with the placeholder
+// kept. Such fields — other headers, plugin_opts, a transport path that
+// repeats the uuid, a rule set URL with a token — stay visible.
 var secretKeys = map[string]bool{
 	"password": true, "uuid": true, "private_key": true, "pre_shared_key": true,
 	"auth": true, "auth_str": true, "private_key_passphrase": true,
 	"client_key": true, "authorization": true, "proxy-authorization": true,
+	"username": true, "short_id": true,
 }
 
 // isSecret reports whether value, found under key, is a credential: a string
