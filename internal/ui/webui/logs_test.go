@@ -2,7 +2,6 @@ package webui
 
 import (
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,19 +44,9 @@ func TestLogsEndpoint(t *testing.T) {
 		},
 		Tail: logtail.Tail,
 	})
-	pageURL, err := server.start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	base := start(t, server)
 
-	u, err := url.Parse(pageURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	token := u.Query().Get("t")
-	base := "http://" + u.Host
-
-	status, data := call(t, http.MethodGet, base+"/api/logs", token, nil)
+	status, data := call(t, http.MethodGet, base+"/api/logs", login(t, server), nil)
 	if status != http.StatusOK {
 		t.Fatalf("logs: status %d", status)
 	}
@@ -80,13 +69,13 @@ func TestLogsEndpoint(t *testing.T) {
 	}
 }
 
-// TestLogsEndpointRequiresToken ensures /api/logs sits behind the token auth
-func TestLogsEndpointRequiresToken(t *testing.T) {
-	_, pageURL := newTestServer(t, nil)
-	base := baseURL(t, pageURL)
+// TestLogsEndpointRequiresSession ensures /api/logs sits behind the session
+// check
+func TestLogsEndpointRequiresSession(t *testing.T) {
+	_, base := newTestServer(t, nil)
 
 	status, _ := call(t, http.MethodGet, base+"/api/logs", "", nil)
-	if status != http.StatusForbidden {
-		t.Fatalf("logs without token: status %d", status)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("logs without a session: status %d", status)
 	}
 }

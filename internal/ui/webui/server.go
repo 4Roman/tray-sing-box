@@ -1,18 +1,22 @@
 // Package webui serves the local settings interface: raw JSON editing of
 // config sections, outbound switching and share-link import. The server
-// listens on localhost only and every request must carry a per-run token.
+// listens on 127.0.0.1 only; the browser gets in with a one-time login code
+// and then carries a session secret in a request header (see handleLogin).
 package webui
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -22,6 +26,37 @@ import (
 
 //go:embed page.html
 var pageHTML string
+
+const (
+	// sessionHeader carries the session secret on every API request
+	sessionHeader = "X-Session"
+	// sessionStorageKey is where the page keeps the secret (page.html reads
+	// the same key)
+	sessionStorageKey = "singbox-tray-session"
+
+	maxPendingCodes = 4 // unused login codes kept; another one drops the oldest
+	maxSessions     = 8 // live sessions; another login evicts the one idle longest
+)
+
+// contentSecurityPolicy goes out with every response. The page is static,
+// renders everything it fetches through textContent and uses inline script,
+// styles and onclick attributes — allowed explicitly; nothing else loads,
+// fetch reaches this server only, and nothing may frame the page.
+const contentSecurityPolicy = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
+	"connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+// loginCode is an issued login code that has not been used yet
+type loginCode struct {
+	hash   string // hashSecret of the code
+	issued time.Time
+}
+
+// session is a browser tab that logged in with a code
+type session struct {
+	code     string // hashSecret of the login code that created it
+	created  time.Time
+	lastSeen time.Time
+}
 
 // TextSource produces text to import an outbound from
 type TextSource func() (string, error)
@@ -58,11 +93,12 @@ type Server struct {
 	sources  Sources
 	logs     LogAccess
 
-	mu    sync.Mutex
-	opMu  *sync.Mutex // serializes config/binary mutations, see ShareOpLock
-	url   string
-	token string
-	page  *template.Template
+	mu       sync.Mutex
+	opMu     *sync.Mutex         // serializes config/binary mutations, see ShareOpLock
+	base     string              // "http://127.0.0.1:<port>" once listening
+	now      func() time.Time    // the clock of codes and sessions (tests move it)
+	codes    []loginCode         // pending login codes, oldest first
+	sessions map[string]*session // by hashSecret of the session secret
 }
 
 // New creates the settings server (not yet listening)
@@ -77,6 +113,8 @@ func New(settings *domain.SettingsService, importer *domain.ImportService, updat
 		sources:  sources,
 		logs:     logs,
 		opMu:     &sync.Mutex{},
+		now:      time.Now,
+		sessions: map[string]*session{},
 	}
 }
 
@@ -96,34 +134,29 @@ func (s *Server) ShareOpLock(mu *sync.Mutex) {
 }
 
 // Open starts the server if needed and opens the settings page in the browser
+// with a new one-time login code. Every call issues its own: the URL is
+// readable by any program of the user (the command lines of rundll32 and
+// the browser, the browser history), so it must be worthless once used.
 func (s *Server) Open() error {
-	url, err := s.start()
+	base, err := s.start()
 	if err != nil {
 		return err
 	}
-	return openBrowser(url)
+	code, err := s.issueCode()
+	if err != nil {
+		return err
+	}
+	return openBrowser(base + "/login?code=" + code)
 }
 
-// start launches the HTTP listener once and returns the tokenized page URL
+// start launches the HTTP listener once and returns its base URL
 func (s *Server) start() (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.url != "" {
-		return s.url, nil
+	if s.base != "" {
+		return s.base, nil
 	}
-
-	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		return "", fmt.Errorf("failed to generate token: %w", err)
-	}
-	s.token = hex.EncodeToString(tokenBytes)
-
-	page, err := template.New("page").Parse(pageHTML)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse settings page: %w", err)
-	}
-	s.page = page
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -132,6 +165,7 @@ func (s *Server) start() (string, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handlePage)
+	mux.HandleFunc("GET /login", s.handleLogin)
 	mux.HandleFunc("GET /api/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
@@ -152,41 +186,245 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("POST /api/dpi/chain", s.auth(s.handleDPIChain))
 	mux.HandleFunc("POST /api/dpi/direct", s.auth(s.handleDPIDirect))
 
+	addr := listener.Addr().String()
+	handler := guard(addr, mux)
 	go func() {
-		if err := http.Serve(listener, mux); err != nil {
+		if err := http.Serve(listener, handler); err != nil {
 			log.Printf("Settings server stopped: %v", err)
 		}
 	}()
 
-	s.url = fmt.Sprintf("http://%s/?t=%s", listener.Addr().String(), s.token)
-	log.Printf("Settings server listening on %s", listener.Addr())
-	return s.url, nil
+	s.base = "http://" + addr
+	log.Printf("Settings server listening on %s", addr)
+	return s.base, nil
 }
 
-// auth requires the per-run token in the X-Token header
+// guard wraps every request: security headers on every response, and the
+// Host check. A web site whose name resolves to 127.0.0.1 (DNS rebinding)
+// would reach this server as its own origin; its requests name that site in
+// Host, while the settings page's name 127.0.0.1:<port>.
+func guard(addr string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Cache-Control", "no-store")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", contentSecurityPolicy)
+		if r.Host != addr {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// issueCode creates a one-time login code, valid for
+// config.WebLoginCodeSeconds. At most maxPendingCodes wait for their use.
+func (s *Server) issueCode() (string, error) {
+	code, err := randomHex()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate a login code: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	if len(s.codes) >= maxPendingCodes {
+		s.codes = slices.Delete(s.codes, 0, 1)
+	}
+	s.codes = append(s.codes, loginCode{hash: hashSecret(code), issued: s.now()})
+	return code, nil
+}
+
+// loginPage puts the session secret into the tab's sessionStorage and moves
+// on to the settings page; location.replace takes /login?code= out of the
+// address bar and the back history
+var loginPage = template.Must(template.New("login").Parse(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Настройки sing-box</title></head>
+<body style="background:#16181d">
+<script>
+try { sessionStorage.setItem({{.Key}}, {{.Secret}}); } catch (e) {}
+location.replace('/');
+</script>
+</body></html>`))
+
+// loginErrorPage explains a refused login code
+var loginErrorPage = template.Must(template.New("login-error").Parse(`<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Настройки sing-box</title></head>
+<body style="background:#16181d;color:#e4e6eb;font-family:'Segoe UI',system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 24px;line-height:1.5">
+<h1 style="font-size:22px">Настройки sing-box</h1>
+<p>{{.}}</p>
+</body></html>`))
+
+const (
+	loginUsedMsg = "Эта ссылка для входа уже была использована. Если вы не открывали её дважды, " +
+		"её могла перехватить другая программа — сеанс, открытый по ней, закрыт. " +
+		"Откройте «Настройки» из меню значка в трее заново."
+	loginExpiredMsg = "Ссылка для входа устарела или недействительна. " +
+		"Откройте «Настройки» из меню значка в трее заново."
+)
+
+// handleLogin trades a login code for a session. The session secret lives in
+// the tab's sessionStorage and travels in the X-Session header — not in a
+// cookie: cookies are not port-scoped, a cookie for 127.0.0.1 would be sent
+// to every local server, one run by any program of the user included.
+// sessionStorage belongs to this origin: scheme, host and port.
+//
+// A code that arrives a second time was in two hands — read off a command
+// line or the history, it raced the browser. Which of the two came first
+// cannot be known, so the session created with it is closed and the user is
+// told to open the settings again.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// A speculative load (the browser prefetching or prerendering an address
+	// from its history) must neither use a code nor count as its replay —
+	// that would close the session of the tab the user is working in
+	if r.Header.Get("Sec-Purpose") != "" || r.Header.Get("Purpose") == "prefetch" || r.Header.Get("X-Moz") == "prefetch" {
+		http.Error(w, "no speculative loads", http.StatusServiceUnavailable)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	secret, err := randomHex()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	var ok, replayed bool
+	s.mu.Lock()
+	s.pruneLocked()
+	if code != "" {
+		hash := hashSecret(code)
+		if i := slices.IndexFunc(s.codes, func(c loginCode) bool { return c.hash == hash }); i >= 0 {
+			s.codes = slices.Delete(s.codes, i, i+1)
+			s.addSessionLocked(hashSecret(secret), hash)
+			ok = true
+		} else {
+			for id, sess := range s.sessions {
+				if sess.code == hash {
+					delete(s.sessions, id)
+					replayed = true
+				}
+			}
+		}
+	}
+	s.mu.Unlock()
+
+	switch {
+	case ok:
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := loginPage.Execute(w, map[string]string{"Key": sessionStorageKey, "Secret": secret}); err != nil {
+			log.Printf("Settings login page render failed: %v", err)
+		}
+	case replayed:
+		log.Printf("Settings: a login link was used a second time, the session opened with it is closed (another program may have read the link)")
+		loginError(w, loginUsedMsg)
+	default:
+		loginError(w, loginExpiredMsg)
+	}
+}
+
+// loginError answers a refused login code
+func loginError(w http.ResponseWriter, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	if err := loginErrorPage.Execute(w, message); err != nil {
+		log.Printf("Settings login error page render failed: %v", err)
+	}
+}
+
+// auth requires a live session in the X-Session header. A missing or ended
+// one gets 401 with a JSON error: the page then tells the user to open the
+// settings from the tray again.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Token") != s.token {
-			http.Error(w, "forbidden", http.StatusForbidden)
+		if !s.touchSession(r.Header.Get(sessionHeader)) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "сессия завершена — откройте «Настройки» из трея заново",
+			})
 			return
 		}
 		next(w, r)
 	}
 }
 
+// touchSession reports whether secret belongs to a live session and marks
+// that session as used now
+func (s *Server) touchSession(secret string) bool {
+	if secret == "" {
+		return false
+	}
+	id := hashSecret(secret)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	sess, ok := s.sessions[id]
+	if ok {
+		sess.lastSeen = s.now()
+	}
+	return ok
+}
+
+// addSessionLocked registers a session; at maxSessions the one idle longest
+// is evicted. Callers hold s.mu.
+func (s *Server) addSessionLocked(id, codeHash string) {
+	if len(s.sessions) >= maxSessions {
+		oldest := ""
+		for k, sess := range s.sessions {
+			if oldest == "" || sess.lastSeen.Before(s.sessions[oldest].lastSeen) {
+				oldest = k
+			}
+		}
+		delete(s.sessions, oldest)
+	}
+	now := s.now()
+	s.sessions[id] = &session{code: codeHash, created: now, lastSeen: now}
+}
+
+// pruneLocked drops expired login codes and sessions (idle for
+// config.WebSessionIdleMinutes, or older than config.WebSessionMaxHours).
+// Callers hold s.mu.
+func (s *Server) pruneLocked() {
+	now := s.now()
+	s.codes = slices.DeleteFunc(s.codes, func(c loginCode) bool {
+		return now.Sub(c.issued) >= config.WebLoginCodeSeconds*time.Second
+	})
+	for id, sess := range s.sessions {
+		if now.Sub(sess.lastSeen) >= config.WebSessionIdleMinutes*time.Minute ||
+			now.Sub(sess.created) >= config.WebSessionMaxHours*time.Hour {
+			delete(s.sessions, id)
+		}
+	}
+}
+
+// randomHex returns 32 random bytes as hex: a login code or a session secret
+func randomHex() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// hashSecret is the form codes and secrets are kept and looked up in: the
+// map lookups and comparisons then never run over the secret itself, so
+// their timing tells nothing about it
+func hashSecret(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// handlePage serves the settings page. It carries no secret: the page takes
+// its session from sessionStorage, where the login put it.
 func (s *Server) handlePage(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	if r.URL.Query().Get("t") != s.token {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.page.Execute(w, map[string]string{"Token": s.token}); err != nil {
-		log.Printf("Settings page render failed: %v", err)
-	}
+	io.WriteString(w, pageHTML)
 }
 
 // writeJSON sends a JSON response
@@ -378,7 +616,7 @@ func (s *Server) handleAppUpdate(w http.ResponseWriter, r *http.Request) {
 
 // handleAppRelaunch restarts the application into an installed update. The
 // response goes out first; the process then exits and the page loses its
-// server (new port and token on the next start).
+// server (new port and a new login on the next start).
 func (s *Server) handleAppRelaunch(w http.ResponseWriter, r *http.Request) {
 	if s.app == nil || s.relaunch == nil {
 		fail(w, fmt.Errorf("автообновление приложения не настроено в этой сборке"))
@@ -527,23 +765,44 @@ func (s *Server) handleHistoryRestore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
 }
 
+// subscriptionEntry names a subscription on the page: by its ID and the
+// redacted URL. The URL itself carries the provider's access token and never
+// leaves the elevated process — a program of the user can drive this API.
+func subscriptionEntry(rawURL string) map[string]any {
+	return map[string]any{"id": domain.SubscriptionID(rawURL), "display": domain.RedactURL(rawURL)}
+}
+
 // subscriptionResponse converts a domain result into the JSON shape the page
 // renders (errors become strings)
 func subscriptionResponse(result *domain.SubscriptionResult) map[string]any {
 	updates := make([]map[string]any, 0, len(result.Updates))
 	for _, u := range result.Updates {
-		entry := map[string]any{
-			"url":     u.URL,
-			"count":   len(u.Tags),
-			"added":   len(u.Added),
-			"removed": len(u.Removed),
-		}
+		entry := subscriptionEntry(u.URL)
+		entry["count"] = len(u.Tags)
+		entry["added"] = len(u.Added)
+		entry["removed"] = len(u.Removed)
 		if u.Err != nil {
 			entry["error"] = u.Err.Error()
 		}
 		updates = append(updates, entry)
 	}
 	return map[string]any{"updates": updates, "restarted": result.Restarted}
+}
+
+// subscriptionURL finds the saved URL behind a subscription ID. Callers hold
+// opMu, which every subscription change takes: the list cannot change
+// between this lookup and the operation.
+func (s *Server) subscriptionURL(id string) (string, error) {
+	subs, err := s.subs.List()
+	if err != nil {
+		return "", err
+	}
+	for _, sub := range subs {
+		if domain.SubscriptionID(sub.URL) == id {
+			return sub.URL, nil
+		}
+	}
+	return "", fmt.Errorf("подписка не найдена — обновите страницу")
 }
 
 func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -558,7 +817,8 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	list := make([]map[string]any, 0, len(subs))
 	for _, sub := range subs {
-		entry := map[string]any{"url": sub.URL, "count": len(sub.Tags)}
+		entry := subscriptionEntry(sub.URL)
+		entry["count"] = len(sub.Tags)
 		if !sub.Updated.IsZero() {
 			entry["updated"] = sub.Updated
 		}
@@ -567,6 +827,8 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"subscriptions": list})
 }
 
+// handleSubscriptionAdd registers the URL the user typed; the answer names
+// it only in the redacted form
 func (s *Server) handleSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
 		fail(w, fmt.Errorf("подписки недоступны"))
@@ -591,14 +853,14 @@ func (s *Server) handleSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, subscriptionResponse(result))
 }
 
-// handleSubscriptionUpdate refreshes one subscription (url set) or all
+// handleSubscriptionUpdate refreshes one subscription (id set) or all
 func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.subs == nil {
 		fail(w, fmt.Errorf("подписки недоступны"))
 		return
 	}
 	var req struct {
-		URL string `json:"url"`
+		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, fmt.Errorf("bad request: %w", err))
@@ -612,10 +874,13 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 		result *domain.SubscriptionResult
 		err    error
 	)
-	if req.URL == "" {
+	if req.ID == "" {
 		result, err = s.subs.UpdateAll()
 	} else {
-		result, err = s.subs.Update(req.URL)
+		var rawURL string
+		if rawURL, err = s.subscriptionURL(req.ID); err == nil {
+			result, err = s.subs.Update(rawURL)
+		}
 	}
 	if err != nil {
 		fail(w, err)
@@ -630,7 +895,7 @@ func (s *Server) handleSubscriptionRemove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req struct {
-		URL string `json:"url"`
+		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, fmt.Errorf("bad request: %w", err))
@@ -640,7 +905,12 @@ func (s *Server) handleSubscriptionRemove(w http.ResponseWriter, r *http.Request
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 
-	result, err := s.subs.Remove(req.URL)
+	rawURL, err := s.subscriptionURL(req.ID)
+	if err != nil {
+		fail(w, err)
+		return
+	}
+	result, err := s.subs.Remove(rawURL)
 	if err != nil {
 		fail(w, err)
 		return

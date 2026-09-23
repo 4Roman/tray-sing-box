@@ -38,28 +38,23 @@ func newDPITestServer(t *testing.T) (*Server, string) {
 	dpi := domain.NewDPIBypassService(&stubDPIManager{}, editor, vpn)
 
 	server := New(settings, importer, nil, dpi, nil, nil, Sources{}, LogAccess{})
-	pageURL, err := server.start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	return server, pageURL
+	return server, start(t, server)
 }
 
-func TestDPIRequiresToken(t *testing.T) {
-	_, pageURL := newDPITestServer(t)
-	base := baseURL(t, pageURL)
+func TestDPIRequiresSession(t *testing.T) {
+	_, base := newDPITestServer(t)
 
 	status, _ := call(t, "GET", base+"/api/dpi", "", nil)
-	if status != http.StatusForbidden {
-		t.Fatalf("api/dpi without token: status %d", status)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("api/dpi without a session: status %d", status)
 	}
 }
 
 func TestDPIChainEnableSetsDetour(t *testing.T) {
-	server, pageURL := newDPITestServer(t)
-	base := baseURL(t, pageURL)
+	server, base := newDPITestServer(t)
+	session := login(t, server)
 
-	status, data := call(t, "POST", base+"/api/dpi/chain", server.token,
+	status, data := call(t, "POST", base+"/api/dpi/chain", session,
 		map[string]bool{"enable": true})
 	if status != http.StatusOK {
 		t.Fatalf("chain enable: status %d: %v", status, data)
@@ -69,14 +64,14 @@ func TestDPIChainEnableSetsDetour(t *testing.T) {
 	}
 
 	// The config now has the bypass outbound and a detour on the active proxy
-	_, cfg := call(t, "GET", base+"/api/config", server.token, nil)
+	_, cfg := call(t, "GET", base+"/api/config", session, nil)
 	outbounds := cfg["outbounds"].(string)
 	if !strings.Contains(outbounds, "dpi-bypass") || !strings.Contains(outbounds, "detour") {
 		t.Fatalf("detour not written to config: %s", outbounds)
 	}
 
 	// Disabling clears it again
-	status, data = call(t, "POST", base+"/api/dpi/chain", server.token,
+	status, data = call(t, "POST", base+"/api/dpi/chain", session,
 		map[string]bool{"enable": false})
 	if status != http.StatusOK || data["chain"] != false {
 		t.Fatalf("chain disable failed: %d %v", status, data)

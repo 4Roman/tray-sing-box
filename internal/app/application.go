@@ -343,7 +343,7 @@ func (a *Application) autoRefreshSubscriptions() {
 	}
 	for _, u := range result.Updates {
 		if u.Err != nil {
-			log.Printf("Subscription auto-refresh: %s: %v", u.URL, u.Err)
+			log.Printf("Subscription auto-refresh: %s: %v", domain.RedactURL(u.URL), u.Err)
 		}
 	}
 	if a.trayUI != nil {
@@ -552,15 +552,17 @@ func (a *Application) handleUpdateSubscriptions() {
 	})
 }
 
-// subscriptionMessage formats the popup text for finished subscription work
+// subscriptionMessage formats the popup text for finished subscription work.
+// Subscriptions are named by their redacted URL: the full one carries the
+// provider's access token.
 func subscriptionMessage(result *domain.SubscriptionResult) string {
 	var lines []string
 	for _, u := range result.Updates {
 		if u.Err != nil {
-			lines = append(lines, fmt.Sprintf(ui.SubsLineError, u.URL, u.Err))
+			lines = append(lines, fmt.Sprintf(ui.SubsLineError, domain.RedactURL(u.URL), u.Err))
 			continue
 		}
-		line := fmt.Sprintf(ui.SubsLineOK, u.URL, len(u.Tags))
+		line := fmt.Sprintf(ui.SubsLineOK, domain.RedactURL(u.URL), len(u.Tags))
 		if len(u.Added) > 0 {
 			line += fmt.Sprintf(ui.SubsLineAdded, len(u.Added))
 		}

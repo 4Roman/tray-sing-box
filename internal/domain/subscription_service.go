@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/url"
@@ -42,7 +44,9 @@ type SubscriptionConfigStore interface {
 	SyncOutbounds(ownedTags []string, outbounds []map[string]any) (*SyncResult, error)
 }
 
-// SubscriptionUpdate is the outcome of refreshing one subscription
+// SubscriptionUpdate is the outcome of refreshing one subscription. URL is
+// the saved URL itself — it carries the provider's access token, so it is
+// shown (logged, put into a popup or a response) only through RedactURL.
 type SubscriptionUpdate struct {
 	URL     string
 	Tags    []string
@@ -99,6 +103,33 @@ func IsSubscriptionURL(text string) bool {
 	return err == nil && u.Host != ""
 }
 
+// SubscriptionID identifies a subscription without revealing its URL: the
+// first 16 hex digits of the URL's SHA-256. The settings page addresses
+// subscriptions by it — the URL carries the provider's access token and
+// never leaves the elevated process.
+func SubscriptionID(rawURL string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(sum[:8])
+}
+
+// RedactURL is how a subscription is named in logs, popups, errors and on
+// the settings page: "scheme://host/… (abcdef)". Userinfo, path, query and
+// fragment — where providers put the access token — are dropped; the six hex
+// digits (a prefix of SubscriptionID) tell two subscriptions of one host
+// apart. A string that is not an absolute URL becomes "(подписка abcdef)".
+func RedactURL(rawURL string) string {
+	short := SubscriptionID(rawURL)[:6]
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Sprintf("(подписка %s)", short)
+	}
+	name := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		name += "/…"
+	}
+	return fmt.Sprintf("%s (%s)", name, short)
+}
+
 // List returns the saved subscriptions
 func (s *SubscriptionService) List() ([]Subscription, error) {
 	s.mu.Lock()
@@ -111,7 +142,7 @@ func (s *SubscriptionService) List() ([]Subscription, error) {
 func (s *SubscriptionService) Add(rawURL string) (*SubscriptionResult, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if !IsSubscriptionURL(rawURL) {
-		return nil, fmt.Errorf("не похоже на ссылку подписки: %q", rawURL)
+		return nil, fmt.Errorf("не похоже на ссылку подписки: %s", RedactURL(rawURL))
 	}
 
 	s.mu.Lock()
@@ -137,7 +168,7 @@ func (s *SubscriptionService) Update(rawURL string) (*SubscriptionResult, error)
 		return nil, err
 	}
 	if indexOfSubscription(subs, rawURL) < 0 {
-		return nil, fmt.Errorf("подписка не найдена: %q", rawURL)
+		return nil, fmt.Errorf("подписка не найдена: %s", RedactURL(rawURL))
 	}
 	return s.refresh(subs, rawURL)
 }
@@ -167,7 +198,7 @@ func (s *SubscriptionService) Remove(rawURL string) (*SubscriptionResult, error)
 	}
 	i := indexOfSubscription(subs, rawURL)
 	if i < 0 {
-		return nil, fmt.Errorf("подписка не найдена: %q", rawURL)
+		return nil, fmt.Errorf("подписка не найдена: %s", RedactURL(rawURL))
 	}
 
 	sync, err := s.config.SyncOutbounds(subs[i].Tags, nil)
@@ -179,7 +210,7 @@ func (s *SubscriptionService) Remove(rawURL string) (*SubscriptionResult, error)
 	if err := s.store.Save(subs); err != nil {
 		return nil, err
 	}
-	log.Printf("Subscription removed: %s (deleted outbounds: %v)", rawURL, sync.Removed)
+	log.Printf("Subscription removed: %s (deleted outbounds: %v)", RedactURL(rawURL), sync.Removed)
 
 	result := &SubscriptionResult{
 		Updates: []SubscriptionUpdate{{URL: rawURL, Removed: sync.Removed}},
@@ -271,7 +302,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	update.Removed = sync.Removed
 	update.changedConfig = sync.Changed
 	log.Printf("Subscription refreshed: %s (%d nodes, +%d -%d, changed=%v)",
-		sub.URL, len(tags), len(sync.Added), len(sync.Removed), sync.Changed)
+		RedactURL(sub.URL), len(tags), len(sync.Added), len(sync.Removed), sync.Changed)
 	return update
 }
 

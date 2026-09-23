@@ -45,26 +45,23 @@ func newAppUpdateServer(t *testing.T, repo *fakeAppRepo) (*Server, string, chan 
 			relaunched <- struct{}{}
 		})
 	}
-	pageURL, err := server.start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	return server, baseURL(t, pageURL), relaunched
+	return server, start(t, server), relaunched
 }
 
 // Without a configured updater the page hides the section and the actions
 // fail with a clear message
 func TestAppUpdateNotConfigured(t *testing.T) {
 	server, base, _ := newAppUpdateServer(t, nil)
+	session := login(t, server)
 
-	status, data := call(t, http.MethodGet, base+"/api/app-update", server.token, nil)
+	status, data := call(t, http.MethodGet, base+"/api/app-update", session, nil)
 	if status != http.StatusOK || data["configured"] != false {
 		t.Fatalf("check: status %d, data %v", status, data)
 	}
-	if status, _ := call(t, http.MethodPost, base+"/api/app-update", server.token, map[string]any{}); status == http.StatusOK {
+	if status, _ := call(t, http.MethodPost, base+"/api/app-update", session, map[string]any{}); status == http.StatusOK {
 		t.Fatal("update succeeded without a configured updater")
 	}
-	if status, _ := call(t, http.MethodPost, base+"/api/app-update/relaunch", server.token, map[string]any{}); status == http.StatusOK {
+	if status, _ := call(t, http.MethodPost, base+"/api/app-update/relaunch", session, map[string]any{}); status == http.StatusOK {
 		t.Fatal("relaunch succeeded without a configured updater")
 	}
 }
@@ -74,18 +71,19 @@ func TestAppUpdateNotConfigured(t *testing.T) {
 func TestAppUpdateFlow(t *testing.T) {
 	repo := &fakeAppRepo{latest: domain.AppRelease{Version: "1.1.0", Notes: "notes"}}
 	server, base, relaunched := newAppUpdateServer(t, repo)
+	session := login(t, server)
 
 	// A relaunch before an update must be refused
-	if status, _ := call(t, http.MethodPost, base+"/api/app-update/relaunch", server.token, map[string]any{}); status == http.StatusOK {
+	if status, _ := call(t, http.MethodPost, base+"/api/app-update/relaunch", session, map[string]any{}); status == http.StatusOK {
 		t.Fatal("relaunch without an installed update succeeded")
 	}
 
-	status, data := call(t, http.MethodGet, base+"/api/app-update", server.token, nil)
+	status, data := call(t, http.MethodGet, base+"/api/app-update", session, nil)
 	if status != http.StatusOK || data["configured"] != true || data["available"] != true || data["latest"] != "1.1.0" || data["installed"] != false {
 		t.Fatalf("check: status %d, data %v", status, data)
 	}
 
-	status, data = call(t, http.MethodPost, base+"/api/app-update", server.token, map[string]any{})
+	status, data = call(t, http.MethodPost, base+"/api/app-update", session, map[string]any{})
 	if status != http.StatusOK || data["installed"] != true || data["latest"] != "1.1.0" {
 		t.Fatalf("update: status %d, data %v", status, data)
 	}
@@ -93,7 +91,7 @@ func TestAppUpdateFlow(t *testing.T) {
 		t.Fatalf("installed=%v relaunched=%v after update, want true/false", repo.installed, repo.relaunched)
 	}
 
-	status, data = call(t, http.MethodPost, base+"/api/app-update/relaunch", server.token, map[string]any{})
+	status, data = call(t, http.MethodPost, base+"/api/app-update/relaunch", session, map[string]any{})
 	if status != http.StatusOK || data["relaunching"] != true {
 		t.Fatalf("relaunch: status %d, data %v", status, data)
 	}
@@ -106,7 +104,7 @@ func TestAppUpdateFlow(t *testing.T) {
 		t.Fatal("repository Relaunch not called")
 	}
 
-	if status, _ := call(t, http.MethodGet, base+"/api/app-update", "", nil); status != http.StatusForbidden {
-		t.Fatalf("app-update without token: status %d", status)
+	if status, _ := call(t, http.MethodGet, base+"/api/app-update", "", nil); status != http.StatusUnauthorized {
+		t.Fatalf("app-update without a session: status %d", status)
 	}
 }

@@ -57,6 +57,10 @@
   }
   #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
   #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+  .notice {
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px;
+    background: #3a1d20; color: #f1948f; border: 1px solid #6b3036;
+  }
   input[type=text] {
     flex: 1; min-width: 240px; margin-top: 10px;
     background: #14161b; color: #d6e2f0; border: 1px solid #2a2e37;
@@ -91,6 +95,10 @@
 </head>
 <body>
 <h1>Настройки sing-box</h1>
+<div id="nosession" class="notice" hidden>
+  Эта вкладка не выполнила вход в настройки. Откройте «Настройки» из меню значка в трее: каждая такая ссылка одноразовая и открывает свой сеанс.
+</div>
+<main id="app">
 <div class="vpn-state">VPN: <b id="vpn">—</b> <button id="vpn-btn" onclick="toggleVPN()" style="margin-left:10px" disabled>…</button></div>
 <div id="msg"></div>
 
@@ -156,6 +164,9 @@
 
 <section>
   <h2>Outbounds (JSON)</h2>
+  <div class="vpn-state" style="margin-bottom:10px">
+    Секреты (пароли, uuid, ключи) показаны как «(скрыто)». Скрытое поле, оставленное как есть, сохраняет прежнее значение; но чтобы изменить другие параметры сервера, введите его скрытые поля заново.
+  </div>
   <textarea id="outbounds" spellcheck="false"></textarea>
   <button onclick="saveSection('outbounds', this)">Сохранить outbounds</button>
 </section>
@@ -182,25 +193,54 @@
   </div>
   <div id="logs-box"></div>
 </section>
+</main>
 
 <script>
-const TOKEN = "{{.Token}}";
+// The session secret was put here by /login (the one-time link from the
+// tray). sessionStorage belongs to this tab and this origin — port included —
+// and the secret travels only in the X-Session header, never in a URL.
+const SESSION_KEY = 'singbox-tray-session';
+let SESSION = null;
+try { SESSION = sessionStorage.getItem(SESSION_KEY); } catch (e) { /* storage disabled */ }
+let sessionEnded = false;
+let msgTimer = null;
 
 function show(kind, text) {
+  // Once the session is over its notice stays; later failures add nothing
+  if (sessionEnded) return;
   const el = document.getElementById('msg');
+  clearTimeout(msgTimer);
   el.className = kind;
   el.textContent = text;
-  if (kind === 'ok') setTimeout(() => { el.className = ''; }, 6000);
+  if (kind === 'ok') msgTimer = setTimeout(() => { el.className = ''; }, 6000);
+}
+
+// endSession: the server answered 401 (idle too long, too old, or closed
+// because the login link was used twice)
+function endSession() {
+  if (sessionEnded) return;
+  show('err', 'Сессия завершена — откройте «Настройки» из трея заново');
+  sessionEnded = true;
+  try { sessionStorage.removeItem(SESSION_KEY); } catch (e) { /* storage disabled */ }
+  if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
+  const auto = document.getElementById('logs-auto');
+  auto.checked = false;
+  auto.disabled = true;
 }
 
 async function api(path, body) {
+  if (sessionEnded) throw new Error('сессия завершена');
   const opts = {
-    headers: { 'X-Token': TOKEN, 'Content-Type': 'application/json' },
+    headers: { 'X-Session': SESSION, 'Content-Type': 'application/json' },
     method: body ? 'POST' : 'GET',
   };
   if (body) opts.body = JSON.stringify(body);
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
+  if (resp.status === 401) {
+    endSession();
+    throw new Error('сессия завершена');
+  }
   if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
   return data;
 }
@@ -432,10 +472,12 @@ function importFrom(source, btn) {
   });
 }
 
+// Subscriptions are named by id and a redacted URL ("https://host/… (ab12cd)"):
+// the full URL carries the provider's access token and stays in the app
 function subsSummary(prefix, d) {
   const lines = (d.updates || []).map(u => u.error
-    ? u.url + ' — ошибка: ' + u.error
-    : u.url + ' — серверов: ' + u.count +
+    ? u.display + ' — ошибка: ' + u.error
+    : u.display + ' — серверов: ' + u.count +
       (u.added ? ', новых: ' + u.added : '') +
       (u.removed ? ', удалено: ' + u.removed : ''));
   return prefix + restartedSuffix(d) + '\n' + lines.join('\n');
@@ -458,7 +500,7 @@ function renderSubs(subs) {
     row.className = 'sub';
     const url = document.createElement('span');
     url.className = 'url';
-    url.textContent = sub.url;
+    url.textContent = sub.display;
     const meta = document.createElement('span');
     meta.className = 'meta';
     meta.textContent = 'серверов: ' + sub.count +
@@ -468,11 +510,11 @@ function renderSubs(subs) {
     const upd = document.createElement('button');
     upd.className = 'secondary';
     upd.textContent = 'Обновить';
-    upd.onclick = () => updateSubscription(sub.url, upd);
+    upd.onclick = () => updateSubscription(sub.id, upd);
     const del = document.createElement('button');
     del.className = 'secondary';
     del.textContent = 'Удалить';
-    del.onclick = () => removeSubscription(sub.url, del);
+    del.onclick = () => removeSubscription(sub, del);
     row.append(url, meta, spacer, upd, del);
     box.append(row);
   }
@@ -493,20 +535,21 @@ function addSubscription(btn) {
   });
 }
 
-function updateSubscription(url, btn) {
+// updateSubscription refreshes one subscription by id, or all with id ''
+function updateSubscription(id, btn) {
   run(btn, async () => {
     show('ok', 'Обновляю подписки…');
-    const d = await api('/api/subscriptions/update', { url });
+    const d = await api('/api/subscriptions/update', { id });
     show('ok', subsSummary('Подписки обновлены', d));
     await refresh();
     await refreshSubs();
   });
 }
 
-function removeSubscription(url, btn) {
-  if (!confirm('Удалить подписку и все её серверы из конфига?\n' + url)) return;
+function removeSubscription(sub, btn) {
+  if (!confirm('Удалить подписку и все её серверы из конфига?\n' + sub.display)) return;
   run(btn, async () => {
-    const d = await api('/api/subscriptions/remove', { url });
+    const d = await api('/api/subscriptions/remove', { id: sub.id });
     show('ok', subsSummary('Подписка удалена', d));
     await refresh();
     await refreshSubs();
@@ -617,11 +660,18 @@ function restoreVersion(name, btn) {
   });
 }
 
-refresh();
-refreshSubs();
-refreshHistory();
-refreshLogs(null);
-refreshAppUpdate();
+if (SESSION) {
+  refresh();
+  refreshSubs();
+  refreshHistory();
+  refreshLogs(null);
+  refreshAppUpdate();
+} else {
+  // Opened without the login link (a bookmark, a copied address, another
+  // tab): there is nothing to show
+  document.getElementById('app').hidden = true;
+  document.getElementById('nosession').hidden = false;
+}
 </script>
 </body>
 </html>

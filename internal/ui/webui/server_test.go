@@ -3,10 +3,11 @@ package webui
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -34,7 +35,8 @@ const testConfig = `{
   "route": {"rules": [{"outbound": "p1"}], "final": "direct"}
 }`
 
-// newTestServer starts a real settings server over a temp config
+// newTestServer starts a real settings server over a temp config and
+// returns it with its base URL
 func newTestServer(t *testing.T, clip TextSource) (*Server, string) {
 	t.Helper()
 
@@ -49,23 +51,59 @@ func newTestServer(t *testing.T, clip TextSource) (*Server, string) {
 	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
 
 	server := New(settings, importer, nil, nil, nil, nil, Sources{Clipboard: clip}, LogAccess{})
-	pageURL, err := server.start()
+	return server, start(t, server)
+}
+
+// start starts the listener and returns the base URL
+func start(t *testing.T, server *Server) string {
+	t.Helper()
+	base, err := server.start()
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	return server, pageURL
+	return base
 }
 
-func baseURL(t *testing.T, pageURL string) string {
+// secretInLoginPage finds the session secret the login page stores
+var secretInLoginPage = regexp.MustCompile(`sessionStorage\.setItem\([^,]*,\s*"([0-9a-f]{64})"\)`)
+
+// login gets a session the way the browser does: a code issued as for a
+// tray click, GET /login?code=, the secret out of the page it returns
+func login(t *testing.T, server *Server) string {
 	t.Helper()
-	u, err := url.Parse(pageURL)
+	code, err := server.issueCode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return "http://" + u.Host
+	status, body := get(t, server.base+"/login?code="+code)
+	if status != http.StatusOK {
+		t.Fatalf("login: status %d: %s", status, body)
+	}
+	m := secretInLoginPage.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no session secret in the login page: %s", body)
+	}
+	return m[1]
 }
 
-func call(t *testing.T, method, rawURL, token string, body any) (int, map[string]any) {
+// get fetches a page without a session
+func get(t *testing.T, rawURL string) (int, string) {
+	t.Helper()
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body)
+}
+
+// callRaw sends an API request with the given session ("" = none) and
+// returns the raw response body
+func callRaw(t *testing.T, method, rawURL, session string, body any) (int, string) {
 	t.Helper()
 	var reader *bytes.Reader
 	if body != nil {
@@ -78,62 +116,35 @@ func call(t *testing.T, method, rawURL, token string, body any) (int, map[string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if token != "" {
-		req.Header.Set("X-Token", token)
+	if session != "" {
+		req.Header.Set(sessionHeader, session)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(raw)
+}
+
+// call is callRaw with the JSON response decoded
+func call(t *testing.T, method, rawURL, session string, body any) (int, map[string]any) {
+	t.Helper()
+	status, raw := callRaw(t, method, rawURL, session, body)
 	var data map[string]any
-	json.NewDecoder(resp.Body).Decode(&data)
-	return resp.StatusCode, data
-}
-
-func TestPageRequiresToken(t *testing.T) {
-	server, pageURL := newTestServer(t, nil)
-	base := baseURL(t, pageURL)
-
-	resp, err := http.Get(base + "/")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("page without token: status %d", resp.StatusCode)
-	}
-
-	resp, err = http.Get(pageURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("page with token: status %d", resp.StatusCode)
-	}
-	_ = server
-}
-
-func TestAPIRequiresToken(t *testing.T) {
-	_, pageURL := newTestServer(t, nil)
-	base := baseURL(t, pageURL)
-
-	status, _ := call(t, "GET", base+"/api/config", "", nil)
-	if status != http.StatusForbidden {
-		t.Fatalf("api without token: status %d", status)
-	}
-	status, _ = call(t, "GET", base+"/api/config", "wrong", nil)
-	if status != http.StatusForbidden {
-		t.Fatalf("api with wrong token: status %d", status)
-	}
+	json.Unmarshal([]byte(raw), &data)
+	return status, data
 }
 
 func TestConfigEndpoint(t *testing.T) {
-	server, pageURL := newTestServer(t, nil)
-	base := baseURL(t, pageURL)
+	server, base := newTestServer(t, nil)
+	session := login(t, server)
 
-	status, data := call(t, "GET", base+"/api/config", server.token, nil)
+	status, data := call(t, "GET", base+"/api/config", session, nil)
 	if status != http.StatusOK {
 		t.Fatalf("status %d: %v", status, data)
 	}
@@ -165,13 +176,10 @@ func TestVPNEndpointStartsAndStops(t *testing.T) {
 	vpn := domain.NewVPNService(pm, st)
 	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
 		nil, nil, nil, nil, Sources{}, LogAccess{})
-	pageURL, err := server.start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	base := baseURL(t, pageURL)
+	base := start(t, server)
+	session := login(t, server)
 
-	status, data := call(t, http.MethodPost, base+"/api/vpn", server.token, map[string]any{"running": true})
+	status, data := call(t, http.MethodPost, base+"/api/vpn", session, map[string]any{"running": true})
 	if status != http.StatusOK || data["running"] != true || data["status"] != "running" {
 		t.Fatalf("start: status %d, data %v", status, data)
 	}
@@ -179,7 +187,7 @@ func TestVPNEndpointStartsAndStops(t *testing.T) {
 		t.Fatalf("start did not start the process / record the intent: running=%v intent=%v", pm.running, st.state)
 	}
 
-	status, data = call(t, http.MethodPost, base+"/api/vpn", server.token, map[string]any{"running": false})
+	status, data = call(t, http.MethodPost, base+"/api/vpn", session, map[string]any{"running": false})
 	if status != http.StatusOK || data["running"] != false || data["status"] != "stopped" {
 		t.Fatalf("stop: status %d, data %v", status, data)
 	}
@@ -187,8 +195,11 @@ func TestVPNEndpointStartsAndStops(t *testing.T) {
 		t.Fatalf("stop did not stop the process / record the intent: running=%v intent=%v", pm.running, st.state)
 	}
 
-	if status, _ := call(t, http.MethodPost, base+"/api/vpn", "", map[string]any{"running": true}); status != http.StatusForbidden {
-		t.Fatalf("vpn without token: status %d", status)
+	if status, _ := call(t, http.MethodPost, base+"/api/vpn", "", map[string]any{"running": true}); status != http.StatusUnauthorized {
+		t.Fatalf("vpn without a session: status %d", status)
+	}
+	if pm.running || st.state {
+		t.Fatal("a request without a session started the VPN")
 	}
 }
 
@@ -203,45 +214,42 @@ func TestConfigEndpointReportsStarting(t *testing.T) {
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{state: true})
 	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
 		nil, nil, nil, nil, Sources{}, LogAccess{})
-	pageURL, err := server.start()
-	if err != nil {
-		t.Fatalf("start: %v", err)
-	}
+	base := start(t, server)
 
-	_, data := call(t, "GET", baseURL(t, pageURL)+"/api/config", server.token, nil)
+	_, data := call(t, "GET", base+"/api/config", login(t, server), nil)
 	if data["running"] != false || data["status"] != "starting" {
 		t.Fatalf("running/status = %v/%v, want false/starting", data["running"], data["status"])
 	}
 }
 
 func TestSaveSectionAndSwitch(t *testing.T) {
-	server, pageURL := newTestServer(t, nil)
-	base := baseURL(t, pageURL)
+	server, base := newTestServer(t, nil)
+	session := login(t, server)
 
 	newOutbounds := `[
   {"type": "vless", "tag": "p1", "server": "a.example.com"},
   {"type": "trojan", "tag": "p2", "server": "b.example.com"},
   {"type": "direct", "tag": "direct"}
 ]`
-	status, data := call(t, "POST", base+"/api/section", server.token,
+	status, data := call(t, "POST", base+"/api/section", session,
 		map[string]string{"name": "outbounds", "content": newOutbounds})
 	if status != http.StatusOK {
 		t.Fatalf("save section: status %d: %v", status, data)
 	}
 
-	status, data = call(t, "POST", base+"/api/switch", server.token,
+	status, data = call(t, "POST", base+"/api/switch", session,
 		map[string]string{"tag": "p2"})
 	if status != http.StatusOK {
 		t.Fatalf("switch: status %d: %v", status, data)
 	}
 
-	_, data = call(t, "GET", base+"/api/config", server.token, nil)
+	_, data = call(t, "GET", base+"/api/config", session, nil)
 	if data["active"] != "p2" {
 		t.Fatalf("active after switch = %v", data["active"])
 	}
 
 	// Invalid JSON must be rejected with a readable error
-	status, data = call(t, "POST", base+"/api/section", server.token,
+	status, data = call(t, "POST", base+"/api/section", session,
 		map[string]string{"name": "route", "content": "{broken"})
 	if status != http.StatusBadRequest || data["error"] == "" {
 		t.Fatalf("broken JSON accepted: %d %v", status, data)
@@ -250,10 +258,10 @@ func TestSaveSectionAndSwitch(t *testing.T) {
 
 func TestImportEndpoint(t *testing.T) {
 	link := "vless://uuid@imported.example.com:443?security=tls#web-import"
-	server, pageURL := newTestServer(t, func() (string, error) { return link, nil })
-	base := baseURL(t, pageURL)
+	server, base := newTestServer(t, func() (string, error) { return link, nil })
+	session := login(t, server)
 
-	status, data := call(t, "POST", base+"/api/import", server.token,
+	status, data := call(t, "POST", base+"/api/import", session,
 		map[string]string{"source": "clipboard"})
 	if status != http.StatusOK {
 		t.Fatalf("import: status %d: %v", status, data)
@@ -263,7 +271,7 @@ func TestImportEndpoint(t *testing.T) {
 		t.Fatalf("tags = %v", tags)
 	}
 
-	status, data = call(t, "POST", base+"/api/import", server.token,
+	status, data = call(t, "POST", base+"/api/import", session,
 		map[string]string{"source": "qr"})
 	if status != http.StatusBadRequest {
 		t.Fatalf("unavailable source accepted: %d %v", status, data)

@@ -13,6 +13,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/infrastructure/paths"
 )
 
@@ -42,7 +43,8 @@ func openBrowser(url string) error {
 	}
 	cmdline := `"` + rundll + `" url.dll,FileProtocolHandler ` + url
 	if err := startAsShellUser(rundll, cmdline); err != nil {
-		return fmt.Errorf("не удалось открыть браузер без прав администратора (%v). Откройте адрес вручную: %s", err, url)
+		return fmt.Errorf("не удалось открыть браузер без прав администратора (%v). Откройте адрес вручную "+
+			"(ссылка одноразовая, действует %d с): %s", err, config.WebLoginCodeSeconds, url)
 	}
 	return nil
 }

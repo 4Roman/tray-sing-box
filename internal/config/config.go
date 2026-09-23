@@ -54,6 +54,14 @@ const (
 	SubscriptionRefreshHours = 6                    // periodic auto-refresh interval
 	SubscriptionStartupDelay = 60                   // seconds after start before the first auto-refresh
 
+	// Settings web UI sessions. The page is opened with a one-time login code
+	// (its URL is readable by any program of the user: browser and rundll32
+	// command lines, browser history); the code is traded for a session held
+	// only in the tab's sessionStorage
+	WebLoginCodeSeconds   = 120 // an unused login code expires
+	WebSessionIdleMinutes = 30  // a session unused this long expires
+	WebSessionMaxHours    = 12  // a session expires this long after the login anyway
+
 	// Self-update of this application from its GitHub releases. Disabled
 	// while either value is empty: the app runs elevated and downloads code
 	// it then executes, so a release is only accepted when checksums.txt is

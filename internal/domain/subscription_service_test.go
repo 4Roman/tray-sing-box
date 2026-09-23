@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"strings"
 	"testing"
 )
@@ -247,5 +249,95 @@ func TestRemoveSubscription(t *testing.T) {
 	}
 	if !result.Restarted {
 		t.Fatal("running VPN must restart after its outbounds were removed")
+	}
+}
+
+func TestSubscriptionID(t *testing.T) {
+	id := SubscriptionID("https://p.example/sub?token=a")
+	if len(id) != 16 || strings.Trim(id, "0123456789abcdef") != "" {
+		t.Fatalf("SubscriptionID = %q, want 16 hex digits", id)
+	}
+	if SubscriptionID("https://p.example/sub?token=a") != id {
+		t.Fatal("SubscriptionID is not stable")
+	}
+	if SubscriptionID("https://p.example/sub?token=b") == id {
+		t.Fatal("two subscriptions of one host got the same ID")
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"https://p.example/sub?token=secret", "https://p.example/…"},
+		{"https://usersecret:secret@p.example:8443/api/v1/secret?token=secret#secret", "https://p.example:8443/…"},
+		{"https://p.example/secret", "https://p.example/…"},
+		{"https://p.example?token=secret", "https://p.example/…"},
+		{"https://p.example#secret", "https://p.example/…"},
+		{"http://p.example", "http://p.example"},
+		{"https://p.example/", "https://p.example"},
+		// Not an absolute URL: nothing of it is shown
+		{"not a url secret", ""},
+		{"p.example/secret", ""},
+		{"http://[::1/secret", ""},
+		{"", ""},
+	} {
+		short := SubscriptionID(tc.raw)[:6]
+		want := "(подписка " + short + ")"
+		if tc.want != "" {
+			want = tc.want + " (" + short + ")"
+		}
+		got := RedactURL(tc.raw)
+		if got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", tc.raw, got, want)
+		}
+		if strings.Contains(got, "secret") {
+			t.Errorf("RedactURL(%q) = %q reveals the secret part", tc.raw, got)
+		}
+	}
+}
+
+// Subscription URLs carry the provider's access token: the service names
+// them only in the redacted form, in its log lines and in its errors
+func TestSubscriptionMessagesRedactURL(t *testing.T) {
+	const secretURL = "https://usersecret:pwsecret@p.example/pathsecret?token=querysecret"
+	assertRedacted := func(what, text string) {
+		t.Helper()
+		for _, secret := range []string{"usersecret", "pwsecret", "pathsecret", "querysecret"} {
+			if strings.Contains(text, secret) {
+				t.Fatalf("%s reveals the subscription URL (%q): %s", what, secret, text)
+			}
+		}
+	}
+
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prev)
+
+	store := &fakeSubStore{}
+	fetch := fetcherFor(map[string]string{secretURL: "node-a"}, nil)
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	if _, err := svc.Add(secretURL); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := svc.Remove(secretURL); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	for _, text := range []string{"Subscription refreshed: https://p.example/… (", "Subscription removed: https://p.example/… ("} {
+		if !strings.Contains(logs.String(), text) {
+			t.Fatalf("log lacks %q: %s", text, logs.String())
+		}
+	}
+	assertRedacted("log", logs.String())
+
+	// Errors naming a subscription: unknown (removed above) and not a URL
+	_, errUpdate := svc.Update(secretURL)
+	_, errRemove := svc.Remove(secretURL)
+	_, errAdd := svc.Add("https://p.example/x pathsecret?token=querysecret")
+	for _, err := range []error{errUpdate, errRemove, errAdd} {
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		assertRedacted("error", err.Error())
 	}
 }

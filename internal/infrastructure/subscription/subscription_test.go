@@ -1,10 +1,13 @@
 package subscription
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -80,5 +83,58 @@ func TestFetchHTTPError(t *testing.T) {
 
 	if _, err := Fetch(srv.URL); err == nil {
 		t.Fatal("want error for HTTP 404")
+	}
+}
+
+// dropConnection answers a request by closing the connection: the client
+// fails with an error of its own, which names the URL
+func dropConnection(w http.ResponseWriter, r *http.Request) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err == nil {
+		conn.Close()
+	}
+}
+
+// net/http names the request URL in its errors; the URL carries the
+// provider's access token and the error reaches the log, a popup and the
+// settings page. Fetch must hand out the redacted form only.
+func TestFetchErrorsCarryNoURL(t *testing.T) {
+	secrets := []string{"usersecret", "pwsecret", "pathsecret", "querysecret", "redirsecret"}
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/next/pathsecret?token=redirsecret", http.StatusFound)
+			return
+		}
+		dropConnection(w, r)
+	}))
+	defer failing.Close()
+	host := strings.TrimPrefix(failing.URL, "http://")
+
+	closed := httptest.NewServer(http.NotFoundHandler())
+	unreachable := closed.URL
+	closed.Close()
+
+	for name, rawURL := range map[string]string{
+		"dropped connection": failing.URL + "/sub/pathsecret?token=querysecret",
+		"userinfo":           "http://usersecret:pwsecret@" + host + "/sub/pathsecret?token=querysecret",
+		"redirect target":    failing.URL + "/start",
+		"unreachable":        unreachable + "/sub/pathsecret?token=querysecret",
+		"unparsable":         "http://" + host + "/%zz/pathsecret?token=querysecret",
+	} {
+		_, err := Fetch(rawURL)
+		if err == nil {
+			t.Fatalf("%s: want an error", name)
+		}
+		for _, secret := range secrets {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("%s: error reveals the URL (%q): %v", name, secret, err)
+			}
+		}
+		// The rest of the message stays, and so does the error type
+		var ue *url.Error
+		if !errors.As(err, &ue) || !(strings.Contains(err.Error(), "/… (") || strings.Contains(err.Error(), "(подписка ")) {
+			t.Fatalf("%s: not a redacted *url.Error: %v", name, err)
+		}
 	}
 }
