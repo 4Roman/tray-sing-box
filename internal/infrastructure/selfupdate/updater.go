@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"tray-sing-box/internal/config"
-	"tray-sing-box/internal/infrastructure/nettrust"
 	"tray-sing-box/internal/domain"
+	"tray-sing-box/internal/infrastructure/nettrust"
 	"tray-sing-box/internal/infrastructure/process"
 )
 
