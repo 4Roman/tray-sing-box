@@ -351,6 +351,32 @@ func TestLastExitIsNotSetByStop(t *testing.T) {
 	}
 }
 
+// Windows ends sing-box at logoff/shutdown: not a crash either (the live log
+// showed an ERROR with exit status 0x40010004 at every shutdown)
+func TestShutdownKillIsNotAnError(t *testing.T) {
+	dir := installFakeSingBox(t, "run")
+	m := NewAt(dir)
+	t.Cleanup(func() { m.Stop() })
+	logs := captureLog(t)
+	old := sessionEnding
+	sessionEnding = func() bool { return true }
+	t.Cleanup(func() { sessionEnding = old })
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// Killed from outside, as Windows does it: not through Stop
+	m.mu.Lock()
+	proc := m.cmd.Process
+	m.mu.Unlock()
+	if err := proc.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if line := exitLogLine(t, logs); !strings.Contains(line, "ended by the Windows shutdown") || strings.Contains(line, "ERROR") {
+		t.Fatalf("a shutdown kill logged as %q", line)
+	}
+}
+
 // Two installations side by side: a sing-box.exe of ANOTHER directory must be
 // neither adopted nor killed. This is the Manager-level guard against sliding
 // back to image-name matching (which, run elevated, would kill a developer's

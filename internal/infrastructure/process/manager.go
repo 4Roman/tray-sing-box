@@ -22,6 +22,10 @@ import (
 // starts and dies on a loaded machine
 var startGrace = config.StartGraceMs * time.Millisecond
 
+// sessionEnding reports a Windows logoff/shutdown in progress (a variable
+// for tests)
+var sessionEnding = IsSessionEnding
+
 // consoleLogMaxBytes bounds sing-box-console.log (a variable for tests)
 var consoleLogMaxBytes int64 = config.LogMaxSizeMB << 20
 
@@ -212,9 +216,14 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 			}
 			return
 		}
-		if proc.exitErr != nil {
+		switch {
+		case sessionEnding():
+			// Windows ends every process at logoff/shutdown (exit code
+			// 0x40010004 as a rule): expected, not a crash
+			log.Printf("sing-box (PID %d) ended by the Windows shutdown (%s)", pid, exitReason(proc))
+		case proc.exitErr != nil:
 			log.Printf("ERROR: sing-box (PID %d) exited with error: %v (was running: %v)", pid, proc.exitErr, m.running)
-		} else {
+		default:
 			log.Printf("sing-box (PID %d) exited normally (was running: %v)", pid, m.running)
 		}
 		// Still ours = not superseded (a death within the start grace is
