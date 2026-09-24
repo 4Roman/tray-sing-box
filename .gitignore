@@ -65,7 +65,9 @@ release-signing-key*
 dpi-params.txt
 go.work.sum
 
-# The maintainer's notes for Claude Code: personal, machine-specific, not
-# published (see README "Разработка")
+# The maintainer's working notes (Claude Code instructions, audit report,
+# test checklist): machine-specific, kept local, not published
 /CLAUDE.md
 /CLAUDE.local.md
+/21.09.2026.md
+/21.09.2026-checklist.md
