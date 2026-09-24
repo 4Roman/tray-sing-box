@@ -9,10 +9,13 @@ name: Release
 # CI deliberately does NOT sign. The signature exists to protect elevated
 # clients from a compromised GitHub account — and such an account could push
 # a tag and have CI sign anything. So the private key never lives in GitHub:
-# the maintainer downloads the draft's exe, signs it OFFLINE
-#   go run ./tools/relsign -dir dist -key-file <private key file>
-# (-trimpath: the exe carries no build-machine paths)
-# uploads checksums.txt + checksums.txt.sig to the draft and publishes it.
+# the maintainer finishes the draft OFFLINE with
+#   build\release\finish-release.ps1 -Tag vX.Y.Z -KeyFile <private key file>
+# which rebuilds the exe from the tag and signs only when it is bit-identical
+# to this job's exe (the build is reproducible: -trimpath, the go.mod
+# toolchain, CGO_ENABLED as on the runner, go-winres v0.3.3 — keep the Build
+# step and that script in sync), builds the installer locally from it,
+# uploads checksums.txt + checksums.txt.sig and publishes.
 # Clients ignore drafts and refuse releases without a valid signature, so a
 # forgotten step yields "no update", never a bad update.
 
