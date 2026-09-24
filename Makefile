@@ -1,7 +1,8 @@
 # Run from WSL. The app is Windows-only, so the build uses the Windows Go
 # toolchain via WSL interop; override GO/GO_WINRES if your paths differ.
-GO        ?= /mnt/c/Users/user/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.3.windows-amd64/bin/go.exe
-GO_WINRES ?= /mnt/c/Users/user/go/bin/go-winres.exe
+WINUSER   ?= $(shell cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
+GO        ?= /mnt/c/Users/$(WINUSER)/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.3.windows-amd64/bin/go.exe
+GO_WINRES ?= /mnt/c/Users/$(WINUSER)/go/bin/go-winres.exe
 
 EXE     := bin/tray-sing-box.exe
 ICO     := assets/icons/tray.ico
@@ -20,7 +21,7 @@ all: build
 # icons are embedded (package assets), so they must exist BEFORE go build:
 # the exe is the whole app, nothing has to be copied next to it.
 build: $(ICO) $(GO_WINRES)
-	$(GO) build -ldflags="$(LDFLAGS)" -o $(EXE) .
+	$(GO) build -trimpath -ldflags="$(LDFLAGS)" -o $(EXE) .
 	$(GO_WINRES) patch --in build/winres/winres.json --no-backup $(EXE)
 
 icons: $(ICO)

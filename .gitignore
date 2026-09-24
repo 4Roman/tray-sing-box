@@ -48,5 +48,24 @@ subscriptions.json
 /.claude/
 config-history/
 
-# Release signing key (tools/relkey output) - never commit
-release-signing-key*.txt
+# Release signing key (tools/relkey output) - never commit; relkey refuses a
+# path inside a repository, these only catch a copy dropped in by hand
+release-signing-key*
+*signing-key*
+*.pem
+*.key
+
+# Release assets (tools/relsign writes checksums next to the downloaded exe)
+/dist/
+*.zip
+
+# Runtime leftovers next to a portable copy
+*.old
+*.new
+dpi-params.txt
+go.work.sum
+
+# The maintainer's notes for Claude Code: personal, machine-specific, not
+# published (see README "Разработка")
+/CLAUDE.md
+/CLAUDE.local.md

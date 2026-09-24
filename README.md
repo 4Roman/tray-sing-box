@@ -49,7 +49,7 @@ make
 go run ./tools/genicons
 
 # Собрать приложение (версия попадает в `--version` и в первые строки лога)
-go build -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$(git describe --tags --always --dirty)" -o bin/tray-sing-box.exe .
+go build -trimpath -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$(git describe --tags --always --dirty)" -o bin/tray-sing-box.exe .
 
 # Вшить ресурсы Windows в exe (иконка, манифест с правами администратора, версия)
 # (один раз: go install github.com/tc-hib/go-winres@v0.3.3)
@@ -137,11 +137,11 @@ go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
 - Релиз собирает GitHub Actions по тегу вида `v1.2.3` (`.github/workflows/release.yml`) как **черновик** с двумя файлами: `tray-sing-box-<версия>-windows-amd64.exe` (его скачивает автообновление) и установщиком `tray-sing-box-<версия>-setup.exe` (Inno Setup, `build/installer/`). Подпись CI **не делает** — намеренно
 - Приложение принимает релиз, только если `checksums.txt` подписан ключом проекта (ed25519): оно работает с правами администратора и запускает то, что скачало, поэтому одной контрольной суммы недостаточно — её опубликует и взломанный аккаунт GitHub. По той же причине закрытый ключ нельзя класть в секреты CI: взломанный аккаунт тогда просто пушит тег, и CI подписывает что угодно. Ключ хранится только у мейнтейнера
 - Разовая настройка (после создания репозитория):
-  1. `go run ./tools/relkey` — печатает открытый ключ и пишет закрытый в `release-signing-key.txt` (файл в `.gitignore`); закрытый ключ убрать в менеджер паролей / на зашифрованный носитель
+  1. `go run ./tools/relkey -out <файл вне репозитория>` — печатает открытый ключ и пишет закрытый в указанный файл (по умолчанию `%USERPROFILE%\tray-sing-box-release-signing-key.txt`; путь внутри git-репозитория relkey отвергает); закрытый ключ убрать в менеджер паролей / на зашифрованный носитель
   2. открытый ключ — в `internal/config/config.go` (`AppUpdatePublicKey`), туда же `AppUpdateRepo = "owner/repo"`; закоммитить (workflow отказывается собирать релиз, пока они пустые — иначе первая версия никогда не смогла бы обновиться)
 - Каждый релиз:
   1. `git tag v1.0.0 && git push --tags` — CI собирает и создаёт **черновик** релиза с exe
-  2. скачать оба файла из черновика в пустую папку `dist/`, выполнить `RELEASE_SIGNING_KEY=<закрытый ключ> go run ./tools/relsign -dir dist` (PowerShell: `$env:RELEASE_SIGNING_KEY='…'; go run ./tools/relsign -dir dist`) — появятся `checksums.txt` и `checksums.txt.sig`
+  2. скачать оба файла из черновика в пустую папку `dist/`, выполнить `go run ./tools/relsign -dir dist -key-file <файл с закрытым ключом>` — появятся `checksums.txt` и `checksums.txt.sig`. Ключ — из файла, а не в командной строке: командную строку сохраняет история оболочки (PSReadLine пишет её в `ConsoleHost_history.txt`)
   3. загрузить оба файла в черновик и нажать «Publish release». Клиенты не видят черновиков и отвергают релизы без подписи, так что забытый шаг даёт «обновлений нет», а не плохое обновление
 - Проверка установщика — в Windows Sandbox, не на рабочей машине: `build\installer\sandbox\run.ps1 -SingBoxDir <папка с sing-box.exe> [-Setup <…-setup.exe>] [-Exe <…-windows-amd64.exe>]` (по умолчанию — `dist\tray-sing-box-0.0.0-setup.exe` и `bin\tray-sing-box.exe`). В одноразовой Windows ставит переносную копию с автозапуском и включённым VPN, затем тихо устанавливает поверх (перенос, задача перенацелена, VPN поднят из Program Files, права папки данных), обновляет (sing-box не прерывается), удаляет с сохранением данных, ставит заново и запускает через задачу, удаляет с `/DELETEDATA=1` при работающей переносной копии; итог — `results\summary.txt`, код выхода 0 при успехе. Песочницу включают один раз (PowerShell от администратора, затем перезагрузка): `Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All`
 - Обновление: скачивание рядом с exe → проверка подписи и суммы → запуск скачанного файла с `--version` → переименование (текущий exe остаётся как `tray-sing-box.exe.old`) → по подтверждению перезапуск в новую версию (`--wait-pid`); sing-box всё это время работает. Проверка новых версий — через 2 минуты после старта и раз в сутки, только у релизных сборок; dev-сборка (`--version` не вида `v1.2.3`) обновляется только по кнопке

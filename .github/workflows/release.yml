@@ -10,7 +10,8 @@ name: Release
 # clients from a compromised GitHub account — and such an account could push
 # a tag and have CI sign anything. So the private key never lives in GitHub:
 # the maintainer downloads the draft's exe, signs it OFFLINE
-#   RELEASE_SIGNING_KEY=<key> go run ./tools/relsign -dir dist
+#   go run ./tools/relsign -dir dist -key-file <private key file>
+# (-trimpath: the exe carries no build-machine paths)
 # uploads checksums.txt + checksums.txt.sig to the draft and publishes it.
 # Clients ignore drafts and refuse releases without a valid signature, so a
 # forgotten step yields "no update", never a bad update.
@@ -60,7 +61,7 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          go build -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$env:VERSION" -o bin/tray-sing-box.exe .
+          go build -trimpath -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$env:VERSION" -o bin/tray-sing-box.exe .
           go install github.com/tc-hib/go-winres@v0.3.3
           go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
           New-Item -ItemType Directory -Force dist | Out-Null

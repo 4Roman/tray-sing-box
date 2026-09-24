@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           $version = git describe --tags --always --dirty
-          go build -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$version" -o bin/tray-sing-box.exe .
+          go build -trimpath -ldflags="-H windowsgui -X tray-sing-box/internal/config.Version=$version" -o bin/tray-sing-box.exe .
 
       - name: Embed Windows resources
         run: |
