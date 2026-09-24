@@ -75,13 +75,26 @@ jobs:
         env:
           VERSION: ${{ github.ref_name }}
         run: |
-          # The runner image ships its own (newer) Inno Setup: a plain
-          # `choco install --version` would keep it and exit 0
-          choco upgrade innosetup --version=6.4.3 --allow-downgrade --no-progress -y
-          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          $v = (Get-Item $iscc).VersionInfo
-          Write-Host "ISCC $($v.ProductVersion) ($($v.FileVersion))"
-          if ($v.FileVersionRaw -lt [version]'6.3') { throw "Inno Setup >= 6.3 needed (x64compatible), got $($v.FileVersion)" }
+          # Inno Setup pinned to the version the installer was tested with
+          # (build/installer/sandbox), from the official release, checked by
+          # hash and signature. Not the runner image's copy as is (its version
+          # changes with the image) and not Chocolatey (its old pinned versions
+          # disappear). ISCC.exe 6.7 has no version resource: the version and
+          # the location come from the setup's uninstall entry
+          $url = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe'
+          $sha256 = '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732'
+          $setup = Join-Path $env:RUNNER_TEMP 'innosetup-6.7.3.exe'
+          Invoke-WebRequest -Uri $url -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $sha256) { throw "Inno Setup installer: SHA-256 mismatch" }
+          if ((Get-AuthenticodeSignature $setup).Status -ne 'Valid') { throw "Inno Setup installer: invalid signature" }
+          $p = Start-Process -FilePath $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$(Join-Path $env:RUNNER_TEMP 'innosetup')") -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "Inno Setup install failed with $($p.ExitCode)" }
+          $entry = @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall') |
+            ForEach-Object { Get-ItemProperty (Join-Path $_ 'Inno Setup 6_is1') -ErrorAction SilentlyContinue } | Select-Object -First 1
+          if (-not $entry -or $entry.DisplayVersion -ne '6.7.3') { throw "Inno Setup 6.7.3 not registered (got '$($entry.DisplayVersion)')" }
+          $iscc = Join-Path $entry.InstallLocation 'ISCC.exe'
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found in $($entry.InstallLocation)" }
+          Write-Host "ISCC $($entry.DisplayVersion) at $iscc"
           $plain = $env:VERSION.TrimStart('v')
           & $iscc "/DVersion=$plain" "/DSource=..\..\dist\tray-sing-box-$plain-windows-amd64.exe" build\installer\tray-sing-box.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with $LASTEXITCODE" }
