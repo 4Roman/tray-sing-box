@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -171,6 +172,7 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("GET /api/session", s.auth(s.handleSession))
 	mux.HandleFunc("GET /api/config", s.auth(s.handleConfig))
 	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
+	mux.HandleFunc("POST /api/config/create", s.auth(s.handleCreateConfig))
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
 	mux.HandleFunc("POST /api/vpn", s.auth(s.handleVPN))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
@@ -464,6 +466,17 @@ func fail(w http.ResponseWriter, err error) {
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	outbounds, err := s.settings.Section("outbounds")
+	if errors.Is(err, domain.ErrConfigMissing) {
+		// A fresh install: the page offers to paste the first config
+		status := s.settings.VPNStatus()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"missing": true,
+			"detail":  err.Error(),
+			"running": status.IsRunning(),
+			"status":  status.String(),
+		})
+		return
+	}
 	if err != nil {
 		fail(w, err)
 		return
@@ -518,6 +531,30 @@ func (s *Server) handleSaveSection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"restarted": restarted})
+}
+
+// maxConfigBytes bounds a pasted config.json
+const maxConfigBytes = 4 << 20
+
+// handleCreateConfig stores the first config.json of a fresh install (see
+// Editor.CreateConfig: never over an existing one, the guard applies)
+func (s *Server) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxConfigBytes)).Decode(&req); err != nil {
+		fail(w, fmt.Errorf("bad request: %w", err))
+		return
+	}
+
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+
+	if err := s.settings.CreateConfig([]byte(req.Content)); err != nil {
+		fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleVPN starts or stops the VPN as asked. Like the tray toggle it takes

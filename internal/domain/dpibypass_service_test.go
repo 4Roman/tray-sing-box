@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -29,6 +30,7 @@ type fakeBypassStore struct {
 	detours     map[string]string
 	routeRefs   map[string]bool
 	bypassAdded bool
+	missing     bool // no config.json yet
 }
 
 func newBypassStore(active string, types map[string]string) *fakeBypassStore {
@@ -61,6 +63,9 @@ func (f *fakeBypassStore) ClearDetour(detour string) error {
 	return nil
 }
 func (f *fakeBypassStore) DetourTargets(detour string) ([]string, error) {
+	if f.missing {
+		return nil, fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing)
+	}
 	var out []string
 	for k, v := range f.detours {
 		if v == detour {
@@ -70,7 +75,12 @@ func (f *fakeBypassStore) DetourTargets(detour string) ([]string, error) {
 	return out, nil
 }
 func (f *fakeBypassStore) RouteReferences(tag string) (bool, error) { return f.routeRefs[tag], nil }
-func (f *fakeBypassStore) ActiveOutbound() (string, error)          { return f.active, nil }
+func (f *fakeBypassStore) ActiveOutbound() (string, error) {
+	if f.missing {
+		return "", fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing)
+	}
+	return f.active, nil
+}
 func (f *fakeBypassStore) OutboundType(tag string) (string, error) {
 	if t, ok := f.types[tag]; ok {
 		return t, nil

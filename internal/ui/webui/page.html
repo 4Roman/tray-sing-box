@@ -102,6 +102,21 @@
 <div class="vpn-state">VPN: <b id="vpn">—</b> <button id="vpn-btn" onclick="toggleVPN()" style="margin-left:10px" disabled>…</button></div>
 <div id="msg"></div>
 
+<section id="setup" hidden>
+  <h2>Первоначальная настройка</h2>
+  <div class="vpn-state" style="margin-bottom:10px">
+    Конфига sing-box ещё нет (<span id="setup-path"></span>).<br>
+    1. Скачайте sing-box — первый конфиг перед сохранением проверяется <code>sing-box check</code>.<br>
+    2. Вставьте свой config.json целиком и сохраните. Дальше его можно править по разделам ниже, добавлять серверы и подписки.<br><br>
+    Через приложение не принимается то, что позволило бы sing-box (он работает с правами администратора) запускать программы, читать и писать файлы, менять систему или открыть его в сеть: <code>log.output</code>, пути к файлам и сертификатам, <code>external_ui</code>, прослушивание не на 127.0.0.1, серверные inbound и <code>services</code>, <code>ntp.write_to_system</code>. Отказ перечислит такие места — уберите их, остальное будет принято. Если они нужны, config.json кладёт по пути выше администратор.
+  </div>
+  <textarea id="setup-config" spellcheck="false" placeholder='{ "inbounds": [ … ], "outbounds": [ … ], "route": { … } }'></textarea>
+  <div class="row">
+    <button class="secondary" onclick="updateSingBox(this)">Скачать sing-box</button>
+    <button onclick="createConfig(this)">Сохранить config.json</button>
+  </div>
+</section>
+
 <section>
   <h2>Активный сервер</h2>
   <div id="outbound-list"></div>
@@ -281,8 +296,17 @@ function renderOutbounds(list, active) {
 async function refresh() {
   try {
     const d = await api('/api/config');
-    document.getElementById('outbounds').value = d.outbounds;
-    document.getElementById('route').value = d.route;
+    // A fresh install has no config yet: offer to paste the first one
+    const missing = !!d.missing;
+    document.getElementById('setup').hidden = !missing;
+    if (missing) {
+      document.getElementById('setup-path').textContent = d.detail || '';
+      document.getElementById('outbounds').value = '';
+      document.getElementById('route').value = '';
+    } else {
+      document.getElementById('outbounds').value = d.outbounds;
+      document.getElementById('route').value = d.route;
+    }
     const vpn = document.getElementById('vpn');
     const noNet = d.running && d.connectivity && d.connectivity.checked && !d.connectivity.ok;
     // "starting": VPN включён, но sing-box ещё не поднялся — приложение пробует само
@@ -295,12 +319,33 @@ async function refresh() {
     btn.dataset.want = (d.running || d.status === 'starting') ? 'false' : 'true';
     btn.textContent = btn.dataset.want === 'true' ? 'Включить' : 'Выключить';
     btn.disabled = false;
-    renderOutbounds(d.list, d.active);
+    if (missing) {
+      document.getElementById('outbound-list').textContent = 'Конфига ещё нет — см. «Первоначальная настройка» выше';
+    } else {
+      renderOutbounds(d.list, d.active);
+    }
   } catch (e) {
     show('err', 'Не удалось загрузить конфигурацию: ' + e.message);
   }
   // Fetch DPI status separately: a slow/absent Docker must not block config load
   refreshDPI();
+}
+
+async function createConfig(btn) {
+  const field = document.getElementById('setup-config');
+  const text = field.value.trim();
+  if (!text) { show('err', 'Вставьте config.json в поле'); return; }
+  btn.disabled = true;
+  try {
+    await api('/api/config/create', { content: text });
+    field.value = '';
+    show('ok', 'config.json сохранён. VPN включается кнопкой вверху страницы или в трее.');
+    await refresh();
+  } catch (e) {
+    show('err', 'config.json не сохранён: ' + e.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function toggleVPN() {

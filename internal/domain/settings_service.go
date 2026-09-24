@@ -34,6 +34,10 @@ type SettingsStore interface {
 	SwitchOutbound(tag string) error
 	ListHistory() ([]ConfigVersion, error)
 	RestoreVersion(name string) error
+	// CreateConfig writes the first config of an installation that has none
+	// (the store's reads then fail with ErrConfigMissing); it never replaces
+	// an existing one and applies the same checks as every save
+	CreateConfig(raw []byte) error
 }
 
 // SettingsService exposes configuration editing to the UI and applies
@@ -114,6 +118,22 @@ func (s *SettingsService) SetVPN(running bool) error {
 		return s.vpn.Start()
 	}
 	return s.vpn.Stop()
+}
+
+// CreateConfig stores the first config.json of an installation that has
+// none. Like every repair made through the app it goes through
+// RestartIfRunning: with the VPN down that gives the monitor a fresh budget,
+// so an intent "running" that gave up on the missing config is picked up
+// again. Otherwise the VPN is the user's to start.
+func (s *SettingsService) CreateConfig(raw []byte) error {
+	if err := s.store.CreateConfig(raw); err != nil {
+		return err
+	}
+	log.Printf("Settings: initial config.json created")
+	if _, err := s.vpn.RestartIfRunning(); err != nil {
+		return fmt.Errorf("config.json сохранён, но VPN %w", err)
+	}
+	return nil
 }
 
 // History returns the archived config versions, newest first

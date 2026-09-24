@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"tray-sing-box/internal/config"
+	"tray-sing-box/internal/domain"
 	"tray-sing-box/internal/infrastructure/process"
 )
 
@@ -27,14 +28,15 @@ var scratchDir = func(dataDir string) string { return dataDir }
 // NewValidator returns a config validator backed by `sing-box check`, with
 // sing-box.exe in binDir and dataDir as the working directory (relative
 // paths in the config resolve there, as they do for the running VPN).
-// When sing-box.exe is not present the validator accepts everything: basic
-// JSON validity is still enforced by the config editor.
+// When sing-box.exe is not present it answers domain.ErrSingBoxMissing: an
+// ordinary save goes ahead unchecked (basic JSON validity is still enforced
+// by the config editor), the first config of an installation does not.
 func NewValidator(binDir, dataDir string) func(configJSON []byte) error {
 	singBoxPath := filepath.Join(binDir, config.SingBoxExe)
 
 	return func(configJSON []byte) error {
 		if _, err := os.Stat(singBoxPath); err != nil {
-			return nil // no binary to check with
+			return fmt.Errorf("%w at: %s", domain.ErrSingBoxMissing, singBoxPath)
 		}
 
 		// In the data dir, not the user's %TEMP%: the elevated `sing-box

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
@@ -77,6 +78,10 @@ func (s *DPIBypassService) Status() (*DPIBypassStatus, error) {
 	}
 
 	targets, err := s.store.DetourTargets(config.DPIBypassTag)
+	if errors.Is(err, ErrConfigMissing) {
+		// No config yet: nothing is wired, the Docker state is still news
+		return st, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +109,7 @@ func (s *DPIBypassService) EnableChain() (*DPIBypassStatus, error) {
 
 	active, err := s.store.ActiveOutbound()
 	if err != nil {
-		return nil, err
+		return nil, withSetupHint(err)
 	}
 	if active == "" {
 		return nil, fmt.Errorf("активный прокси-сервер не выбран — сначала выберите сервер")
@@ -175,6 +180,10 @@ func (s *DPIBypassService) DisableChain() (*DPIBypassStatus, error) {
 func (s *DPIBypassService) EnableDirect() (*DPIBypassStatus, error) {
 	if err := s.manager.Available(); err != nil {
 		return nil, err
+	}
+	// The config must be there before a privileged container is started for it
+	if _, err := s.store.ActiveOutbound(); err != nil {
+		return nil, withSetupHint(err)
 	}
 	if err := s.manager.Start(); err != nil {
 		return nil, fmt.Errorf("не удалось запустить контейнер обхода DPI: %w", err)

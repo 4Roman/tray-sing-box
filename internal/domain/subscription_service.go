@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -255,6 +256,17 @@ func (s *SubscriptionService) refresh(subs []Subscription, onlyURL string) (*Sub
 			changed = true
 		}
 		result.Updates = append(result.Updates, update)
+	}
+
+	// No config yet (a fresh install): nothing could be synced. A targeted add
+	// or update must not be kept as if it had worked (an added subscription
+	// would sit there without servers until the next refresh)
+	if onlyURL != "" {
+		for _, u := range result.Updates {
+			if errors.Is(u.Err, ErrConfigMissing) {
+				return result, withSetupHint(u.Err)
+			}
+		}
 	}
 
 	if err := s.store.Save(subs); err != nil {

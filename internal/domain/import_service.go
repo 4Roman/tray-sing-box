@@ -55,7 +55,9 @@ func (s *ImportService) ImportFromText(text string) (*ImportResult, error) {
 	log.Printf("Importing %d outbound(s): %v", len(outbounds), tags)
 
 	if err := s.editor.AddOutbounds(outbounds); err != nil {
-		return nil, fmt.Errorf("failed to update config: %w", err)
+		// No config yet (a fresh install): an import cannot start one — the
+		// servers need the rest of a config (inbounds, route) around them
+		return nil, withSetupHint(fmt.Errorf("failed to update config: %w", err))
 	}
 
 	result := &ImportResult{Tags: tags}

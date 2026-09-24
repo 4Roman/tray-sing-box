@@ -634,7 +634,7 @@ func TestGiveUpPrefersTheStartErrorOverAnOlderDeath(t *testing.T) {
 	if reported == nil || !strings.Contains(reported.Error(), "config.json not found") {
 		t.Fatalf("report must carry the start error, got: %v", reported)
 	}
-	if !strings.Contains(reported.Error(), "Положите свой config.json") {
+	if !strings.Contains(reported.Error(), "«Первоначальная настройка»") {
 		t.Fatalf("report must say how to fix a setup error, got: %v", reported)
 	}
 	if strings.Contains(reported.Error(), "task manager") {

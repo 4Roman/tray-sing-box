@@ -6,7 +6,10 @@ package configfile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -60,6 +63,11 @@ var editableSections = map[string]bool{
 // load reads and decodes the config, preserving number representation
 func (e *Editor) load() (map[string]any, []byte, error) {
 	raw, err := os.ReadFile(e.path)
+	if errors.Is(err, fs.ErrNotExist) {
+		// An installed copy has none until it took over a portable one or the
+		// user gave it one (CreateConfig): the UI says how
+		return nil, nil, fmt.Errorf("%w at: %s", domain.ErrConfigMissing, e.path)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read config: %w", err)
 	}
@@ -86,7 +94,8 @@ func (e *Editor) save(cfg map[string]any, original []byte) error {
 		return err
 	}
 	if e.validator != nil {
-		if err := e.validator(updated); err != nil {
+		// Without sing-box.exe there is nothing to check with: saved as before
+		if err := e.validator(updated); err != nil && !errors.Is(err, domain.ErrSingBoxMissing) {
 			return fmt.Errorf("config validation failed: %w", err)
 		}
 	}
@@ -97,6 +106,113 @@ func (e *Editor) save(cfg map[string]any, original []byte) error {
 	e.archive(original)
 	if err := os.WriteFile(e.path, updated, 0644); err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
+	}
+	return nil
+}
+
+// errConfigExists: CreateConfig never replaces a config
+var errConfigExists = errors.New("config.json уже есть — правьте его по разделам ниже")
+
+// linkFile hard-links a finished file into place (a variable for tests: file
+// systems without hard links)
+var linkFile = os.Link
+
+// CreateConfig writes the first config.json of an installation that has
+// none. An installed copy starts without one unless it took over a portable
+// copy, and its data directory is writable by administrators only, so the
+// settings page is the user's way in. What arrives this way is checked like
+// any save, against an empty config — the guard refuses everything that lets
+// the elevated sing-box run a program, touch a file, change the system or
+// open to the network (guard.go) — and then by `sing-box check`, which is
+// required here: the page edits only outbounds and route, so a mistake
+// elsewhere could not be fixed later without an administrator. The file is
+// written aside and hard-linked into place: never partial, and never over a
+// config — also when two requests race.
+func (e *Editor) CreateConfig(raw []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, err := os.Lstat(e.path); err == nil {
+		if _, err := os.Stat(e.path); errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("на месте config.json — ссылка на несуществующий файл (%s): её удаляет администратор", e.path)
+		}
+		return errConfigExists
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("failed to check config: %w", err)
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var cfg map[string]any
+	if err := decoder.Decode(&cfg); err != nil {
+		return fmt.Errorf("config.json должен быть JSON-объектом, без комментариев: %w", err)
+	}
+	if cfg == nil {
+		return errors.New("config.json должен быть JSON-объектом")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("после JSON-объекта в config.json есть что-то ещё")
+	}
+
+	updated, err := marshalIndent(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to serialize config: %w", err)
+	}
+	if err := checkNoNewRisky(nil, cfg); err != nil {
+		var refused *riskyError
+		if errors.As(err, &refused) {
+			return fmt.Errorf("уберите из конфига: %s — остальное приложение примет. sing-box работает с правами администратора, а эти параметры позволили бы запускать программы, читать и писать файлы от его имени, менять систему или открыть его в сеть; если они нужны, config.json кладёт по пути %s администратор", refused.listed(), e.path)
+		}
+		return err
+	}
+	if e.validator != nil {
+		if err := e.validator(updated); errors.Is(err, domain.ErrSingBoxMissing) {
+			return errors.New("сначала скачайте sing-box (кнопка «Скачать sing-box» здесь же): первый конфиг проверяется им перед сохранением — ошибку в разделах, которых нет на этой странице, потом не исправить без администратора")
+		} else if err != nil {
+			return fmt.Errorf("config validation failed: %w", err)
+		}
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(e.path), ".config.json.new-*")
+	if err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	_, werr := tmp.Write(updated)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return fmt.Errorf("failed to write config: %w", werr)
+	}
+	if err := linkFile(tmp.Name(), e.path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return errConfigExists
+		}
+		// A file system without hard links (FAT32/exFAT: a portable copy on
+		// a stick): an exclusive create still never replaces a config
+		return createExclusive(e.path, updated, err)
+	}
+	return nil
+}
+
+// createExclusive writes a new file, failing when one exists; a partial file
+// is removed
+func createExclusive(path string, data []byte, linkErr error) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+	if errors.Is(err, fs.ErrExist) {
+		return errConfigExists
+	}
+	if err != nil {
+		return fmt.Errorf("failed to write config: %w (hard link: %v)", err, linkErr)
+	}
+	_, werr := f.Write(data)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(path)
+		return fmt.Errorf("failed to write config: %w", werr)
 	}
 	return nil
 }

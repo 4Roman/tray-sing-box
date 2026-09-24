@@ -40,6 +40,10 @@ func TestGuardRefusesNewRiskyConstructs(t *testing.T) {
 		"two type keys":      `{"outbounds":[{"type":"direct","TYPE":"tor","tag":"t"}]}`,
 		"cache file Path":    `{"experimental":{"cache_file":{"Path":"C:\\x.db"}},"outbounds":[]}`,
 		"Outbounds section":  `{"Outbounds":[{"type":"tor","tag":"t"}]}`,
+		// Off the loopback: the elevated sing-box open to the network
+		"inbound on all":    `{"inbounds":[{"type":"mixed","tag":"in","listen":"0.0.0.0","listen_port":2080}],"outbounds":[]}`,
+		"clash api on all":  `{"experimental":{"clash_api":{"external_controller":"0.0.0.0:9090"}},"outbounds":[]}`,
+		"debug on loopback": `{"experimental":{"debug":{"listen":"127.0.0.1:6060"}},"outbounds":[]}`,
 	}
 	for name, updated := range refused {
 		err := checkNoNewRisky([]byte(base), decode(t, updated))
@@ -79,6 +83,14 @@ func TestGuardKeepsExistingRiskyConstructs(t *testing.T) {
 	moved := strings.Replace(same, `"box.log"`, `"C:\\Windows\\box.log"`, 1)
 	if err := checkNoNewRisky([]byte(existing), decode(t, moved)); err == nil {
 		t.Fatal("a changed log.output accepted")
+	}
+
+	// A LAN listener an administrator configured stays, an edit elsewhere
+	// does not trip over it
+	lan := `{"inbounds":[{"type":"mixed","tag":"in","listen":"0.0.0.0","listen_port":2080}],"outbounds":[{"type":"direct","tag":"direct"}]}`
+	edited := `{"inbounds":[{"type":"mixed","tag":"in","listen":"0.0.0.0","listen_port":2080}],"outbounds":[{"type":"direct","tag":"direct"},{"type":"vless","tag":"v"}]}`
+	if err := checkNoNewRisky([]byte(lan), decode(t, edited)); err != nil {
+		t.Fatalf("an existing LAN listener refused: %v", err)
 	}
 }
 

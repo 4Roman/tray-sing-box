@@ -111,7 +111,7 @@ func TestStartErrorCarriesTheSetupHint(t *testing.T) {
 		hint string
 	}{
 		{fmt.Errorf("%w at: C:\\bin\\sing-box.exe", ErrSingBoxMissing), "«Обновить sing-box»"},
-		{fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing), "Положите свой config.json"},
+		{fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing), "«Первоначальная настройка»"},
 	} {
 		svc := NewVPNService(&fakeProcessManager{startErr: tc.err}, &fakeStorage{})
 		err := svc.Start()
