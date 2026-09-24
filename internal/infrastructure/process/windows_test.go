@@ -3,12 +3,16 @@
 package process
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -254,6 +258,7 @@ func TestStartReportsImmediateExit(t *testing.T) {
 	// Generous: the copied exe may be scanned by an antivirus before it runs.
 	// Costs nothing when the process does exit — Start returns at once.
 	setStartGrace(t, 30*time.Second)
+	logs := captureLog(t)
 
 	err := m.Start()
 	if err == nil {
@@ -270,6 +275,11 @@ func TestStartReportsImmediateExit(t *testing.T) {
 	if m.IsRunning() {
 		t.Fatal("IsRunning true after a failed start")
 	}
+	// Start clears m.cmd before the Wait goroutine logs: still a crash, not
+	// taken for a stop
+	if line := exitLogLine(t, logs); !strings.Contains(line, "ERROR") {
+		t.Fatalf("a crash within the start grace not logged as an error: %q", line)
+	}
 }
 
 // A process that outlives the start check and dies later "started fine" —
@@ -279,6 +289,7 @@ func TestLastExitKeepsTheReasonOfALateDeath(t *testing.T) {
 	m := NewAt(dir)
 	t.Cleanup(func() { m.Stop() })
 	setStartGrace(t, 200*time.Millisecond)
+	logs := captureLog(t)
 
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -292,6 +303,9 @@ func TestLastExitKeepsTheReasonOfALateDeath(t *testing.T) {
 	}
 	if got := m.LastExit().Error(); !strings.Contains(got, "fake late failure") {
 		t.Fatalf("LastExit does not carry sing-box's output: %q", got)
+	}
+	if line := exitLogLine(t, logs); !strings.Contains(line, "ERROR") {
+		t.Fatalf("a crash not logged as an error: %q", line)
 	}
 	if m.IsRunning() {
 		t.Fatal("IsRunning true after the process died")
@@ -312,11 +326,13 @@ func TestLastExitKeepsTheReasonOfALateDeath(t *testing.T) {
 	}
 }
 
-// A requested stop is not a death worth reporting
+// A requested stop is not a death worth reporting — neither through LastExit
+// nor as an ERROR in the log (a real log showed one for every "Выключить")
 func TestLastExitIsNotSetByStop(t *testing.T) {
 	dir := installFakeSingBox(t, "run")
 	m := NewAt(dir)
 	t.Cleanup(func() { m.Stop() })
+	logs := captureLog(t)
 
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -324,8 +340,10 @@ func TestLastExitIsNotSetByStop(t *testing.T) {
 	if err := m.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	// The Wait goroutine reports the exit asynchronously; give it a moment
-	time.Sleep(300 * time.Millisecond)
+	// The Wait goroutine reports the exit asynchronously
+	if line := exitLogLine(t, logs); !strings.Contains(line, "ended by stop") || strings.Contains(line, "ERROR") {
+		t.Fatalf("a requested stop logged as %q", line)
+	}
 	if m.LastExit() != nil {
 		t.Fatalf("LastExit set by a requested stop: %v", m.LastExit())
 	}
@@ -577,6 +595,60 @@ func setStartGrace(t *testing.T, d time.Duration) {
 	old := startGrace
 	startGrace = d
 	t.Cleanup(func() { startGrace = old })
+}
+
+// captureLog collects the log output for the rest of the test
+func captureLog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	b := &lockedBuffer{}
+	log.SetOutput(b)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	return b
+}
+
+// lockedBuffer is written by the Wait goroutines and read by the test
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+var startedPID = regexp.MustCompile(`started successfully \(PID: (\d+)\)`)
+
+// exitLogLine waits for what the Wait goroutine logs about the exit of the
+// process started last. By PID: the goroutine of an earlier test may log
+// into the buffer as well.
+func exitLogLine(t *testing.T, logs *lockedBuffer) string {
+	t.Helper()
+	started := startedPID.FindAllStringSubmatch(logs.String(), -1)
+	if len(started) == 0 {
+		t.Fatalf("no start in the log:\n%s", logs)
+	}
+	marker := fmt.Sprintf("sing-box (PID %s) ", started[len(started)-1][1])
+	var line string
+	if !eventually(15*time.Second, func() bool {
+		for _, l := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(l, marker) {
+				line = l
+				return true
+			}
+		}
+		return false
+	}) {
+		t.Fatalf("the exit of %q was never logged:\n%s", marker, logs)
+	}
+	return line
 }
 
 // eventually polls cond until it holds or the timeout passes

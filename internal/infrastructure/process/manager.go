@@ -31,7 +31,7 @@ var ansiEscapes = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // Manager manages the sing-box VPN process
 type Manager struct {
 	cmd      *exec.Cmd
-	cmdDone  <-chan struct{} // closed when cmd has exited (valid with cmd)
+	proc     *startedProcess // cmd's bookkeeping (valid with cmd)
 	mu       sync.Mutex
 	binDir   string // sing-box.exe
 	dataDir  string // config.json, console log, working directory of sing-box
@@ -65,6 +65,7 @@ type startedProcess struct {
 	exitErr   error         // valid once done is closed
 	logPath   string        // console capture file ("" when unavailable)
 	logOffset int64         // where this run's output starts in logPath
+	stopping  bool          // Stop is ending it: its exit is expected (Manager.mu)
 }
 
 // Start starts the sing-box process. A process that dies within
@@ -182,7 +183,7 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 	log.Printf("sing-box process started successfully (PID: %d)", cmd.Process.Pid)
 
 	m.cmd = cmd
-	m.cmdDone = proc.done
+	m.proc = proc
 	m.running = false // set by Start once the grace is over
 
 	// Monitor the process. m.cmd may be replaced or nilled (Stop, restart)
@@ -198,13 +199,26 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
 
-		if proc.exitErr != nil {
-			log.Printf("ERROR: sing-box process exited with error: %v (was running: %v)", proc.exitErr, m.running)
-		} else {
-			log.Printf("sing-box process exited normally (was running: %v)", m.running)
+		pid := cmd.Process.Pid
+		// Ended on request: not an error (the exit code is TerminateProcess's),
+		// and no reason to keep. m.cmd is normally cleared by Stop already —
+		// still set only when the stop timed out and the process went later.
+		if proc.stopping {
+			log.Printf("sing-box (PID %d) ended by stop (%s)", pid, exitReason(proc))
+			if m.cmd == cmd {
+				m.cmd = nil
+				m.running = false
+			}
+			return
 		}
-		// Still ours = it was not stopped by us (Stop nils m.cmd first): it
-		// died on its own, and the reason is worth keeping
+		if proc.exitErr != nil {
+			log.Printf("ERROR: sing-box (PID %d) exited with error: %v (was running: %v)", pid, proc.exitErr, m.running)
+		} else {
+			log.Printf("sing-box (PID %d) exited normally (was running: %v)", pid, m.running)
+		}
+		// Still ours = not superseded (a death within the start grace is
+		// Start's to report, and Start has cleared m.cmd already): it died on
+		// its own, and the reason is worth keeping
 		if m.cmd == cmd {
 			m.running = false
 			m.cmd = nil
@@ -356,6 +370,11 @@ func (m *Manager) Stop() error {
 	if len(found) == 0 {
 		log.Println("sing-box.exe is not running, nothing to stop")
 	}
+	// Its Wait goroutine logs the exit that follows as requested, not as a
+	// crash (the log would show an ERROR for every "Выключить")
+	if m.cmd != nil {
+		m.proc.stopping = true
+	}
 
 	var (
 		firstErr   error
@@ -385,7 +404,7 @@ func (m *Manager) Stop() error {
 		log.Printf("Terminating sing-box started by this app (PID: %d), not found by path", m.cmd.Process.Pid)
 		m.cmd.Process.Kill()
 		select {
-		case <-m.cmdDone:
+		case <-m.proc.done:
 		case <-time.After(config.StopWaitTimeout * time.Second):
 			if firstErr == nil {
 				firstErr = fmt.Errorf("process %d is still running after it was killed", m.cmd.Process.Pid)
