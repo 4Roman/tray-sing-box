@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tray-sing-box/internal/config"
+	"tray-sing-box/internal/domain"
 )
 
 // startGrace is how long a freshly started process must survive; a variable
@@ -131,11 +132,11 @@ func (m *Manager) startLocked() (*startedProcess, error) {
 
 	// Check if files exist
 	if _, err := os.Stat(singBoxPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("sing-box.exe not found at: %s", singBoxPath)
+		return nil, fmt.Errorf("%w at: %s", domain.ErrSingBoxMissing, singBoxPath)
 	}
 
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("config.json not found at: %s", configPath)
+		return nil, fmt.Errorf("%w at: %s", domain.ErrConfigMissing, configPath)
 	}
 
 	// Check if sing-box is already running

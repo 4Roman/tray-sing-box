@@ -1,6 +1,9 @@
 package domain
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -96,6 +99,31 @@ func TestStartStopPersistIntent(t *testing.T) {
 	}
 	if state, _ := st.snapshot(); state {
 		t.Fatal("Stop did not persist running=false")
+	}
+}
+
+// A start that fails for a reason the user can fix says how to fix it: an
+// installed copy has neither sing-box.exe nor config.json until it took over
+// a portable one
+func TestStartErrorCarriesTheSetupHint(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		hint string
+	}{
+		{fmt.Errorf("%w at: C:\\bin\\sing-box.exe", ErrSingBoxMissing), "«Обновить sing-box»"},
+		{fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing), "Положите свой config.json"},
+	} {
+		svc := NewVPNService(&fakeProcessManager{startErr: tc.err}, &fakeStorage{})
+		err := svc.Start()
+		if err == nil || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), tc.hint) {
+			t.Errorf("Start error %q: want the cause and the hint %q", err, tc.hint)
+		}
+	}
+
+	// Anything else is passed through as it is
+	svc := NewVPNService(&fakeProcessManager{startErr: errors.New("wintun not ready")}, &fakeStorage{})
+	if err := svc.Start(); err == nil || err.Error() != "failed to start VPN: wintun not ready" {
+		t.Errorf("Start error = %v, want the plain cause", err)
 	}
 }
 

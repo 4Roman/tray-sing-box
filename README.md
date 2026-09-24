@@ -143,6 +143,7 @@ go-winres patch --in build/winres/winres.json --no-backup bin/tray-sing-box.exe
   1. `git tag v1.0.0 && git push --tags` — CI собирает и создаёт **черновик** релиза с exe
   2. скачать оба файла из черновика в пустую папку `dist/`, выполнить `RELEASE_SIGNING_KEY=<закрытый ключ> go run ./tools/relsign -dir dist` (PowerShell: `$env:RELEASE_SIGNING_KEY='…'; go run ./tools/relsign -dir dist`) — появятся `checksums.txt` и `checksums.txt.sig`
   3. загрузить оба файла в черновик и нажать «Publish release». Клиенты не видят черновиков и отвергают релизы без подписи, так что забытый шаг даёт «обновлений нет», а не плохое обновление
+- Проверка установщика — в Windows Sandbox, не на рабочей машине: `build\installer\sandbox\run.ps1 -SingBoxDir <папка с sing-box.exe> [-Setup <…-setup.exe>] [-Exe <…-windows-amd64.exe>]` (по умолчанию — `dist\tray-sing-box-0.0.0-setup.exe` и `bin\tray-sing-box.exe`). В одноразовой Windows ставит переносную копию с автозапуском и включённым VPN, затем тихо устанавливает поверх (перенос, задача перенацелена, VPN поднят из Program Files, права папки данных), обновляет (sing-box не прерывается), удаляет с сохранением данных, ставит заново и запускает через задачу, удаляет с `/DELETEDATA=1` при работающей переносной копии; итог — `results\summary.txt`, код выхода 0 при успехе. Песочницу включают один раз (PowerShell от администратора, затем перезагрузка): `Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All`
 - Обновление: скачивание рядом с exe → проверка подписи и суммы → запуск скачанного файла с `--version` → переименование (текущий exe остаётся как `tray-sing-box.exe.old`) → по подтверждению перезапуск в новую версию (`--wait-pid`); sing-box всё это время работает. Проверка новых версий — через 2 минуты после старта и раз в сутки, только у релизных сборок; dev-сборка (`--version` не вида `v1.2.3`) обновляется только по кнопке
 
 ### Настройки (веб-интерфейс):
@@ -201,11 +202,12 @@ tray-sing-box/
 │   │                       # перенос переносной копии в установленную (migrate))
 │   ├── ui/                 # Системный трей, локализация, веб-интерфейс настроек (webui/)
 │   └── config/             # Константы и версия сборки
-├── build/installer/     # Скрипт Inno Setup (tray-sing-box.iss) — установщик
+├── build/installer/     # Скрипт Inno Setup (tray-sing-box.iss) — установщик;
+│                        # sandbox/ — его проверка в Windows Sandbox (run.ps1)
 ├── build/winres/        # Конфигурация Windows ресурсов (winres.json)
 ├── assets/              # Иконки трея (icons/tray.svg — источник; tray.ico и tray-off.ico
 │                        # генерируются и вшиваются в exe через assets.go)
-├── third_party/systray/ # Локальный форк библиотеки трея с тремя правками (PATCHES.md)
+├── third_party/systray/ # Локальный форк библиотеки трея с четырьмя правками (PATCHES.md)
 ├── tools/genicons/      # Генератор иконок (SVG -> tray.ico + tray-off.ico)
 ├── tools/relkey/        # Разово: генерация пары ключей ed25519 для подписи релизов
 ├── tools/relsign/       # У мейнтейнера: checksums.txt + checksums.txt.sig для релиза

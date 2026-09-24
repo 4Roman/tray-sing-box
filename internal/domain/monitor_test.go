@@ -2,6 +2,7 @@ package domain
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -622,7 +623,7 @@ func TestGiveUpPrefersTheStartErrorOverAnOlderDeath(t *testing.T) {
 	svc.OnAutoRestartFailed = func(err error) { reported = err }
 
 	pm.die(errors.New("killed from the task manager"))
-	pm.startErr = errors.New("config.json not found")
+	pm.startErr = fmt.Errorf("%w at: C:\\data\\config.json", ErrConfigMissing)
 
 	status := VPNStatusRunning
 	for i := 0; i < config.AutoRestartMaxAttempts+1; i++ {
@@ -632,6 +633,9 @@ func TestGiveUpPrefersTheStartErrorOverAnOlderDeath(t *testing.T) {
 
 	if reported == nil || !strings.Contains(reported.Error(), "config.json not found") {
 		t.Fatalf("report must carry the start error, got: %v", reported)
+	}
+	if !strings.Contains(reported.Error(), "Положите свой config.json") {
+		t.Fatalf("report must say how to fix a setup error, got: %v", reported)
 	}
 	if strings.Contains(reported.Error(), "task manager") {
 		t.Fatalf("report fell back to the older death: %v", reported)

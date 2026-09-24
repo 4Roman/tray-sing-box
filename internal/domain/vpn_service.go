@@ -17,6 +17,26 @@ type ProcessManager interface {
 	IsRunning() bool
 }
 
+// Setup errors a ProcessManager wraps: the user can fix them, and the
+// message says how (withSetupHint). An installed copy starts without either
+// unless it took over a portable one.
+var (
+	ErrSingBoxMissing = errors.New("sing-box.exe not found")
+	ErrConfigMissing  = errors.New("config.json not found")
+)
+
+// withSetupHint appends what to do about a setup error to the text the user
+// sees (tray popup, web UI, the give-up report)
+func withSetupHint(err error) error {
+	switch {
+	case errors.Is(err, ErrSingBoxMissing):
+		return fmt.Errorf("%w\n\nСкачайте sing-box: пункт «Обновить sing-box» в меню трея или кнопка на странице настроек.", err)
+	case errors.Is(err, ErrConfigMissing):
+		return fmt.Errorf("%w\n\nПоложите свой config.json по этому пути. У установленной копии папка данных доступна только администраторам: копируйте из Проводника или PowerShell, запущенных от имени администратора.", err)
+	}
+	return err
+}
+
 // Storage interface for persisting VPN state
 type Storage interface {
 	SaveVPNState(running bool) error
@@ -73,7 +93,7 @@ func (s *VPNService) Start() error {
 	defer s.lifeMu.Unlock()
 
 	if err := s.processManager.Start(); err != nil {
-		return fmt.Errorf("failed to start VPN: %w", err)
+		return withSetupHint(fmt.Errorf("failed to start VPN: %w", err))
 	}
 
 	if err := s.storage.SaveVPNState(true); err != nil {
@@ -446,7 +466,7 @@ func (s *VPNService) tryAutoRestart() error {
 		}
 		err := fmt.Errorf("sing-box не работает, хотя VPN включён: автоперезапуск не помог после %d попыток — проверьте логи", config.AutoRestartMaxAttempts)
 		if lastErr != nil {
-			err = fmt.Errorf("%w\n\nПоследняя ошибка: %v", err, lastErr)
+			err = fmt.Errorf("%w\n\nПоследняя ошибка: %v", err, withSetupHint(lastErr))
 		}
 		log.Printf("Crash auto-restart: giving up: %v", err)
 		return err

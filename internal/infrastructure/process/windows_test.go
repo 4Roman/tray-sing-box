@@ -4,6 +4,7 @@ package process
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"tray-sing-box/internal/config"
+	"tray-sing-box/internal/domain"
 )
 
 // fakeModeEnv turns the test binary into a stand-in for sing-box.exe: the
@@ -665,10 +667,20 @@ func eventually(timeout time.Duration, cond func() bool) bool {
 	}
 }
 
+// The setup errors are marked, so the user is told how to fix them
 func TestStartWithoutBinary(t *testing.T) {
-	m := NewAt(t.TempDir())
-	if err := m.Start(); err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("want a 'not found' error, got %v", err)
+	dir := t.TempDir()
+	m := NewAt(dir)
+	if err := m.Start(); !errors.Is(err, domain.ErrSingBoxMissing) || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("want ErrSingBoxMissing, got %v", err)
+	}
+
+	dir = installFakeSingBox(t, "run")
+	if err := os.Remove(filepath.Join(dir, config.SingBoxConfig)); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewAt(dir).Start(); !errors.Is(err, domain.ErrConfigMissing) {
+		t.Fatalf("want ErrConfigMissing, got %v", err)
 	}
 }
 
