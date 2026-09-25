@@ -25,6 +25,8 @@
 #   boot-off  after a reboot with the VPN off: the task starts the app, the
 #             VPN stays off; then the tray toggle turns it on
 #   boot-on   after a reboot with the VPN on: restored at logon
+#   singbox-update  (networked, after install) the tray item replaces the
+#             running older sing-box with the latest release
 #   cancel    sing-box cannot start, the tray toggle calls the attempts off
 #   giveup    sing-box cannot start (config.json hidden) -> "starting", 5
 #             attempts, then the yes/no report; "yes" records the VPN off
@@ -222,6 +224,19 @@ public static class SbWin {
         return PostMessage(dialog, 0x0111, new IntPtr(6), IntPtr.Zero);
     }
 
+    [DllImport("user32.dll")]
+    static extern IntPtr GetDlgItem(IntPtr dialog, int id);
+
+    // Closes an OK box: a click on its OK button (IDOK), WM_CLOSE without one
+    public static bool CloseBox(IntPtr dialog) {
+        IntPtr ok = GetDlgItem(dialog, 1);
+        if (ok == IntPtr.Zero) ok = GetDlgItem(dialog, 2);
+        if (ok != IntPtr.Zero) return PostMessage(ok, 0x00F5, IntPtr.Zero, IntPtr.Zero); // BM_CLICK
+        return PostMessage(dialog, 0x0010, IntPtr.Zero, IntPtr.Zero); // WM_CLOSE
+    }
+
+    public static bool Exists(IntPtr hwnd) { return IsWindowVisible(hwnd); }
+
     // --- integrity level of a process (0x2000 medium, 0x3000 high) ---
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
@@ -310,6 +325,7 @@ public static class SbWin {
 # DPI 12, autostart 13, sep 14, quit 15
 $menuToggle = 3
 $menuSettings = 8
+$menuSingBoxUpdate = 9
 $menuQuit = 15
 
 # --- helpers ---------------------------------------------------------------
@@ -788,7 +804,7 @@ switch ($Phase) {
                     # code 740"): recorded, then closed with IDOK
                     $x = [SbWin]::DialogText($d)
                     if (-not $boxes.Contains($x)) { [void]$boxes.Add($x); Log "setup message box: $x" }
-                    [void][SbWin]::Command($d, 1)
+                    [void][SbWin]::CloseBox($d)
                 }
                 $st = [SbWin]::SetupStep($tp, $setupSkip)
                 if ($st) { [void]$steps.Add($st); Log "wizard: $st"; $idle = 0 }
@@ -807,6 +823,32 @@ switch ($Phase) {
         Check 'the app runs elevated' ((LevelOf $app) -ge 0x3000) "level $(LevelOf $app)"
         Check 'autostart task launches it' ((TaskCommand) -ieq $exe) (TaskCommand)
         Check 'tray icon shown' (WaitFor { IconShown } 60)
+        CheckNoPopup 'no popup'
+    }
+
+    'singbox-update' {
+        # (networked, after install) the tray item replaces a running older
+        # sing-box with the latest release: download while the VPN runs, stop,
+        # swap (the old binary kept as .old), start again; the intent stays
+        $old = FirstPid $sb
+        $before = ((& $sb version 2>$null) | Select-Object -First 1)
+        Check 'VPN running' ($old -ne 0 -and (Intent) -eq 1) $before
+        $mark = LogMark
+        Check 'menu: update sing-box' (MenuClick $menuSingBoxUpdate)
+        $d = $null
+        $ok = WaitFor { $script:d = @([SbWin]::Dialogs([uint32](FirstPid $exe)))[0]; [bool]$script:d } 300
+        $text = ''
+        if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
+        Check 'the result is reported' $ok $text
+        if ($ok) { Check 'the report closes with OK' (WaitFor { -not [SbWin]::Exists($d) } 10) }
+        $after = ((& $sb version 2>$null) | Select-Object -First 1)
+        Check 'a newer sing-box is installed' ($after -and $after -ne $before) "$before -> $after"
+        Check 'the previous binary kept as .old' (Test-Path "$sb.old")
+        Check 'the VPN runs the new binary' (WaitFor { $n = FirstPid $sb; $n -ne 0 -and $n -ne $old } 30) "PID $old -> $(FirstPid $sb)"
+        Check 'intent untouched: 1' ((Intent) -eq 1) "intent $(Intent)"
+        $new = LogSince $mark
+        Check 'log: updated and restarted' ($new -match 'sing-box updated .* \(restarted: true\)')
+        Check 'no staging folder left' (@(Get-ChildItem -Path $pf -Directory -Filter '.sing-box-update-*' -Force -ErrorAction SilentlyContinue).Count -eq 0)
         CheckNoPopup 'no popup'
     }
 

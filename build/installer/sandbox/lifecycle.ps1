@@ -123,7 +123,14 @@ function WaitForUser([int]$seconds, [string]$notBoot = '') {
 
 function Say([string]$m, [string]$color = 'White') { Write-Host ('{0:HH:mm:ss} {1}' -f (Get-Date), $m) -ForegroundColor $color }
 
-$r = Wsb @('start', '-c', $config)
+# Only one sandbox runs at a time; a previous one (run.ps1's shuts itself
+# down) may still be closing: "CO_E_APPSINGLEUSE" for a while
+$r = $null
+for ($attempt = 1; $attempt -le 20; $attempt++) {
+    $r = Wsb @('start', '-c', $config)
+    if ($r.Id -or -not ("$($r.Error)" -match 'APPSINGLEUSE|800401F6')) { break }
+    Start-Sleep -Seconds 6
+}
 if (-not $r.Id) { throw "wsb start failed: $($r.Error)" }
 $script:id = $r.Id
 Say "Sandbox $id, staged in $StageDir"
