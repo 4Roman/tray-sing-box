@@ -134,7 +134,10 @@ var
   ResultCode: Integer;
 begin
   Result := '';
-  // /DIR= of a silent install bypasses the directory page
+  // The folder checks of the directory page, for every install that did not
+  // go through it: all silent ones (NextButtonClick leaves them to this
+  // function, one refusal with one exit code: 7) and an upgrade, where the
+  // page is skipped (DisableDirPage=auto with a previous installation)
   if not InProgramFiles(ExpandConstant('{app}')) then
   begin
     Result := 'Приложение устанавливается только в Program Files: ' + ExpandConstant('{app}');
@@ -167,18 +170,24 @@ end;
 
 // A folder with a config.json is a portable installation: installing into
 // it would make the new copy portable too (data next to the exe, deleted
-// with it) and defeat the takeover
+// with it) and defeat the takeover.
+// Setup calls this for the directory page in a silent install too (/DIR=):
+// silent installs are left to PrepareToInstall, which refuses without a
+// dialog (a MsgBox here, even with /SUPPRESSMSGBOXES for a plain MsgBox,
+// made an unattended install wait for a click forever)
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
+  if WizardSilent then
+    exit;
   if (CurPageID = wpSelectDir) and not InProgramFiles(WizardDirValue) then
   begin
-    MsgBox('Приложение запускается автоматически с правами администратора, поэтому ставится только в Program Files — туда без прав администратора никто не может подменить файлы.', mbError, MB_OK);
+    SuppressibleMsgBox('Приложение запускается автоматически с правами администратора, поэтому ставится только в Program Files — туда без прав администратора никто не может подменить файлы.', mbError, MB_OK, IDOK);
     Result := False;
   end
   else if (CurPageID = wpSelectDir) and FileExists(AddBackslash(WizardDirValue) + 'config.json') then
   begin
-    MsgBox('В этой папке лежит config.json переносной копии. Установите приложение в другую папку (по умолчанию — Program Files): при первом запуске оно само заберёт настройки и sing-box из переносной копии.', mbError, MB_OK);
+    SuppressibleMsgBox('В этой папке лежит config.json переносной копии. Установите приложение в другую папку (по умолчанию — Program Files): при первом запуске оно само заберёт настройки и sing-box из переносной копии.', mbError, MB_OK, IDOK);
     Result := False;
   end;
 end;

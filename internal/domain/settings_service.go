@@ -3,7 +3,10 @@ package domain
 import (
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // OutboundInfo describes a configured outbound for UI listing
@@ -62,6 +65,7 @@ func (s *SettingsService) Section(name string) (string, error) {
 // restarts the VPN if it is running.
 func (s *SettingsService) SaveSection(name string, raw []byte) (restarted bool, err error) {
 	if err := s.store.WriteSection(name, raw); err != nil {
+		logRefused(fmt.Sprintf("section %q", name), err)
 		return false, err
 	}
 	log.Printf("Settings: section %q saved", name)
@@ -90,6 +94,7 @@ func (s *SettingsService) Outbounds() ([]OutboundInfo, string, error) {
 // VPN if it is running.
 func (s *SettingsService) UseOutbound(tag string) (restarted bool, err error) {
 	if err := s.store.SwitchOutbound(tag); err != nil {
+		logRefused(fmt.Sprintf("switch to %q", tag), err)
 		return false, err
 	}
 	log.Printf("Settings: switched active outbound to %q", tag)
@@ -127,6 +132,7 @@ func (s *SettingsService) SetVPN(running bool) error {
 // again. Otherwise the VPN is the user's to start.
 func (s *SettingsService) CreateConfig(raw []byte) error {
 	if err := s.store.CreateConfig(raw); err != nil {
+		logRefused("initial config.json", err)
 		return err
 	}
 	log.Printf("Settings: initial config.json created")
@@ -145,6 +151,7 @@ func (s *SettingsService) History() ([]ConfigVersion, error) {
 // restarts the VPN if it is running.
 func (s *SettingsService) Rollback(name string) (restarted bool, err error) {
 	if err := s.store.RestoreVersion(name); err != nil {
+		logRefused(fmt.Sprintf("rollback to %q", name), err)
 		return false, err
 	}
 	log.Printf("Settings: config rolled back to %q", name)
@@ -154,4 +161,29 @@ func (s *SettingsService) Rollback(name string) (restarted bool, err error) {
 		return false, fmt.Errorf("конфиг восстановлен, но VPN %w", err)
 	}
 	return restarted, nil
+}
+
+// logRefused records a config change that was not made. The settings page
+// shows the reason, but the page is reachable by any program of the user: the
+// log (next to the config, administrators only when installed) keeps a trace
+// of refused attempts, e.g. items the guard does not accept. The reasons name
+// items, never their values (the page gets the same text). They are written
+// on one line: a key name in a reason comes from the refused config, and a
+// line break in it would forge log lines.
+func logRefused(what string, err error) {
+	log.Printf("Settings: %s not saved: %s", what, oneLine(err.Error()))
+}
+
+// oneLine replaces control characters (line breaks above all) with their
+// quoted form
+func oneLine(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			b.WriteString(strconv.QuoteRune(r))
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }

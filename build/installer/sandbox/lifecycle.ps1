@@ -14,6 +14,12 @@ Usage, from the repository root in PowerShell 7:
 between phases. The update scenario needs an OLDER published release's setup
 and the network (it updates from the real GitHub release):
     lifecycle.ps1 -Setup <setup of v1.0.0> -SingBoxDir <dir> -Network -ExpectVersion v1.0.1 -Phases install,update,collect
+-Uac turns User Account Control on first (the sandbox has it off: every
+process runs elevated, so nothing that depends on the shell running BELOW the
+app is exercised - the explorer restart broadcast, the browser the settings
+page opens in, the setup started by the shell); elevation is then granted
+without a prompt, and each phase elevates itself:
+    lifecycle.ps1 -Setup <setup.exe> -SingBoxDir <dir> -Uac -Phases dir-refused,interactive,...
 -KeepOpen leaves the sandbox running (its id is printed; `wsb stop --id <id>`).
 For a look by hand at a clean installation (the first-config section of the
 settings page), with the network and the clipboard shared:
@@ -23,10 +29,11 @@ Exit code 0 when every phase passed.
 param(
     [Parameter(Mandatory = $true)][string]$Setup,
     [Parameter(Mandatory = $true)][string]$SingBoxDir,
-    [string[]]$Phases = @('install', 'crash', 'explorer', 'stop', 'reboot', 'boot-off', 'reboot', 'boot-on', 'giveup', 'quit', 'collect'),
+    [string[]]$Phases = @('install', 'crash', 'explorer', 'stop', 'reboot', 'boot-off', 'reboot', 'boot-on', 'cancel', 'giveup', 'quit', 'collect'),
     [string]$ExpectVersion = '',
     [switch]$Network,
     [switch]$Clipboard,
+    [switch]$Uac,
     [string]$StageDir = (Join-Path $env:TEMP ('tray-sing-box-lifecycle-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))),
     [int]$PhaseTimeoutMinutes = 15,
     [switch]$KeepOpen
@@ -125,6 +132,16 @@ try {
     # The window logs the user on (and shows what happens)
     Start-Process -FilePath $wsbExe -ArgumentList @('connect', '--id', $id)
     $boot = WaitForUser 300
+    if ($Uac) {
+        Say '== UAC on (elevation without a prompt), reboot'
+        $key = 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+        $set = "cmd.exe /c reg add $key /v EnableLUA /t REG_DWORD /d 1 /f & reg add $key /v ConsentPromptBehaviorAdmin /t REG_DWORD /d 0 /f & reg add $key /v PromptOnSecureDesktop /t REG_DWORD /d 0 /f"
+        $r = Wsb @('exec', '--id', $id, '-r', 'System', '-c', $set)
+        if ($r.ExitCode -ne 0) { throw "turning UAC on failed: $($r.Error)$($r.ExitCode)" }
+        [void](Wsb @('exec', '--id', $id, '-r', 'System', '-c', 'shutdown.exe /r /t 0'))
+        $boot = WaitForUser 600 $boot
+        Say "   up again, boot $boot"
+    }
     foreach ($phase in $Phases) {
         if ($phase -eq 'reboot') {
             Say '== reboot'
