@@ -29,7 +29,7 @@ Exit code 0 when every phase passed.
 param(
     [Parameter(Mandatory = $true)][string]$Setup,
     [Parameter(Mandatory = $true)][string]$SingBoxDir,
-    [string[]]$Phases = @('install', 'crash', 'explorer', 'stop', 'reboot', 'boot-off', 'reboot', 'boot-on', 'cancel', 'giveup', 'quit', 'collect'),
+    [string[]]$Phases = @('install', 'import', 'crash', 'explorer', 'stop', 'reboot', 'boot-off', 'reboot', 'boot-on', 'cancel', 'giveup', 'quit', 'collect'),
     [string]$ExpectVersion = '',
     [switch]$Network,
     [switch]$Clipboard,
@@ -55,6 +55,7 @@ $payload = Join-Path $inputDir 'payload'
 New-Item -ItemType Directory -Force $payload, $resultsDir | Out-Null
 Copy-Item -Path $Setup -Destination (Join-Path $inputDir 'setup.exe')
 Copy-Item -Path (Join-Path $PSScriptRoot 'lifecycle-test.ps1') -Destination $inputDir
+Copy-Item -Path (Join-Path $PSScriptRoot 'import-qr.png') -Destination $inputDir
 Copy-Item -Path (Join-Path $SingBoxDir 'sing-box.exe') -Destination $payload
 Get-ChildItem -Path $SingBoxDir -Filter '*.dll' | Copy-Item -Destination $payload
 Set-Content -Path (Join-Path $payload 'config.json') -Encoding ASCII -Value '{"log":{"level":"info","timestamp":true},"inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080}],"outbounds":[{"type":"direct","tag":"direct"}]}'

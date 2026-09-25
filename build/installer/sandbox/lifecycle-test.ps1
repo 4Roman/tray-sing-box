@@ -25,6 +25,8 @@
 #   boot-off  after a reboot with the VPN off: the task starts the app, the
 #             VPN stays off; then the tray toggle turns it on
 #   boot-on   after a reboot with the VPN on: restored at logon
+#   import    (after install) a share link from the clipboard and a QR code
+#             on the screen (import-qr.png), through the tray items
 #   singbox-update  (networked, after install) the tray item replaces the
 #             running older sing-box with the latest release
 #   cancel    sing-box cannot start, the tray toggle calls the attempts off
@@ -324,6 +326,8 @@ public static class SbWin {
 # subscriptions 7, settings 8, sing-box update 9, app update 10, sep 11,
 # DPI 12, autostart 13, sep 14, quit 15
 $menuToggle = 3
+$menuImportClipboard = 5
+$menuImportQR = 6
 $menuSettings = 8
 $menuSingBoxUpdate = 9
 $menuQuit = 15
@@ -823,6 +827,45 @@ switch ($Phase) {
         Check 'the app runs elevated' ((LevelOf $app) -ge 0x3000) "level $(LevelOf $app)"
         Check 'autostart task launches it' ((TaskCommand) -ieq $exe) (TaskCommand)
         Check 'tray icon shown' (WaitFor { IconShown } 60)
+        CheckNoPopup 'no popup'
+    }
+
+    'import' {
+        # (after install) a share link from the clipboard and a QR code on the
+        # screen, through the tray items; each result box closed with OK
+        $link = 'trojan://import-secret@192.0.2.21:443?sni=example.com#clip-node'
+        Set-Clipboard -Value $link
+        Check 'menu: import from the clipboard' (MenuClick $menuImportClipboard)
+        $d = $null
+        $ok = WaitFor { $script:d = @([SbWin]::Dialogs([uint32](FirstPid $exe)))[0]; [bool]$script:d } 60
+        $text = ''
+        if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
+        Check 'clipboard: the result is reported' $ok $text
+        Check 'clipboard: the server is in the config' ((ConfigText) -match '"clip-node"')
+        [void](WaitFor { @(DialogTexts).Count -eq 0 } 10)
+
+        # The QR image in a window of its own (TopMost, closes itself)
+        New-Item -ItemType Directory -Force 'C:\e2e' | Out-Null
+        Set-Content -Path 'C:\e2e\showqr.ps1' -Encoding ASCII -Value @(
+            'Add-Type -AssemblyName System.Windows.Forms, System.Drawing',
+            '$f = New-Object Windows.Forms.Form',
+            '$f.Text = "qr"; $f.TopMost = $true; $f.StartPosition = "CenterScreen"; $f.BackColor = "White"',
+            '$f.ClientSize = New-Object Drawing.Size(420, 420)',
+            '$p = New-Object Windows.Forms.PictureBox; $p.Dock = "Fill"; $p.SizeMode = "CenterImage"',
+            '$p.Image = [Drawing.Image]::FromFile("C:\sbtest\import-qr.png"); $f.Controls.Add($p)',
+            '$t = New-Object Windows.Forms.Timer; $t.Interval = 90000; $t.add_Tick({ $f.Close() }); $t.Start()',
+            '[void]$f.ShowDialog()')
+        $viewer = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', 'C:\e2e\showqr.ps1') -PassThru
+        Start-Sleep -Seconds 4
+        Check 'menu: import QR from the screen' (MenuClick $menuImportQR)
+        $ok = WaitFor { $script:d = @([SbWin]::Dialogs([uint32](FirstPid $exe)))[0]; [bool]$script:d } 60
+        $text = ''
+        if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
+        Check 'QR: the result is reported' $ok $text
+        Check 'QR: the server is in the config' ((ConfigText) -match '"qr-node"')
+        Stop-Process -Id $viewer.Id -Force -ErrorAction SilentlyContinue
+        Check 'the VPN runs after the imports' (WaitFor { Running $sb } 30)
+        [void](WaitFor { @(DialogTexts).Count -eq 0 } 10)
         CheckNoPopup 'no popup'
     }
 
