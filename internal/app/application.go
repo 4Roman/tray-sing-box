@@ -234,7 +234,7 @@ func (a *Application) appUpdateLoop() {
 		} else if result.Available && result.LatestVersion != offered {
 			offered = result.LatestVersion
 			log.Printf("App update available: %s (running %s)", result.LatestVersion, result.CurrentVersion)
-			if ui.AskYesNo(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateAvailableMsg, result.LatestVersion, result.CurrentVersion, result.Notes)) {
+			if ui.AskYesNo(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateAvailableMsg, ui.ShowVersion(result.LatestVersion), ui.ShowVersion(result.CurrentVersion), ui.PlainNotes(result.Notes))) {
 				a.handleAppUpdate()
 			}
 		}
@@ -257,7 +257,7 @@ func (a *Application) handleAppUpdate() {
 			return errorPopup(ui.AppUpdateErrorTitle, err)
 		}
 		if !result.Installed {
-			return infoPopup(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateUpToDate, result.CurrentVersion, result.LatestVersion))
+			return infoPopup(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateUpToDate, ui.ShowVersion(result.CurrentVersion), ui.ShowVersion(result.LatestVersion)))
 		}
 		installed = result
 		return nil
@@ -268,7 +268,7 @@ func (a *Application) handleAppUpdate() {
 
 	// The exe on disk is the new version; it takes over once this process
 	// exits. sing-box is not touched — the new instance adopts it.
-	if ui.AskYesNo(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateInstalledMsg, installed.LatestVersion, installed.CurrentVersion)) {
+	if ui.AskYesNo(ui.AppUpdateDoneTitle, fmt.Sprintf(ui.AppUpdateInstalledMsg, ui.ShowVersion(installed.LatestVersion), ui.ShowVersion(installed.CurrentVersion))) {
 		a.RelaunchAfterUpdate()
 	}
 }

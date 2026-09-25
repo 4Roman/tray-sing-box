@@ -447,7 +447,8 @@ async function refreshAppUpdate() {
     const box = document.getElementById('app-update');
     if (!d.configured) { box.style.display = 'none'; return; }
     box.style.display = '';
-    document.getElementById('app-version').textContent = d.version || '—';
+    // the build stamp carries the tag's "v", the release lookup does not
+    document.getElementById('app-version').textContent = (d.version || '—').replace(/^v/, '');
     document.getElementById('app-latest').textContent = d.error ? ('не удалось проверить: ' + d.error)
       : (d.latest ? (d.latest + (d.installed ? ' (установлена, ждёт перезапуска)' : d.available ? ' (доступно обновление)' : '')) : '—');
     document.getElementById('app-relaunch').style.display = d.installed ? '' : 'none';
@@ -463,7 +464,7 @@ async function updateApp(btn) {
     if (d.installed) {
       show('ok', 'Установлена версия ' + d.latest + '. Нажмите «Перезапустить в новую версию» — VPN не прерывается.');
     } else {
-      show('ok', 'Обновление не требуется: установлена версия ' + d.version + ', последний релиз ' + d.latest);
+      show('ok', 'Обновление не требуется: установлена версия ' + String(d.version || '').replace(/^v/, '') + ', последний релиз ' + d.latest);
     }
   } catch (e) {
     show('err', 'Обновление приложения: ' + e.message);
