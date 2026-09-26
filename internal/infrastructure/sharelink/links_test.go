@@ -276,6 +276,9 @@ var refusedLinks = []refusalCase{
 	{"no-pbk", "vless://" + testUUID + "@192.0.2.10:443?security=reality&sid=ab#no-pbk", "pbk"},
 	{"bad-pbk", "vless://" + testUUID + "@192.0.2.10:443?security=reality&pbk=" + testSecret + "#bad-pbk", "pbk"},
 
+	// A password with an unescaped '/' or '?': its head would be the server
+	{"hy2-slash-pw", "hysteria2://Ab3dEf/" + testSecret + "@srv.example.com:8443#hy2-slash-pw", "ссылка повреждена"},
+	{"hy2-query-pw", "hysteria2://Ab3dEf?" + testSecret + "@srv.example.com#hy2-query-pw", "ссылка повреждена"},
 	{"hy2-bad-list", "hysteria2://" + testSecret + "@192.0.2.50:443,abc/?sni=example.com#hy2-bad-list", "список портов"},
 	{"hy2-bad-mport", "hysteria2://" + testSecret + "@192.0.2.50:443/?mport=30000-20000#hy2-bad-mport", "список портов «30000-20000»"},
 	{"hy2-port-0", "hysteria2://" + testSecret + "@192.0.2.50:0/?sni=example.com#hy2-port-0", "неверный порт"},
@@ -491,6 +494,37 @@ func TestParseAllReportsEverySkip(t *testing.T) {
 		}
 		if !russian(sk.Reason) || strings.Contains(sk.Reason, testSecret) || strings.Contains(sk.Reason, testUUID) {
 			t.Errorf("skipped[%d].Reason = %q", i, sk.Reason)
+		}
+	}
+}
+
+// A credential with an unescaped '#': what follows it is the rest of the
+// credential and the server's address, not a name — the report numbers such
+// a link instead
+func TestSkippedLinkNameIsNoCredentialTail(t *testing.T) {
+	tail := "tail-" + testSecret
+	links := []string{
+		"trojan://Passw0rd#" + tail + "@srv.example.com:443",
+		"socks5://user:Passw0rd#" + tail + "@srv.example.com:1080",
+		"vless://1111#" + tail + "-3333@srv.example.com:443",
+		"hysteria2://Ab3dEf#" + tail + "@srv.example.com:443",
+	}
+	text := "vless://" + testUUID + "@192.0.2.10:443?security=tls#ok\n" + strings.Join(links, "\n")
+	outbounds, skipped, err := ParseAllReport(text)
+	if err != nil {
+		t.Fatalf("ParseAllReport: %v", err)
+	}
+	if len(outbounds) != 1 || len(skipped) != len(links) {
+		t.Fatalf("outbounds %v, skipped %+v", outbounds, skipped)
+	}
+	for i, sk := range skipped {
+		if want := fmt.Sprintf("ссылка %d", i+2); sk.Name != want {
+			t.Errorf("skipped[%d].Name = %q, want %q", i, sk.Name, want)
+		}
+	}
+	for _, link := range links {
+		if _, err := Parse(link); err == nil || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("Parse: %v", err)
 		}
 	}
 }

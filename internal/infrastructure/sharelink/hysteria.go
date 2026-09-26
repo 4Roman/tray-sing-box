@@ -124,6 +124,13 @@ func parseHysteria2(link string) (Outbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A password with an unescaped '/', '?' or '#' ends the authority inside
+	// it: the head of the password would become the server (and the SNI),
+	// the rest the path, the query or the name — and with the optional
+	// password and the default port nothing else would refuse the link
+	if u.User == nil && strings.Contains(link, "@") {
+		return nil, errors.New("ссылка повреждена: символы «/», «?» и «#» в пароле должны быть закодированы (%2F, %3F, %23)")
+	}
 	host, err := serverHost(u)
 	if err != nil {
 		return nil, err

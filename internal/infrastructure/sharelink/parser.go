@@ -326,10 +326,13 @@ func linkName(link string, index int) string {
 
 // linkTitle is the link's own name, "" when it has none. Only a fragment on
 // one line qualifies: Parse is given whatever text its caller has, and after
-// the last '#' of a text with line breaks there could be anything
+// the last '#' of a text with line breaks there could be anything. Nor one
+// with an '@': when a credential holds an unescaped '#', what follows it is
+// the rest of the credential and the server's address ("…#tail@host:443"),
+// and the name goes into the log, the popups and the settings page.
 func linkTitle(link string) string {
 	if i := strings.LastIndex(link, "#"); i >= 0 {
-		if name, err := url.QueryUnescape(link[i+1:]); err == nil && plainName(name) {
+		if name, err := url.QueryUnescape(link[i+1:]); err == nil && plainName(name) && !strings.Contains(name, "@") {
 			return shortName(name)
 		}
 	}
