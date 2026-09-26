@@ -910,6 +910,22 @@ func TestGluedLinksAreTakenApart(t *testing.T) {
 	}
 }
 
+// A later '@' — in the name, in hysteria's auth — must not hide the real
+// server behind the one that ends an unescaped password
+func TestLaterAtDoesNotHideTheServer(t *testing.T) {
+	for _, link := range []string{
+		"socks5://alice:2024/" + testSecret + "@192.0.2.80:1080#@channel",
+		"socks5://alice:2024?" + testSecret + "@192.0.2.80:1080#me@work",
+		"hysteria://ab:12/" + testSecret + "@192.0.2.70:8443?protocol=udp&auth=user@example.com&upmbps=10&downmbps=50#n",
+		"hysteria://ab:12/" + testSecret + "@192.0.2.70:8443?protocol=udp&upmbps=10&downmbps=50#@chan",
+	} {
+		outbounds, skipped, _ := ParseAllReport(link)
+		if len(outbounds) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0].Reason, "в пароле должны быть закодированы") {
+			t.Errorf("%s: outbounds %v, skipped %+v", link, outbounds, skipped)
+		}
+	}
+}
+
 func TestNoLinksErrorIsRussian(t *testing.T) {
 	_, _, err := ParseAllReport("просто текст без ссылок")
 	if err == nil || !russian(err.Error()) {

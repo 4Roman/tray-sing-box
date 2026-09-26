@@ -517,28 +517,34 @@ var errUnescapedPassword = errors.New("ссылка повреждена: сим
 
 // authorityInTail reports whether the text after a link's "://", parsed
 // without a userinfo, holds the link's real server after all: a host:port
-// (or a hysteria port list) after its last '@', up to the next '/', '?' or
+// (or a hysteria port list) after one of its '@', up to the next '/', '?' or
 // '#'. The check of the schemes whose credential is optional (socks,
 // hysteria): a password with an unescaped '/', '?' or '#' ends the
 // authority inside it, and a head of digits after the user name reads as a
 // port — "user:2024#tail@host:1080" is server "user", port 2024, the rest
-// of the password and the real server the name. A bare '@' proves nothing
-// there: a name may hold one ("#me@work").
+// of the password and the real server the name. Every '@', not just the
+// last: a later one in the name ("#@channel") or the query (hysteria's
+// "auth=user@example.com") would hide the real server. A bare '@' proves
+// nothing: a name may hold one ("#me@work").
 func authorityInTail(rest string) bool {
-	at := strings.LastIndex(rest, "@")
-	if at < 0 {
-		return false
+	for {
+		at := strings.Index(rest, "@")
+		if at < 0 {
+			return false
+		}
+		rest = rest[at+1:]
+		hostPort := rest
+		if i := strings.IndexAny(hostPort, "/?#"); i >= 0 {
+			hostPort = hostPort[:i]
+		}
+		host, port, err := net.SplitHostPort(hostPort)
+		if err != nil || host == "" {
+			continue
+		}
+		if _, _, err := parsePortList(port); err == nil {
+			return true
+		}
 	}
-	hostPort := rest[at+1:]
-	if i := strings.IndexAny(hostPort, "/?#"); i >= 0 {
-		hostPort = hostPort[:i]
-	}
-	host, port, err := net.SplitHostPort(hostPort)
-	if err != nil || host == "" {
-		return false
-	}
-	_, _, err = parsePortList(port)
-	return err == nil
 }
 
 // serverHost is the link's server address; a link without one is refused
