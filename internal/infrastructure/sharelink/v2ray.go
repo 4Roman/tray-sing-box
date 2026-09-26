@@ -186,7 +186,11 @@ func transportConfig(q url.Values, tlsOn bool) (map[string]any, error) {
 		return transport, nil
 	case "grpc":
 		transport := map[string]any{"type": "grpc"}
-		if svc := q.Get("serviceName"); svc != "" {
+		svc, err := grpcServiceName(q.Get("serviceName"))
+		if err != nil {
+			return nil, err
+		}
+		if svc != "" {
 			transport["service_name"] = svc
 		}
 		return transport, nil
@@ -236,6 +240,26 @@ func transportConfig(q url.Values, tlsOn bool) (map[string]any, error) {
 	default:
 		return nil, fmt.Errorf("транспорт «%s» не поддерживается sing-box", token(network))
 	}
+}
+
+// grpcServiceName maps a link's gRPC serviceName to sing-box's service_name.
+// Xray reads a name starting with '/' as a custom path: "/a/b/Name|Multi" is
+// served at "/a/b/Name" (the part up to the last '/' is the service, the
+// rest up to '|' the stream name). sing-box always requests
+// "/<service_name>/Tun", the name escaped as one path segment, so only
+// "/<segment>/Tun" can be carried over — as service_name "<segment>"; any
+// other custom path would pass `sing-box check` and never connect.
+func grpcServiceName(svc string) (string, error) {
+	if !strings.HasPrefix(svc, "/") {
+		return svc, nil
+	}
+	last := strings.LastIndex(svc, "/")
+	service := svc[1:max(last, 1)]
+	stream, _, _ := strings.Cut(svc[last+1:], "|")
+	if service == "" || strings.Contains(service, "/") || stream != "Tun" {
+		return "", errors.New("собственный путь gRPC (serviceName с «/» в начале) не поддерживается sing-box")
+	}
+	return service, nil
 }
 
 // splitEarlyData takes Xray's early-data setting out of a ws/httpupgrade
