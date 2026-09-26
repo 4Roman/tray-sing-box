@@ -2,6 +2,8 @@ package configfile
 
 import (
 	"fmt"
+	"net"
+	"strings"
 
 	"tray-sing-box/internal/config"
 	"tray-sing-box/internal/domain"
@@ -65,6 +67,18 @@ func importReplaceable(reserved map[string]bool) func(map[string]any) bool {
 // matches it (foldKey); "" when it has none
 func detourOf(o map[string]any) string {
 	return foldedString(o, "detour")
+}
+
+// localServer: the outbound's server is this machine — a loopback address,
+// localhost, or an unspecified address (0.0.0.0, ::), which dials this
+// machine too
+func localServer(o map[string]any) bool {
+	server := foldedString(o, "server")
+	if loopbackListen(server, false) {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(strings.TrimSpace(server), "[]"))
+	return ip != nil && ip.IsUnspecified()
 }
 
 // suffixTaken renames the incoming outbounds whose tag belongs to an
@@ -401,22 +415,35 @@ func visitMatch(rule map[string]any, fn func(refKind, string) (string, bool)) {
 // the replacement: the first new outbound, else any surviving proxy, else a
 // direct outbound; a detour is not pointed at a direct outbound — sing-box
 // refuses that — and a rule with no usable replacement is dropped).
+//
+// The replacement is never an outbound another one dials through (its
+// detour): that is a relay, often one that works only so — a ShadowTLS
+// helper of a sing-box profile ignores the destination, and the traffic
+// sent to it connects nowhere. Nor one whose server is this machine (the
+// DPI bypass's local proxy, a provider's placeholder node on 127.0.0.1): no
+// server the traffic of a removed node can go on to.
 func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOutbounds []map[string]any) {
 	outbounds, _ := cfg["outbounds"].([]any)
 
 	// Pick the replacement for references that pointed at removed tags
+	relays := detourTargets(cfg)
+	usable := func(o map[string]any) bool {
+		tag := tagString(o)
+		return tag != "" && !relays[tag] && !localServer(o)
+	}
 	replacement := ""
-	if len(newOutbounds) > 0 {
-		replacement, _ = newOutbounds[0]["tag"].(string)
+	for _, o := range newOutbounds {
+		if usable(o) {
+			replacement = tagString(o)
+			break
+		}
 	}
 	if replacement == "" {
 		proxies := proxyTags(cfg)
 		for _, item := range outbounds {
-			if o, ok := item.(map[string]any); ok {
-				if tag, _ := o["tag"].(string); proxies[tag] {
-					replacement = tag
-					break
-				}
+			if o, ok := item.(map[string]any); ok && proxies[tagString(o)] && usable(o) {
+				replacement = tagString(o)
+				break
 			}
 		}
 	}

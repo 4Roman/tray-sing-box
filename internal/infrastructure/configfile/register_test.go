@@ -120,3 +120,114 @@ func TestRegistrationFollowsEarlierRegistrations(t *testing.T) {
 		t.Fatalf("P = %v, Q = %v", p, q)
 	}
 }
+
+// shadowTLSProfile is the ShadowTLS pattern of sing-box profiles (hiddify,
+// the sing-box documentation): a shadowsocks node dialing through a
+// shadowtls outbound, which ignores the destination and works only so
+func shadowTLSProfile(helperFirst bool) []map[string]any {
+	ss := map[string]any{
+		"type": "shadowsocks", "tag": "st-ss", "server": "192.0.2.40", "server_port": 443,
+		"method": "2022-blake3-aes-128-gcm", "password": "8JCsPssfgS8tiRwiMlhARg==", "detour": "st-ss_shadowtls-out",
+	}
+	helper := map[string]any{
+		"type": "shadowtls", "tag": "st-ss_shadowtls-out", "server": "192.0.2.40", "server_port": 443,
+		"version": 3, "password": "shadowtls-password",
+		"tls": map[string]any{"enabled": true, "server_name": "www.example.com"},
+	}
+	if helperFirst {
+		return []map[string]any{helper, ss}
+	}
+	return []map[string]any{ss, helper}
+}
+
+// The helper of a profile's node is not offered as a server: it is not
+// added to the user's groups, by an import or a refresh — also when the
+// node it serves was refused by the check
+func TestRelayOfTheBatchNotRegistered(t *testing.T) {
+	path := writeSample(t)
+	result, err := New(path).AddOutbounds(append(shadowTLSProfile(false), vlessNode("DE", "192.0.2.10")), nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Tags) != 3 || len(result.Skipped) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if members := groupMembers(t, path, "proxy"); !reflect.DeepEqual(members, []any{"old-node", "direct", "st-ss", "DE"}) {
+		t.Fatalf("proxy = %v", members)
+	}
+
+	path = writeSample(t)
+	sync, err := New(path).SyncOutbounds(nil, append(shadowTLSProfile(true), vlessNode("DE", "192.0.2.10")))
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if len(sync.Tags) != 3 || len(sync.Skipped) != 0 {
+		t.Fatalf("sync = %+v", sync)
+	}
+	if members := groupMembers(t, path, "proxy"); !reflect.DeepEqual(members, []any{"old-node", "direct", "st-ss", "DE"}) {
+		t.Fatalf("proxy = %v", members)
+	}
+
+	// The shadowsocks node refused: the helper is saved (nothing it needs is
+	// missing) but still no server
+	editor, path, _ := checkedEditor(t, sampleConfig)
+	batch := shadowTLSProfile(false)
+	batch[0]["flow"] = "from-a-newer-sing-box"
+	result, err = editor.AddOutbounds(append(batch, vlessNode("DE", "192.0.2.10")), nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds with a refused node: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"st-ss_shadowtls-out", "DE"}) || len(result.Skipped) != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if members := groupMembers(t, path, "proxy"); !reflect.DeepEqual(members, []any{"old-node", "direct", "DE"}) {
+		t.Fatalf("proxy = %v", members)
+	}
+}
+
+// The references to a node a refresh removes go to a server the traffic can
+// use: not a relay of another node (the provider listing the ShadowTLS
+// helper first), not a node whose server is this machine (a provider's
+// placeholder on 127.0.0.1, the DPI bypass's local proxy) — among the new
+// nodes and among the surviving ones
+func TestRemovedNodeReplacementIsAServer(t *testing.T) {
+	const config = `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["DE", "direct"], "default": "DE"},
+    {"type": "vless", "tag": "DE", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "http", "tag": "dpi-bypass", "server": "127.0.0.1", "server_port": 3128},
+    {"type": "vless", "tag": "user-node", "server": "192.0.2.30", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ], "route": {"rules": [{"domain_suffix": [".example.org"], "outbound": "DE"}], "final": "DE"}}`
+	placeholder := func(server string) map[string]any {
+		return map[string]any{"type": "socks", "tag": "info " + server, "server": server, "server_port": 1080}
+	}
+	for name, tc := range map[string]struct {
+		fresh []map[string]any
+		want  string
+	}{
+		"relay first":         {shadowTLSProfile(true), "st-ss"},
+		"placeholder first":   {[]map[string]any{placeholder("127.0.0.1"), vlessNode("NL", "192.0.2.11")}, "NL"},
+		"unspecified first":   {[]map[string]any{placeholder("0.0.0.0"), vlessNode("NL", "192.0.2.11")}, "NL"},
+		"localhost first":     {[]map[string]any{placeholder("localhost"), vlessNode("NL", "192.0.2.11")}, "NL"},
+		"IPv6 loopback first": {[]map[string]any{placeholder("::1"), vlessNode("NL", "192.0.2.11")}, "NL"},
+		"only a placeholder":  {[]map[string]any{placeholder("127.0.0.1")}, "user-node"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, config)
+			result, err := New(path).SyncOutbounds([]string{"DE"}, tc.fresh)
+			if err != nil {
+				t.Fatalf("SyncOutbounds: %v", err)
+			}
+			if !reflect.DeepEqual(result.Removed, []string{"DE"}) || len(result.Skipped) != 0 {
+				t.Fatalf("result = %+v", result)
+			}
+			route := load(t, path)["route"].(map[string]any)
+			if route["final"] != tc.want {
+				t.Fatalf("final = %v, want %s", route["final"], tc.want)
+			}
+			if rule := route["rules"].([]any)[0].(map[string]any); rule["outbound"] != tc.want {
+				t.Fatalf("rule = %v", rule)
+			}
+		})
+	}
+}

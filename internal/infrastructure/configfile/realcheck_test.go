@@ -237,6 +237,33 @@ func TestRealCheckErrorNamesTheOutbound(t *testing.T) {
 	}
 }
 
+// A sing-box profile's ShadowTLS pair passes the real check as merged: the
+// shadowsocks node is offered as a server, its helper is not
+func TestRealCheckShadowTLSProfile(t *testing.T) {
+	validate := realValidator(t)
+	path := writeConfig(t, realBaseConfig)
+	editor := New(path)
+	editor.SetValidator(validate)
+
+	result, err := editor.AddOutbounds(append(shadowTLSProfile(true), realityNode("DE", "192.0.2.10", true)), nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Tags) != 3 || len(result.Skipped) != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if members := groupMembers(t, path, "proxy"); !reflect.DeepEqual(members, []any{"direct", "st-ss", "DE"}) {
+		t.Fatalf("proxy = %v", members)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validate(saved); err != nil {
+		t.Fatalf("the saved config fails sing-box check: %v", err)
+	}
+}
+
 // sing-box check passes a route.final, a DNS server's detour and an enabled
 // NTP client's detour naming a missing outbound — sing-box then does not
 // start. The editor refuses what would add one.

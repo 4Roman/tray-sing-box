@@ -287,6 +287,20 @@ func dependsOn(edges map[string][]string, from string) map[string]bool {
 	return found
 }
 
+// detourTargets returns the tags another outbound or endpoint of the config
+// dials through (its detour)
+func detourTargets(cfg map[string]any) map[string]bool {
+	targets := map[string]bool{}
+	for _, n := range dependencyNodes(cfg) {
+		for _, d := range n.deps {
+			if !d.group && d.tag != n.tag {
+				targets[d.tag] = true
+			}
+		}
+	}
+	return targets
+}
+
 // outboundProblems lists the dependencies of outbounds and endpoints on a
 // tag that does not exist, and the rings
 func outboundProblems(cfg map[string]any) []dependencyProblem {

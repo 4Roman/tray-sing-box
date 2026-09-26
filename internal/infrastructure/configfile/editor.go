@@ -387,10 +387,10 @@ func (e *Editor) AddOutbound(outbound map[string]any) error {
 // outbound, a subscription's node — reserved, also when the config lacks
 // it); then the imported one is saved as "<tag> (N)" and listed in Renamed.
 // New tags are registered in every selector/urltest group so they become
-// selectable — not in a group the node dials through (registerInGroups).
-// Outbounds the config check refuses are left out and listed in Skipped
-// (saveMerged); when it refuses every one nothing is saved. The previous
-// config is kept as .bak.
+// selectable — not a relay of another node, and not in a group the node
+// dials through (registerInGroups). Outbounds the config check refuses are
+// left out and listed in Skipped (saveMerged); when it refuses every one
+// nothing is saved. The previous config is kept as .bak.
 func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) (*domain.AddResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -424,11 +424,7 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 				renamed = append(renamed, r)
 			}
 		}
-		batch := map[string]bool{}
-		for _, o := range refused {
-			batch[tagString(o)] = true
-		}
-		return upsertOutbounds(cfg, incoming, batch)
+		return upsertOutbounds(cfg, incoming, refused, nil)
 	})
 	if err != nil {
 		return nil, err
@@ -446,9 +442,9 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 
 // upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
 // replace by tag or append, then register the tags in selector/urltest groups
-// (registerInGroups). owned are the other tags of the source (a
-// subscription's nodes, the nodes of an import the checks refused).
-func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned map[string]bool) error {
+// (registerInGroups). refused are the outbounds of the same batch the checks
+// refused, owned the other tags of the source (a subscription's nodes).
+func upsertOutbounds(cfg map[string]any, newOutbounds, refused []map[string]any, owned map[string]bool) error {
 	outbounds, _ := cfg["outbounds"].([]any)
 
 	// The tags of the source: a detour naming one of them chains two of its
@@ -458,6 +454,9 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned ma
 		provider[tag] = true
 	}
 	for _, o := range newOutbounds {
+		provider[tagString(o)] = true
+	}
+	for _, o := range refused {
 		provider[tagString(o)] = true
 	}
 
@@ -497,26 +496,42 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned ma
 	}
 
 	cfg["outbounds"] = outbounds
-	registerInGroups(cfg, newOutbounds)
+	registerInGroups(cfg, newOutbounds, refused)
 	return nil
 }
 
 // registerInGroups makes merged outbounds selectable: each is added, in
-// order, to every selector/urltest group that lacks it — decided on the
-// config with all of them in place.
+// order, to every selector/urltest group that lacks it — with two
+// exceptions, decided on the config with all of them in place.
 //
-// Not to a group the outbound itself depends on — its detour, that one's
+// Not an outbound another one names as its detour — another outbound of the
+// config, or a node of the batch the checks refused. That is plumbing, not
+// a server to choose: a ShadowTLS helper of a sing-box profile ignores the
+// destination and works only as another node's detour — chosen as the
+// active server, nothing connects. The providers' own profiles leave such
+// helpers out of their groups too.
+//
+// Not in a group the outbound itself depends on — its detour, that one's
 // detour, a group on the way and its members: the group would then depend
 // on the outbound and the outbound on the group, a ring sing-box does not
 // start with ("circular outbound dependency"). A re-imported server keeps a
 // chain through a group the user set on it (upsertOutbounds), so this is an
 // ordinary case: registered there, its import would be refused as a ring
 // the user never made.
-func registerInGroups(cfg map[string]any, merged []map[string]any) {
+func registerInGroups(cfg map[string]any, merged, refused []map[string]any) {
+	relays := detourTargets(cfg)
+	for _, o := range refused {
+		if detour := detourOf(o); detour != "" && detour != tagString(o) {
+			relays[detour] = true
+		}
+	}
 	edges := dependencyGraph(cfg)
 	outbounds, _ := cfg["outbounds"].([]any)
 	for _, o := range merged {
 		tag := tagString(o)
+		if relays[tag] {
+			continue
+		}
 		upstream := dependsOn(edges, tag)
 		for _, item := range outbounds {
 			group, ok := item.(map[string]any)
@@ -727,7 +742,7 @@ func syncMerge(cfg map[string]any, incoming, refused []map[string]any, mine func
 	}
 	cfg["outbounds"] = kept
 
-	if err := upsertOutbounds(cfg, incoming, owned); err != nil {
+	if err := upsertOutbounds(cfg, incoming, refused, owned); err != nil {
 		return result, nil, err
 	}
 	if len(removed) > 0 {
