@@ -53,11 +53,23 @@
   #msg {
     position: sticky; top: 12px; z-index: 5;
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
-    display: none; font-size: 14px; white-space: pre-wrap;
+    display: none; font-size: 14px; align-items: flex-start; gap: 10px;
   }
-  #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
-  #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
-  #msg.warn { display: block; background: #352d17; color: #e8c872; border: 1px solid #5c4a23; }
+  /* The message sticks to the top of the window while the page scrolls. A
+     long one (every node a subscription left out, every server renamed)
+     scrolls inside itself: it must never cover the page. */
+  #msg-text {
+    flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    max-height: 40vh; overflow: auto;
+  }
+  #msg-close {
+    margin: 0; padding: 0 4px; background: none; color: inherit;
+    font-size: 20px; line-height: 1; opacity: .7;
+  }
+  #msg-close:hover { opacity: 1; filter: none; }
+  #msg.ok { display: flex; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
+  #msg.err { display: flex; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+  #msg.warn { display: flex; background: #352d17; color: #e8c872; border: 1px solid #5c4a23; }
   .notice {
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px;
     background: #3a1d20; color: #f1948f; border: 1px solid #6b3036;
@@ -101,7 +113,7 @@
 </div>
 <main id="app">
 <div class="vpn-state">VPN: <b id="vpn">—</b> <button id="vpn-btn" onclick="toggleVPN()" style="margin-left:10px" disabled>…</button></div>
-<div id="msg"></div>
+<div id="msg"><div id="msg-text"></div><button id="msg-close" type="button" title="Закрыть" aria-label="Закрыть" onclick="hideMsg()">×</button></div>
 
 <section id="setup" hidden>
   <h2>Первоначальная настройка</h2>
@@ -221,14 +233,24 @@ if (SESSION) history.replaceState(null, '', '/');
 let sessionEnded = false;
 let msgTimer = null;
 
+// show puts a message at the top of the page. A success goes away by itself;
+// a problem, or a list to read, stays until the next message or until the
+// user closes it.
 function show(kind, text) {
   // Once the session is over its notice stays; later failures add nothing
   if (sessionEnded) return;
   const el = document.getElementById('msg');
+  const body = document.getElementById('msg-text');
   clearTimeout(msgTimer);
   el.className = kind;
-  el.textContent = text;
-  if (kind === 'ok') msgTimer = setTimeout(() => { el.className = ''; }, 6000);
+  body.textContent = text;
+  body.scrollTop = 0;
+  if (kind === 'ok') msgTimer = setTimeout(hideMsg, 6000);
+}
+
+function hideMsg() {
+  clearTimeout(msgTimer);
+  document.getElementById('msg').className = '';
 }
 
 // endSession: the server answered 401 (idle too long, too old, or closed
@@ -236,6 +258,8 @@ function show(kind, text) {
 function endSession() {
   if (sessionEnded) return;
   show('err', 'Сессия завершена — откройте «Настройки» из трея заново. Несохранённый текст остался в полях этой вкладки: скопируйте его перед тем, как открыть настройки снова.');
+  // The notice stays: nothing on the page works any more
+  document.getElementById('msg-close').hidden = true;
   sessionEnded = true;
   if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
   const auto = document.getElementById('logs-auto');
