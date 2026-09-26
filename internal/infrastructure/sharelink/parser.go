@@ -185,35 +185,73 @@ func extractLinks(text string) []string {
 
 // gluedLinkAt is where a second link glued to this one starts ("…#name1
 // hysteria2://pw2@…" without the line break), len(link) when there is none.
-// Read as one link, the second one — its credential included — would be the
-// first one's name, shown in the popups, the log and the settings page. Only
-// the name (the fragment) is searched: a link ends with it as a rule, so
-// that is where the next one gets glued on, while elsewhere in a link a
-// "://" may belong to a value. A name is free text and its last character
-// no word boundary ("name1hysteria2://"), so here a scheme counts anywhere:
-// the longest one ending at a "://" ("vmess://", not its "ss://").
+// Read as one link, the second one — its credential included — would end up
+// in the first one's name (shown in the popups, the log and the settings
+// page) or in one of its values (a server name, a path: shown too). Searched:
+// the query and the name — a link ends with one of them as a rule, so that
+// is where the next one gets glued on — and a vmess body (base64 has no
+// ':'). There a scheme counts anywhere, the longest one ending at a "://"
+// ("vmess://", not its "ss://"): the last character of a name or a value is
+// no word boundary ("name1hysteria2://"). But a name is free text and may
+// mention an address ("see-wss://cdn.example/ws"), a value may be a path:
+// what follows must look like a link (looksLikeLink) — except in a name,
+// when the scheme starts right after a character no scheme has ("#…",
+// "-…").
 func gluedLinkAt(link string) int {
-	hash := strings.Index(link, "#")
-	if hash < 0 {
+	from := strings.IndexAny(link, "?#")
+	if strings.HasPrefix(link, "vmess://") {
+		from = len("vmess://") - 1
+	}
+	if from < 0 {
 		return len(link)
 	}
-	for from := hash + 1; ; {
-		i := strings.Index(link[from:], "://")
+	name := strings.Index(link, "#")
+	for {
+		i := strings.Index(link[from+1:], "://")
 		if i < 0 {
 			return len(link)
 		}
-		end := from + i + len("://")
+		end := from + 1 + i + len("://")
 		start := -1
 		for _, scheme := range allSchemes {
-			if s := end - len(scheme); s > hash && link[s:end] == scheme && (start < 0 || s < start) {
+			if s := end - len(scheme); s > from && link[s:end] == scheme && (start < 0 || s < start) {
 				start = s
 			}
 		}
 		if start >= 0 {
-			return start
+			inName := name >= 0 && start > name
+			if looksLikeLink(link[start:]) || inName && !schemeChar(link[start-1]) {
+				return start
+			}
 		}
-		from = end
+		from = end - 1
 	}
+}
+
+// looksLikeLink: a proxy link carries a credential before its host
+// ("scheme://secret@host") or is base64 after the scheme (a vmess body, a
+// legacy ss link); an address someone mentions does neither
+func looksLikeLink(s string) bool {
+	rest := s[strings.Index(s, "://")+len("://"):]
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	authority := rest
+	if i := strings.Index(authority, "/"); i >= 0 {
+		authority = authority[:i]
+	}
+	if strings.Contains(authority, "@") {
+		return true
+	}
+	if len(rest) < 16 {
+		return false
+	}
+	for _, c := range rest {
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.ContainsRune("+/=-_", c)) {
+			return false
+		}
+	}
+	return true
 }
 
 // schemeChar: a character a URL scheme may contain

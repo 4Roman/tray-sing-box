@@ -726,22 +726,29 @@ func TestExtractLinksAtWordStart(t *testing.T) {
 	}
 }
 
-// Links glued together without a line break: a scheme in a link's name
-// starts the next link — the longest one ending at its "://", and only in
-// the name — so no credential of the next link becomes a node name
+// Links glued together without a line break: a scheme in a link's name, its
+// query or a vmess body starts the next link — the longest one ending at its
+// "://", when what follows looks like a link — so no credential of the next
+// link becomes a node name or a value of the first one
 func TestGluedLinksAreTakenApart(t *testing.T) {
+	const b64 = "eyJhZGQiOiIxOTIuMC4yLjIwIn0"
 	cases := []struct {
 		text string
 		want []string
 	}{
-		{"vless://u@h:1#avmess://x", []string{"vless://u@h:1#a", "vmess://x"}},
-		{"vless://u@h:1#nssr://x#m", []string{"vless://u@h:1#n", "ssr://x#m"}},
+		{"vless://u@h:1#avmess://" + b64, []string{"vless://u@h:1#a", "vmess://" + b64}},
+		{"vless://u@h:1#nssr://" + b64 + "#m", []string{"vless://u@h:1#n", "ssr://" + b64 + "#m"}},
 		{"vless://u@h:1#hysteria2://x", []string{"vless://u@h:1#", "hysteria2://x"}},
 		// A '#' in the credential: the name is still searched from there
 		{"trojan://Pass#word@h:2#ntrojan://p2@h:3", []string{"trojan://Pass#word@h:2#n", "trojan://p2@h:3"}},
-		// Not the start of a link: another scheme in the name, a scheme
-		// before the name
+		// A link without a name: glued into its last value
+		{"vless://u@h:1?security=tls&sni=example.comtrojan://S3cret@h:3#n2", []string{"vless://u@h:1?security=tls&sni=example.com", "trojan://S3cret@h:3#n2"}},
+		{"vless://u@h:1?type=ws&path=/wstrojan://S3cret@h:3", []string{"vless://u@h:1?type=ws&path=/ws", "trojan://S3cret@h:3"}},
+		{"vmess://" + b64 + "trojan://S3cret@h:3#n2", []string{"vmess://" + b64, "trojan://S3cret@h:3#n2"}},
+		// Not the start of a link: an address mentioned in the name (wss://
+		// is no ss:// link), a path in a value
 		{"vless://u@h:1#see-https://example.com/x", []string{"vless://u@h:1#see-https://example.com/x"}},
+		{"vless://u@h:1#see-wss://cdn.example/ws", []string{"vless://u@h:1#see-wss://cdn.example/ws"}},
 		{"vless://u@h:1?path=/vless://x#n", []string{"vless://u@h:1?path=/vless://x#n"}},
 	}
 	for _, c := range cases {
