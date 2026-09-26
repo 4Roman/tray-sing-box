@@ -363,6 +363,17 @@ var acceptedLinks = []linkCase{
 	{"ss method alias",
 		"ss://" + base64.RawURLEncoding.EncodeToString([]byte("CHACHA20-POLY1305:pw")) + "@192.0.2.40:8388#ss-alias",
 		`{"method":"chacha20-ietf-poly1305","plugin":null}`},
+	// 3x-ui's stream parameters of a plain TCP inbound
+	{"ss with a plain TCP stream in the query",
+		"ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?type=tcp&headerType=none&security=none#ss-tcp",
+		`{"type":"shadowsocks","plugin":null,"transport":null,"tls":null}`},
+	{"ss with Xray's raw",
+		"ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?type=raw#ss-raw",
+		`{"type":"shadowsocks","plugin":null}`},
+	// The http header next to the plugin that carries it
+	{"ss tcp http header with obfs-local",
+		"ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?type=tcp&headerType=http&plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com#ss-tcp-http-plugin",
+		`{"plugin":"obfs-local","plugin_opts":"obfs=http;obfs-host=example.com"}`},
 }
 
 // refusalCase is a link that must be refused; the error names the node
@@ -466,6 +477,17 @@ var refusedLinks = []refusalCase{
 	{"ss-ck", "ss://" + base64.RawURLEncoding.EncodeToString([]byte("aes-256-gcm:pw")) + "@192.0.2.40:8388?plugin=ck-client%3BUID%3D" + testSecret + "#ss-ck", "плагин «ck-client»"},
 	{"ss-obfs-mode", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388/?plugin=obfs-local%3Bobfs%3Dxyz#ss-obfs-mode", "режим obfs"},
 	{"ss-method", "ss://" + base64.RawURLEncoding.EncodeToString([]byte("plain:"+testSecret)) + "@192.0.2.40:8388#ss-method", "метод шифрования"},
+	// 3x-ui's Shadowsocks over an Xray transport or TLS: sing-box's
+	// shadowsocks has neither
+	{"ss-ws-tls", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@cdn.example.com:443?fp=chrome&host=cdn.example.com&path=%2F" + testSecret + "&security=tls&sni=cdn.example.com&type=ws#ss-ws-tls", "транспорт «ws» для Shadowsocks"},
+	{"ss-grpc", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?type=grpc&serviceName=" + testSecret + "#ss-grpc", "транспорт «grpc» для Shadowsocks"},
+	{"ss-kcp", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?type=kcp&seed=" + testSecret + "#ss-kcp", "транспорт «kcp» для Shadowsocks"},
+	{"ss-httpupgrade", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?type=httpupgrade&path=%2Fhu#ss-httpupgrade", "транспорт «httpupgrade» для Shadowsocks"},
+	{"ss-other-transport", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?type=" + testSecret + "%2F%2F#ss-other-transport", "транспорт «…» для Shadowsocks"},
+	{"ss-tls", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?type=tcp&security=tls&sni=example.com#ss-tls", "режим защиты «tls» для Shadowsocks"},
+	{"ss-reality", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:443?security=reality&pbk=" + testPBK + "#ss-reality", "режим защиты «reality» для Shadowsocks"},
+	{"ss-tcp-http", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:80?type=tcp&headerType=http&host=example.com#ss-tcp-http", "маскировка TCP «http» для Shadowsocks"},
+	{"ss-legacy-ws", "ss://" + b64("aes-256-gcm:pw@192.0.2.40:8388") + "?type=ws&path=%2Fws#ss-legacy-ws", "транспорт «ws» для Shadowsocks"},
 
 	{"vm-cipher", vmessJSON(`{"ps":"vm-cipher","add":"192.0.2.20","port":"443","id":"` + testUUID + `","scy":"aes-128-ctr"}`), "шифрование VMess «aes-128-ctr»"},
 	{"vm-reality", vmessJSON(`{"ps":"vm-reality","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"reality"}`), "режим защиты «reality»"},

@@ -123,8 +123,32 @@ func parseShadowsocks(link string) (Outbound, error) {
 	if finalMask(q.Get("fm"), true) != nil {
 		outbound["network"] = "tcp"
 	}
-	if plugin := q.Get("plugin"); strings.TrimSpace(plugin) != "" {
-		parts, err := splitPluginString(plugin)
+	// 3x-ui runs Shadowsocks over any Xray transport and TLS too, and writes
+	// them into the query as on the other links (type=ws&path=…,
+	// security=tls&sni=…). sing-box's shadowsocks has neither: imported
+	// bare, the node would pass `sing-box check` and never connect. TCP's
+	// http header 3x-ui turns into the obfs-local plugin itself; left in the
+	// query without a plugin it cannot be carried over either.
+	pluginSpec := q.Get("plugin")
+	hasPlugin := strings.TrimSpace(pluginSpec) != ""
+	switch network := strings.ToLower(strings.TrimSpace(q.Get("type"))); network {
+	case "", "tcp", "raw":
+		switch header := strings.ToLower(strings.TrimSpace(q.Get("headerType"))); {
+		case header == "" || header == "none":
+		case header == "http" && hasPlugin:
+		default:
+			return nil, fmt.Errorf("маскировка TCP «%s» для Shadowsocks не поддерживается sing-box", token(header))
+		}
+	default:
+		return nil, fmt.Errorf("транспорт «%s» для Shadowsocks не поддерживается sing-box", token(network))
+	}
+	switch security := strings.ToLower(strings.TrimSpace(q.Get("security"))); security {
+	case "", "none":
+	default:
+		return nil, fmt.Errorf("режим защиты «%s» для Shadowsocks не поддерживается sing-box", token(security))
+	}
+	if hasPlugin {
+		parts, err := splitPluginString(pluginSpec)
 		if err != nil {
 			return nil, err
 		}
