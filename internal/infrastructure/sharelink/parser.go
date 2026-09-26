@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"tray-sing-box/internal/domain"
 )
 
 // Outbound is a sing-box outbound object ready to be embedded into config.json
@@ -19,17 +21,18 @@ type Outbound map[string]any
 // Parser adapts this package to the domain.OutboundParser interface
 type Parser struct{}
 
-// Parse extracts and converts every share link found in text
-func (Parser) Parse(text string) ([]map[string]any, error) {
-	outbounds, err := ParseAll(text)
+// Parse extracts and converts every share link found in text; the links
+// that could not be converted are listed in skipped
+func (Parser) Parse(text string) ([]map[string]any, []domain.SkippedNode, error) {
+	outbounds, skipped, err := ParseAllReport(text)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	result := make([]map[string]any, len(outbounds))
 	for i, o := range outbounds {
 		result[i] = o
 	}
-	return result, nil
+	return result, skipped, nil
 }
 
 // Tag returns the outbound tag
@@ -90,6 +93,13 @@ func ParseAny(text string) (Outbound, error) {
 // Links that fail to parse are skipped as long as at least one succeeds.
 // Duplicate tags get a numeric suffix so each outbound stays addressable.
 func ParseAll(text string) ([]Outbound, error) {
+	outbounds, _, err := ParseAllReport(text)
+	return outbounds, err
+}
+
+// ParseAllReport is ParseAll that also names the links it left out, with
+// the reason (never the link: it carries credentials)
+func ParseAllReport(text string) ([]Outbound, []domain.SkippedNode, error) {
 	links := extractLinks(text)
 	if len(links) == 0 {
 		compact := strings.Join(strings.Fields(text), "")
@@ -98,18 +108,20 @@ func ParseAll(text string) ([]Outbound, error) {
 		}
 	}
 	if len(links) == 0 {
-		return nil, fmt.Errorf("no supported share link found in text")
+		return nil, nil, fmt.Errorf("no supported share link found in text")
 	}
 
 	var outbounds []Outbound
+	var skipped []domain.SkippedNode
 	var firstErr error
 	seen := map[string]int{}
-	for _, link := range links {
+	for i, link := range links {
 		outbound, err := Parse(link)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
+			skipped = append(skipped, domain.SkippedNode{Name: linkName(link, i), Reason: err.Error()})
 			continue
 		}
 		tag := outbound.Tag()
@@ -123,9 +135,30 @@ func ParseAll(text string) ([]Outbound, error) {
 	}
 
 	if len(outbounds) == 0 {
-		return nil, fmt.Errorf("no link could be parsed: %w", firstErr)
+		return nil, skipped, fmt.Errorf("no link could be parsed: %w", firstErr)
 	}
-	return outbounds, nil
+	return outbounds, skipped, nil
+}
+
+// linkName is what a skipped link is called in the report: its name (the
+// URL fragment, or the vmess "ps"), never anything else of the link
+func linkName(link string, index int) string {
+	if i := strings.LastIndex(link, "#"); i >= 0 {
+		if name, err := url.QueryUnescape(link[i+1:]); err == nil && strings.TrimSpace(name) != "" {
+			return strings.TrimSpace(name)
+		}
+	}
+	if strings.HasPrefix(link, "vmess://") {
+		if payload, err := decodeBase64(strings.TrimPrefix(link, "vmess://")); err == nil {
+			var v struct {
+				Ps string `json:"ps"`
+			}
+			if json.Unmarshal(payload, &v) == nil && strings.TrimSpace(v.Ps) != "" {
+				return strings.TrimSpace(v.Ps)
+			}
+		}
+	}
+	return fmt.Sprintf("ссылка %d", index+1)
 }
 
 // decodeBase64 decodes standard or URL-safe base64, padded or not

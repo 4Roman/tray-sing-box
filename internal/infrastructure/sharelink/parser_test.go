@@ -257,8 +257,14 @@ func TestParseErrorsDoNotQuoteTheLink(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("error quotes the link's credential: %v", err)
 		}
-		if _, err := (Parser{}).Parse(link); err != nil && strings.Contains(err.Error(), secret) {
+		_, skipped, err := (Parser{}).Parse(link)
+		if err != nil && strings.Contains(err.Error(), secret) {
 			t.Errorf("Parser.Parse error quotes the link's credential: %v", err)
+		}
+		for _, sk := range skipped {
+			if strings.Contains(sk.Name+" "+sk.Reason, secret) {
+				t.Errorf("the skipped-link report quotes the link's credential: %+v", sk)
+			}
 		}
 	}
 }

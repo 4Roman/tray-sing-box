@@ -55,6 +55,7 @@ type SubscriptionUpdate struct {
 	Tags    []string
 	Added   []string
 	Removed []string
+	Skipped []SkippedNode // nodes of the body left out, with the reason
 	Err     error
 
 	changedConfig bool // the sync rewrote config.json
@@ -301,10 +302,14 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		update.Err = fmt.Errorf("не удалось скачать подписку: %w", err)
 		return update
 	}
-	outbounds, err := s.parser.Parse(body)
+	outbounds, skipped, err := s.parser.Parse(body)
 	if err != nil {
 		update.Err = fmt.Errorf("не удалось разобрать подписку: %w", err)
 		return update
+	}
+	update.Skipped = skipped
+	for _, sk := range skipped {
+		log.Printf("Subscription %s: skipped %q: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
 	}
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)

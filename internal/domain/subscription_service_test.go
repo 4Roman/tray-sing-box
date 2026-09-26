@@ -79,7 +79,7 @@ func fetcherFor(bodies map[string]string, errs map[string]error) SubscriptionFet
 // linkParser maps each line of the body to an outbound tagged with the line
 type linkParser struct{}
 
-func (linkParser) Parse(text string) ([]map[string]any, error) {
+func (linkParser) Parse(text string) ([]map[string]any, []SkippedNode, error) {
 	var outbounds []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
 		if line == "" {
@@ -88,9 +88,9 @@ func (linkParser) Parse(text string) ([]map[string]any, error) {
 		outbounds = append(outbounds, map[string]any{"tag": line, "type": "vless"})
 	}
 	if len(outbounds) == 0 {
-		return nil, errors.New("no links")
+		return nil, nil, errors.New("no links")
 	}
-	return outbounds, nil
+	return outbounds, nil, nil
 }
 
 func TestIsSubscriptionURL(t *testing.T) {

@@ -10,15 +10,15 @@ type fakeParser struct {
 	err  error
 }
 
-func (f *fakeParser) Parse(text string) ([]map[string]any, error) {
+func (f *fakeParser) Parse(text string) ([]map[string]any, []SkippedNode, error) {
 	if f.err != nil {
-		return nil, f.err
+		return nil, nil, f.err
 	}
 	outbounds := make([]map[string]any, len(f.tags))
 	for i, tag := range f.tags {
 		outbounds[i] = map[string]any{"tag": tag, "type": "vless"}
 	}
-	return outbounds, nil
+	return outbounds, nil, nil
 }
 
 type fakeEditor struct {

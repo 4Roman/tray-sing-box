@@ -5,10 +5,20 @@ import (
 	"log"
 )
 
-// OutboundParser converts text with share links (or a base64 subscription
-// blob) into sing-box outbounds. Each outbound carries its tag in "tag".
+// SkippedNode is a link or subscription node that was left out, and why.
+// Never the link itself: it carries the server's credentials, and the text
+// reaches the log, the tray popups and the settings page.
+type SkippedNode struct {
+	Name   string // the node's name; "ссылка N" when it has none
+	Reason string // for the user, in Russian
+}
+
+// OutboundParser converts text with share links (or a subscription body)
+// into sing-box outbounds. Each outbound carries its tag in "tag". Links that
+// cannot be converted are left out and listed in skipped; err is returned
+// only when nothing could be converted.
 type OutboundParser interface {
-	Parse(text string) ([]map[string]any, error)
+	Parse(text string) (outbounds []map[string]any, skipped []SkippedNode, err error)
 }
 
 // ConfigEditor persists outbounds into the sing-box configuration
@@ -18,8 +28,9 @@ type ConfigEditor interface {
 
 // ImportResult describes a completed outbound import
 type ImportResult struct {
-	Tags      []string // tags of the imported outbounds
-	Restarted bool     // whether the VPN was restarted to apply the config
+	Tags      []string      // tags of the imported outbounds
+	Skipped   []SkippedNode // links left out, with the reason
+	Restarted bool          // whether the VPN was restarted to apply the config
 }
 
 // ImportService imports proxy outbounds from share links into the config
@@ -43,9 +54,12 @@ func NewImportService(parser OutboundParser, editor ConfigEditor, vpn *VPNServic
 // subscription blob), stores the resulting outbounds in the config and
 // restarts the VPN if it is running.
 func (s *ImportService) ImportFromText(text string) (*ImportResult, error) {
-	outbounds, err := s.parser.Parse(text)
+	outbounds, skipped, err := s.parser.Parse(text)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse share link: %w", err)
+	}
+	for _, sk := range skipped {
+		log.Printf("Import: skipped %q: %s", sk.Name, sk.Reason)
 	}
 
 	tags := make([]string, len(outbounds))
@@ -60,7 +74,7 @@ func (s *ImportService) ImportFromText(text string) (*ImportResult, error) {
 		return nil, withSetupHint(fmt.Errorf("failed to update config: %w", err))
 	}
 
-	result := &ImportResult{Tags: tags}
+	result := &ImportResult{Tags: tags, Skipped: skipped}
 
 	restarted, err := s.vpn.RestartIfRunning()
 	if err != nil {
