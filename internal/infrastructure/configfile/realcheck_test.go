@@ -3,6 +3,7 @@
 package configfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -119,6 +120,106 @@ func TestRealCheckLeavesOutRefusedNodes(t *testing.T) {
 	if err := validate(saved); err != nil {
 		t.Fatalf("the synced config fails sing-box check: %v", err)
 	}
+}
+
+// Chains against the real check, which passes a detour to a missing
+// outbound and a ring (sing-box then does not start): a node chained through
+// a refused one is left out with it, a node chained through a renamed one
+// follows it, and no saved config has either
+func TestRealCheckChains(t *testing.T) {
+	validate := realValidator(t)
+	path := writeConfig(t, realBaseConfig)
+	editor := New(path)
+	editor.SetValidator(validate)
+	noProblems := func() {
+		t.Helper()
+		saved, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validate(saved); err != nil {
+			t.Fatalf("the saved config fails sing-box check: %v", err)
+		}
+		cfg, err := decodeConfig(saved)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if problems := dependencyProblems(cfg); len(problems) != 0 {
+			t.Fatalf("saved with %v", problems)
+		}
+	}
+
+	relay := realityNode("relay", "192.0.2.10", true)
+	relay["foo_bar"] = 1
+	exit := realityNode("exit", "192.0.2.11", true)
+	exit["detour"] = "relay"
+	result, err := editor.AddOutbounds([]map[string]any{relay, exit, realityNode("good", "192.0.2.12", true)}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"good"}) || len(result.Skipped) != 2 ||
+		!strings.Contains(result.Skipped[0].Reason, `unknown field "foo_bar"`) || !strings.Contains(result.Skipped[1].Reason, "«relay»") {
+		t.Fatalf("result = %+v", result)
+	}
+	noProblems()
+
+	// A node named like the user's selector, and one chained through it
+	chained := realityNode("F", "192.0.2.13", true)
+	chained["detour"] = "proxy"
+	sync, err := editor.SyncOutbounds(nil, []map[string]any{realityNode("proxy", "192.0.2.14", true), chained})
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(sync.Tags, []string{"proxy (2)", "F"}) || outboundByTag(t, load(t, path), "F")["detour"] != "proxy (2)" {
+		t.Fatalf("sync = %+v", sync)
+	}
+	noProblems()
+}
+
+// The real sing-box answers an unknown option with its position and a
+// broken REALITY short_id with a crash that names none: neither costs a
+// check per node
+func TestRealCheckBoundedIsolation(t *testing.T) {
+	validate := realValidator(t)
+	calls := 0
+	counting := func(raw []byte) error {
+		calls++
+		return validate(raw)
+	}
+
+	editor := New(writeConfig(t, realBaseConfig))
+	editor.SetValidator(counting)
+	var nodes []map[string]any
+	for i := 0; i < 12; i++ {
+		n := realityNode(fmt.Sprintf("newer-%d", i), "192.0.2.10", true)
+		n["zz_newer"] = true
+		nodes = append(nodes, n)
+	}
+	result, err := editor.AddOutbounds(append(nodes, realityNode("good", "192.0.2.11", true)), nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"good"}) || len(result.Skipped) != 12 || calls > 5 {
+		t.Fatalf("%d checks: %+v", calls, result)
+	}
+
+	calls = 0
+	editor = New(writeConfig(t, realBaseConfig))
+	editor.SetValidator(counting)
+	crashing := realityNode("crashing", "192.0.2.12", true)
+	crashing["tls"].(map[string]any)["reality"].(map[string]any)["short_id"] = "00112233445566778899"
+	nodes = nil
+	for i := 0; i < 20; i++ {
+		nodes = append(nodes, realityNode(fmt.Sprintf("good-%d", i), "192.0.2.13", true))
+	}
+	result, err = editor.AddOutbounds(append(nodes, crashing), nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Tags) != 20 || len(result.Skipped) != 1 || result.Skipped[0].Name != "crashing" || calls > 16 {
+		t.Fatalf("%d checks: skipped %+v", calls, result.Skipped)
+	}
+	t.Logf("crash: %d checks, reason %q", calls, result.Skipped[0].Reason)
 }
 
 // A refusal that is about the config around the new nodes names the

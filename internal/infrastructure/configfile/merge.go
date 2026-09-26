@@ -61,15 +61,28 @@ func importReplaceable(reserved map[string]bool) func(map[string]any) bool {
 	}
 }
 
+// detourOf is the outbound's detour, the key matched the way sing-box
+// matches it (foldKey); "" when it has none
+func detourOf(o map[string]any) string {
+	return foldedString(o, "detour")
+}
+
 // suffixTaken renames the incoming outbounds whose tag belongs to an
-// existing outbound they may not replace (replaceable false) or to an
-// endpoint (sing-box keeps one namespace for both): each gets the first free
-// "<tag> (N)" from N = 2 — free when no protected outbound or endpoint and no
-// other incoming outbound has it. The same input gives the same names every
-// time, so a subscription node renamed this way keeps its tag from one
-// refresh to the next. incoming are renamed in place; the renames returned.
-func suffixTaken(cfg map[string]any, incoming []map[string]any, replaceable func(map[string]any) bool) []domain.TagRename {
+// existing outbound they may not replace (replaceable false), to an endpoint
+// (sing-box keeps one namespace for both) or is reserved (a subscription's
+// node, also while the config lacks it: its next refresh would take the name
+// back): each gets the first free "<tag> (N)" from N = 2 — free when no
+// protected outbound or endpoint and no other incoming outbound has it. The
+// same input gives the same names every time, so a subscription node renamed
+// this way keeps its tag from one refresh to the next. incoming are renamed
+// in place, and so are their detours naming a renamed one (a profile chains
+// its own nodes: under the old name the detour would dial through the
+// user's outbound of that name); the renames returned.
+func suffixTaken(cfg map[string]any, incoming []map[string]any, replaceable func(map[string]any) bool, reserved map[string]bool) []domain.TagRename {
 	protected := map[string]bool{}
+	for tag := range reserved {
+		protected[tag] = true
+	}
 	outbounds, _ := cfg["outbounds"].([]any)
 	for _, item := range outbounds {
 		if o, ok := item.(map[string]any); ok && tagString(o) != "" && !replaceable(o) {
@@ -88,6 +101,7 @@ func suffixTaken(cfg map[string]any, incoming []map[string]any, replaceable func
 		taken[tagString(o)] = true
 	}
 	var renames []domain.TagRename
+	renamedTo := map[string]string{}
 	for _, o := range incoming {
 		tag := tagString(o)
 		if !protected[tag] {
@@ -99,7 +113,17 @@ func suffixTaken(cfg map[string]any, incoming []map[string]any, replaceable func
 		}
 		o["tag"] = name
 		taken[name] = true
+		renamedTo[tag] = name
 		renames = append(renames, domain.TagRename{From: tag, To: name})
+	}
+	if len(renamedTo) > 0 {
+		for _, o := range incoming {
+			for k, v := range o {
+				if s, ok := v.(string); ok && foldKey(k) == "detour" && renamedTo[s] != "" {
+					o[k] = renamedTo[s]
+				}
+			}
+		}
 	}
 	return renames
 }
@@ -107,12 +131,13 @@ func suffixTaken(cfg map[string]any, incoming []map[string]any, replaceable func
 // pairRenamed finds the dropped subscription nodes that reappear under a new
 // name (3x-ui and others put the traffic and the days left into the node
 // names): first the ones equal to an appearing node apart from the tag and
-// a detour (contentKey), in order; then, among the rest, the ones with the
-// same server and credentials (identityKey) when that identity is unique on
-// both sides — providers publish several nodes on one server and uuid that
-// differ only in transport or SNI, and a guess could move the user's choice
-// to another node. Returns old tag -> new tag, and the pairs in order.
-func pairRenamed(dropped, appearing []map[string]any) (map[string]string, []domain.TagRename) {
+// a detour of the user's (contentKey; provider are the provider's tags, old
+// and new), in order; then, among the rest, the ones with the same server
+// and credentials (identityKey) when that identity is unique on both sides —
+// providers publish several nodes on one server and uuid that differ only in
+// transport or SNI, and a guess could move the user's choice to another
+// node. Returns old tag -> new tag, and the pairs in order.
+func pairRenamed(dropped, appearing []map[string]any, provider map[string]bool) (map[string]string, []domain.TagRename) {
 	renames := map[string]string{}
 	var pairs []domain.TagRename
 	paired := make([]bool, len(appearing))
@@ -124,12 +149,12 @@ func pairRenamed(dropped, appearing []map[string]any) (map[string]string, []doma
 
 	byContent := map[string][]int{}
 	for j, o := range appearing {
-		k := contentKey(o)
+		k := contentKey(o, provider)
 		byContent[k] = append(byContent[k], j)
 	}
 	var rest []map[string]any
 	for _, o := range dropped {
-		k := contentKey(o)
+		k := contentKey(o, provider)
 		if js := byContent[k]; len(js) > 0 {
 			byContent[k] = js[1:]
 			pair(o, js[0])
@@ -162,12 +187,21 @@ func pairRenamed(dropped, appearing []map[string]any) (map[string]string, []doma
 	return renames, pairs
 }
 
-// contentKey is an outbound without its tag and detour (a detour on a node
-// was set by the app or the user, never by the provider)
-func contentKey(o map[string]any) string {
+// contentKey is an outbound without its tag and without a detour the app or
+// the user set (the DPI chain, a hand-made chain: kept across refreshes, see
+// upsertOutbounds). A detour through another node of the provider (a tag in
+// provider) is the provider's content — a node and its chained twin are
+// different nodes — and counts as a mark only: that node may be renamed too.
+func contentKey(o map[string]any, provider map[string]bool) string {
 	rest := make(map[string]any, len(o))
 	for k, v := range o {
-		if k != "tag" && k != "detour" {
+		switch {
+		case k == "tag":
+		case foldKey(k) == "detour":
+			if s, _ := v.(string); provider[s] {
+				rest["detour"] = true
+			}
+		default:
 			rest[k] = v
 		}
 	}
@@ -252,17 +286,20 @@ const (
 
 // visitRefs calls fn for every outbound tag the config names outside the
 // outbounds list and its groups. fn returns the new value and whether to keep
-// it: false deletes the field, or drops the route rule it decides.
+// it: false deletes the field, or drops the route rule it decides. A field
+// is found in every spelling sing-box reads as it ({"Detour": ...}).
 func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bool)) {
-	field := func(m map[string]any, key string, kind refKind) {
-		tag, ok := m[key].(string)
-		if !ok || tag == "" {
-			return
-		}
-		if to, keep := fn(kind, tag); keep {
-			m[key] = to
-		} else {
-			delete(m, key)
+	field := func(m map[string]any, name string, kind refKind) {
+		for key, value := range m {
+			tag, ok := value.(string)
+			if !ok || tag == "" || foldKey(key) != name {
+				continue
+			}
+			if to, keep := fn(kind, tag); keep {
+				m[key] = to
+			} else {
+				delete(m, key)
+			}
 		}
 	}
 	each := func(v any, visit func(map[string]any)) {

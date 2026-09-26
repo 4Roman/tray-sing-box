@@ -15,8 +15,9 @@ import (
 // fakeCheck imitates sing-box check the way it answers: an outbound with a
 // flow other than "" or "xtls-rprx-vision" is refused with its position in
 // the whole file; a uuid "bad-uuid-…" is refused while decoding, quoting the
-// value and the path of the file under check; the flow "crash" crashes it
-// (a Go panic: no position, a stack trace).
+// value and the path of the file under check, and so is a key "zz_…" (an
+// option of a newer sing-box); the flow "crash" crashes it (a Go panic: no
+// position, a stack trace).
 type fakeCheck struct {
 	calls int
 }
@@ -39,6 +40,11 @@ func (f *fakeCheck) validate(raw []byte) error {
 			return fmt.Errorf("sing-box check: FATAL[0000] initialize outbound[%d]: unsupported flow: %s", i, flow)
 		case strings.HasPrefix(uuid, "bad-uuid-"):
 			return fmt.Errorf("sing-box check: FATAL[0000] decode config at C:\\data\\.singbox-check-4242.json: outbounds[%d].uuid: invalid uuid: %s", i, uuid)
+		}
+		for k := range o {
+			if strings.HasPrefix(k, "zz_") {
+				return fmt.Errorf("sing-box check: FATAL[0000] decode config at C:\\data\\.singbox-check-4242.json: outbounds[%d].%s: json: unknown field %q", i, k, k)
+			}
 		}
 	}
 	return nil
@@ -163,7 +169,7 @@ func TestRefusalReasonHidesSecrets(t *testing.T) {
 	}
 }
 
-// A crash names no outbound: the nodes are then checked one by one, and the
+// A crash names no outbound: the nodes are then checked in halves, and the
 // reason is the first line of the crash, not its stack
 func TestCrashIsCheckedOneByOne(t *testing.T) {
 	editor, _, _ := checkedEditor(t, sampleConfig)
@@ -175,6 +181,68 @@ func TestCrashIsCheckedOneByOne(t *testing.T) {
 	want := []domain.SkippedNode{{Name: "crashing", Reason: "sing-box не принимает: panic: runtime error: index out of range [8] with length 8"}}
 	if !reflect.DeepEqual(result.Skipped, want) || !reflect.DeepEqual(result.Tags, []string{"good-1", "good-2"}) {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// A crashing node among many costs a few checks, not one per node: a
+// subscription of hundreds would hold the app's lock for minutes
+func TestCrashAmongManyIsBisected(t *testing.T) {
+	editor, _, check := checkedEditor(t, sampleConfig)
+
+	var nodes []map[string]any
+	for i := 0; i < 64; i++ {
+		nodes = append(nodes, node(fmt.Sprintf("good-%d", i), ""))
+	}
+	nodes = append(nodes[:40:40], append([]map[string]any{node("crashing", "crash")}, nodes[40:]...)...)
+	result, err := editor.AddOutbounds(nodes, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Tags) != 64 || len(result.Skipped) != 1 || result.Skipped[0].Name != "crashing" {
+		t.Fatalf("result: %d saved, skipped %+v", len(result.Tags), result.Skipped)
+	}
+	// The merge, the batch, two halves per level down to the node, the retry
+	if check.calls > 20 {
+		t.Fatalf("validator ran %d times for one crashing node among 65", check.calls)
+	}
+}
+
+// A provider serving an option of a newer sing-box in every node: the nodes
+// of one type with the same unknown key are refused together, with the same
+// reason — one round, not one check per node
+func TestUnknownFieldRefusedTogether(t *testing.T) {
+	editor, path, check := checkedEditor(t, sampleConfig)
+
+	var nodes []map[string]any
+	for i := 0; i < 30; i++ {
+		n := node(fmt.Sprintf("newer-%d", i), "")
+		n["zz_newer"] = true
+		nodes = append(nodes, n)
+	}
+	nodes = append(nodes, node("good", ""))
+	result, err := editor.AddOutbounds(nodes, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"good"}) || len(result.Skipped) != 30 {
+		t.Fatalf("result: %v, skipped %d", result.Tags, len(result.Skipped))
+	}
+	for _, sk := range result.Skipped {
+		if sk.Reason != `sing-box не принимает: zz_newer: json: unknown field "zz_newer"` {
+			t.Fatalf("skipped %+v", sk)
+		}
+	}
+	if check.calls > 5 {
+		t.Fatalf("validator ran %d times for 30 nodes with one unknown field", check.calls)
+	}
+	if outboundByTag(t, load(t, path), "good") == nil {
+		t.Fatal("the good node was not saved")
+	}
+
+	// Only the same type: another type may know the key
+	if sameUnknownField(map[string]any{"type": "trojan", "zz_newer": true}, nodes[0], "zz_newer") ||
+		!sameUnknownField(nodes[1], nodes[0], "zz_newer") || sameUnknownField(nodes[30], nodes[0], "zz_newer") {
+		t.Fatal("sameUnknownField")
 	}
 }
 

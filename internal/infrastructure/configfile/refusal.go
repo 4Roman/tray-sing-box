@@ -23,14 +23,26 @@ type mergeOutcome struct {
 // works on copies of them) and saves the result when it differs. One outbound
 // the checks refuse must not cost the others — a subscription would stop
 // updating over one odd node of its provider, an import of ten servers fail
-// over one. So when the guard or sing-box check refuses the merged config,
-// the incoming outbounds are checked without the rest of the config
-// (refusedAlone); the ones refused there are left out and the others merged
-// and saved in one more pass. When every one is refused nothing is saved;
-// when none is refused on its own, the refusal is about the config around
-// them and is returned.
-func (e *Editor) saveMerged(raw []byte, incoming []map[string]any, merge func(cfg map[string]any, incoming []map[string]any) error) (*mergeOutcome, error) {
-	attempt := func(list []map[string]any) (work []map[string]any, updated []byte, changed bool, err error) {
+// over one. So when the checks refuse the merged config, the incoming
+// outbounds to blame are left out (refusedBy) and the others merged again,
+// until a merge passes; merge gets the ones left out as well (refused), a
+// subscription keeps its current copy of each. A node chained through one
+// left out (its detour) goes with it: it cannot work without it, and sing-box
+// does not start with a detour to a missing outbound. When every one is
+// refused nothing is saved; when none is to blame, the refusal is about the
+// config around them and is returned.
+func (e *Editor) saveMerged(raw []byte, incoming []map[string]any, merge func(cfg map[string]any, incoming, refused []map[string]any) error) (*mergeOutcome, error) {
+	copies := func(list []map[string]any) []map[string]any {
+		out := make([]map[string]any, len(list))
+		for i, o := range list {
+			out[i] = make(map[string]any, len(o))
+			for k, v := range o {
+				out[i][k] = v
+			}
+		}
+		return out
+	}
+	attempt := func(list, refused []map[string]any) (work []map[string]any, updated []byte, changed bool, err error) {
 		cfg, err := decodeConfig(raw)
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("failed to parse config: %w", err)
@@ -39,14 +51,8 @@ func (e *Editor) saveMerged(raw []byte, incoming []map[string]any, merge func(cf
 		if err != nil {
 			return nil, nil, false, fmt.Errorf("failed to serialize config: %w", err)
 		}
-		work = make([]map[string]any, len(list))
-		for i, o := range list {
-			work[i] = make(map[string]any, len(o))
-			for k, v := range o {
-				work[i][k] = v
-			}
-		}
-		if err := merge(cfg, work); err != nil {
+		work = copies(list)
+		if err := merge(cfg, work, copies(refused)); err != nil {
 			return nil, nil, false, err
 		}
 		after, err := marshalIndent(cfg)
@@ -60,51 +66,121 @@ func (e *Editor) saveMerged(raw []byte, incoming []map[string]any, merge func(cf
 		return work, updated, true, err
 	}
 
-	work, updated, changed, err := attempt(incoming)
-	var skipped []domain.SkippedNode
-	if refusal(err) && len(incoming) > 0 {
-		reasons := e.refusedAlone(work)
-		if len(reasons) == 0 {
-			return nil, err
-		}
-		var rest []map[string]any
+	// Each pass leaves out at least one more, or ends
+	reasons := map[int]string{} // by index in incoming
+	for {
+		var idx []int
+		var list, refused []map[string]any
 		for i, o := range incoming {
-			if reason, refused := reasons[i]; refused {
-				skipped = append(skipped, domain.SkippedNode{Name: tagString(o), Reason: reason})
+			if _, out := reasons[i]; out {
+				refused = append(refused, o)
 				continue
 			}
-			rest = append(rest, o)
+			idx = append(idx, i)
+			list = append(list, o)
 		}
-		if len(rest) == 0 {
+		skipped := skippedNodes(incoming, reasons)
+		if len(incoming) > 0 && len(list) == 0 {
 			return &mergeOutcome{skipped: skipped}, nil
 		}
-		work, updated, changed, err = attempt(rest)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if changed {
-		if err := e.write(updated, raw); err != nil {
+
+		work, updated, changed, err := attempt(list, refused)
+		if err == nil {
+			if changed {
+				if err := e.write(updated, raw); err != nil {
+					return nil, err
+				}
+			}
+			return &mergeOutcome{kept: work, skipped: skipped, changed: changed}, nil
+		}
+		if !refusal(err) {
 			return nil, err
 		}
+		blamed := e.refusedBy(err, work)
+		if len(blamed) == 0 {
+			return nil, err
+		}
+		for j, reason := range blamed {
+			reasons[idx[j]] = reason
+		}
+		leaveOutChained(incoming, reasons)
 	}
-	return &mergeOutcome{kept: work, skipped: skipped, changed: changed}, nil
 }
 
-// refusal: the guard or sing-box check refused the config (not a failure to
-// read or write it)
+// skippedNodes lists the incoming outbounds left out, in their order, by
+// their incoming names
+func skippedNodes(incoming []map[string]any, reasons map[int]string) []domain.SkippedNode {
+	var skipped []domain.SkippedNode
+	for i, o := range incoming {
+		if reason, out := reasons[i]; out {
+			skipped = append(skipped, domain.SkippedNode{Name: tagString(o), Reason: reason})
+		}
+	}
+	return skipped
+}
+
+// leaveOutChained leaves out, until nothing changes, every incoming outbound
+// whose detour names one left out (reasons, by index). The detours of
+// incoming outbounds name other incoming ones by their incoming tags (a
+// sing-box profile chains its own nodes; see suffixTaken for the renames).
+func leaveOutChained(incoming []map[string]any, reasons map[int]string) {
+	for changed := true; changed; {
+		changed = false
+		out := map[string]bool{}
+		for i := range reasons {
+			out[tagString(incoming[i])] = true
+		}
+		for i, o := range incoming {
+			if _, gone := reasons[i]; gone {
+				continue
+			}
+			if detour := detourOf(o); out[detour] {
+				reasons[i] = fmt.Sprintf("узел работает через «%s», а тот пропущен", detour)
+				changed = true
+			}
+		}
+	}
+}
+
+// refusal: the checks refused the config (not a failure to read or write it)
 func refusal(err error) bool {
 	var risky *riskyError
 	var check *checkError
-	return errors.As(err, &risky) || errors.As(err, &check)
+	var dependency *dependencyError
+	return errors.As(err, &risky) || errors.As(err, &check) || errors.As(err, &dependency)
+}
+
+// refusedBy returns the outbounds of work (merged, with their final tags) a
+// refusal is about, with the reason, by index: the ones a dependency problem
+// names (the other outbounds it names are the config's), or the ones the
+// guard or sing-box check refuse on their own (refusedAlone)
+func (e *Editor) refusedBy(err error, work []map[string]any) map[int]string {
+	var dependency *dependencyError
+	if !errors.As(err, &dependency) {
+		return e.refusedAlone(work)
+	}
+	byTag := map[string]int{}
+	for j, o := range work {
+		byTag[tagString(o)] = j
+	}
+	reasons := map[int]string{}
+	for _, p := range dependency.problems {
+		for _, tag := range p.tags {
+			if j, ok := byTag[tag]; ok {
+				if _, done := reasons[j]; !done {
+					reasons[j] = p.reason(tag)
+				}
+			}
+		}
+	}
+	return reasons
 }
 
 // refusedAlone checks outbounds without the config around them and returns
 // the reason for each one refused, by index. The guard first (cheap); then
-// sing-box check on all of them in one config, dropping the one it names
-// until it passes — a subscription with one odd node costs two checks, not
-// one per node (each is a sing-box start, ~0.4 s). An answer that names no
-// outbound (a crash) leaves the rest to one check each.
+// sing-box check on all of them in one config (isolate) — a subscription with
+// one odd node costs two checks, not one per node (each is a sing-box start,
+// ~0.4 s).
 func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 	reasons := map[int]string{}
 	var pending []int
@@ -115,10 +191,21 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 		}
 		pending = append(pending, i)
 	}
-	if e.validator == nil {
-		return reasons
+	if e.validator != nil {
+		e.isolate(outbounds, pending, reasons)
 	}
+	return reasons
+}
 
+// isolate finds the outbounds (the indexes pending) sing-box check refuses
+// and records why in reasons. sing-box names only the first outbound it
+// refuses, so each round leaves that one out and checks the rest again —
+// together with the others of its type that carry the same unknown field
+// (sameUnknownField): a provider serving a field of a newer sing-box in
+// every node costs a round, not one per node. An answer that names no
+// outbound (a crash) splits the list in halves, each checked on its own:
+// a few rounds for one such node, never one per node.
+func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[int]string) {
 	for len(pending) > 0 {
 		list := make([]any, len(pending))
 		for j, i := range pending {
@@ -126,21 +213,58 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 		}
 		err := e.validate(map[string]any{"outbounds": list})
 		if err == nil {
-			return reasons
+			return
+		}
+		if len(pending) == 1 {
+			reasons[pending[0]] = refusalReason(err, outbounds[pending[0]])
+			return
 		}
 		j, ok := refusedIndex(err.Error())
 		if !ok || j >= len(pending) {
-			break
+			half := len(pending) / 2
+			e.isolate(outbounds, append([]int(nil), pending[:half]...), reasons)
+			e.isolate(outbounds, append([]int(nil), pending[half:]...), reasons)
+			return
 		}
-		reasons[pending[j]] = refusalReason(err, outbounds[pending[j]])
-		pending = append(pending[:j:j], pending[j+1:]...)
-	}
-	for _, i := range pending {
-		if err := e.validate(aloneConfig(outbounds[i])); err != nil {
-			reasons[i] = refusalReason(err, outbounds[i])
+		refused := outbounds[pending[j]]
+		key := unknownField(err.Error())
+		rest := pending[:0:0]
+		for n, i := range pending {
+			if n == j || (key != "" && sameUnknownField(outbounds[i], refused, key)) {
+				reasons[i] = refusalReason(err, outbounds[i])
+				continue
+			}
+			rest = append(rest, i)
 		}
+		pending = rest
 	}
-	return reasons
+}
+
+// unknownFieldMessage is sing-box's refusal of a key it does not know in an
+// outbound itself (not in one of its objects): `outbounds[3].foo: json:
+// unknown field "foo"`
+var unknownFieldMessage = regexp.MustCompile(`^outbounds\[\d+\]\.([^.\s\[\]]+): json: unknown field "([^"]*)"$`)
+
+// unknownField is the key of an outbound sing-box refused as unknown, ""
+// for any other answer
+func unknownField(output string) string {
+	m := unknownFieldMessage.FindStringSubmatch(checkMessage(output))
+	if m == nil || m[1] != m[2] {
+		return ""
+	}
+	return m[1]
+}
+
+// sameUnknownField: o has the key sing-box refused in refused as unknown,
+// spelled the same, and is of the same type. The options of an outbound are
+// decoded by its type alone, so sing-box refuses the key in o just the same.
+func sameUnknownField(o, refused map[string]any, key string) bool {
+	if _, has := o[key]; !has {
+		return false
+	}
+	typ, _ := o["type"].(string)
+	refusedType, _ := refused["type"].(string)
+	return typ != "" && typ == refusedType
 }
 
 // validate runs the validator on a config; a missing sing-box.exe is no

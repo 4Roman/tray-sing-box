@@ -100,7 +100,8 @@ func (e *Editor) save(cfg map[string]any, original []byte) error {
 }
 
 // check runs the pre-save checks on a candidate config and returns it
-// serialized: the guard, the selector defaults, then the validator
+// serialized: the guard, the selector defaults, the outbound dependencies,
+// then the validator
 func (e *Editor) check(cfg map[string]any, original []byte) ([]byte, error) {
 	updated, err := marshalIndent(cfg)
 	if err != nil {
@@ -112,7 +113,11 @@ func (e *Editor) check(cfg map[string]any, original []byte) ([]byte, error) {
 	if err := checkNoNewRisky(original, cfg); err != nil {
 		return nil, err
 	}
+	// What sing-box check passes and sing-box then does not start with
 	if err := checkSelectorDefaults(original, cfg); err != nil {
+		return nil, err
+	}
+	if err := checkDependencies(original, cfg); err != nil {
 		return nil, err
 	}
 	if e.validator != nil {
@@ -192,6 +197,9 @@ func (e *Editor) CreateConfig(raw []byte) error {
 		return err
 	}
 	if err := checkSelectorDefaults(nil, cfg); err != nil {
+		return err
+	}
+	if err := checkDependencies(nil, cfg); err != nil {
 		return err
 	}
 	if e.validator != nil {
@@ -375,11 +383,12 @@ func (e *Editor) AddOutbound(outbound map[string]any) error {
 // existing outbound with the same tag is replaced (re-importing a server
 // updates it, keeping a detour set on it) unless an import may not replace
 // it (importReplaceable: direct, block, dns, a group, the DPI-bypass
-// outbound, a subscription's node — reserved); then the imported one is
-// saved as "<tag> (N)" and listed in Renamed. New tags are registered in
-// every selector/urltest group so they become selectable. Outbounds the
-// config check refuses are left out and listed in Skipped (saveMerged); when
-// it refuses every one nothing is saved. The previous config is kept as .bak.
+// outbound, a subscription's node — reserved, also when the config lacks
+// it); then the imported one is saved as "<tag> (N)" and listed in Renamed.
+// New tags are registered in every selector/urltest group so they become
+// selectable. Outbounds the config check refuses are left out and listed in
+// Skipped (saveMerged); when it refuses every one nothing is saved. The
+// previous config is kept as .bak.
 func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) (*domain.AddResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -392,11 +401,12 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 		return nil, err
 	}
 
-	replaceable := importReplaceable(setOf(reserved))
+	reservedSet := setOf(reserved)
+	replaceable := importReplaceable(reservedSet)
 	var renamed []domain.TagRename
-	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming []map[string]any) error {
-		renamed = suffixTaken(cfg, incoming, replaceable)
-		return upsertOutbounds(cfg, incoming)
+	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming, _ []map[string]any) error {
+		renamed = suffixTaken(cfg, incoming, replaceable, reservedSet)
+		return upsertOutbounds(cfg, incoming, nil)
 	})
 	if err != nil {
 		return nil, err
@@ -414,8 +424,19 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 
 // upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
 // replace by tag or append, then register each tag in selector/urltest groups.
-func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
+// owned are the other tags of the source (a subscription's nodes).
+func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned map[string]bool) error {
 	outbounds, _ := cfg["outbounds"].([]any)
+
+	// The tags of the source: a detour naming one of them chains two of its
+	// nodes, which only the source decides (a sing-box profile does)
+	provider := map[string]bool{}
+	for tag := range owned {
+		provider[tag] = true
+	}
+	for _, o := range newOutbounds {
+		provider[tagString(o)] = true
+	}
 
 	for _, outbound := range newOutbounds {
 		tag, _ := outbound["tag"].(string)
@@ -433,10 +454,12 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
 				if groupTypes[fmt.Sprint(existing["type"])] {
 					return fmt.Errorf("tag %q is already used by a %v group", tag, existing["type"])
 				}
-				// A detour is a local routing choice (the DPI chain, a hand-made
-				// chain), never part of a share link: it outlives the update
-				if _, has := outbound["detour"]; !has {
-					if detour, ok := existing["detour"]; ok {
+				// A detour through an outbound of the user's (the DPI chain, a
+				// hand-made chain) is a local routing choice: it outlives the
+				// update. One through another node of the source was the
+				// source's: without it now, the node dials directly.
+				if detourOf(outbound) == "" {
+					if detour := detourOf(existing); detour != "" && !provider[detour] {
 						outbound["detour"] = detour
 					}
 				}
@@ -486,9 +509,11 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
 //     route references are repointed to a surviving outbound;
 //   - the rest of newOutbounds are added or replaced as in AddOutbounds.
 //
-// Outbounds the config check refuses are left out (see saveMerged). The file
-// is only rewritten when the config actually changed; NeedsRestart is false
-// when nothing but tags changed.
+// Outbounds the config check refuses are left out (see saveMerged); an owned
+// one whose update was refused stays as it is — its last working version —
+// and stays owned (listed in Tags). The file is only rewritten when the
+// config actually changed; NeedsRestart is false when nothing but tags
+// changed.
 func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any) (*domain.SyncResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -508,9 +533,10 @@ func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any
 		return owned[tag] && !systemTypes[typ] && tag != config.DPIBypassTag
 	}
 	var result domain.SyncResult
-	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming []map[string]any) error {
+	var held []string
+	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming, refused []map[string]any) error {
 		var err error
-		result, err = syncMerge(cfg, incoming, mine)
+		result, held, err = syncMerge(cfg, incoming, refused, mine)
 		return err
 	})
 	if err != nil {
@@ -524,6 +550,7 @@ func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any
 	for _, o := range outcome.kept {
 		result.Tags = append(result.Tags, tagString(o))
 	}
+	result.Tags = append(result.Tags, held...)
 	result.Skipped = outcome.skipped
 	result.Changed = outcome.changed
 	result.NeedsRestart = result.NeedsRestart && outcome.changed
@@ -532,24 +559,36 @@ func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any
 
 // syncMerge applies a subscription's fresh outbounds to a loaded config in
 // place (see SyncOutbounds); mine tells the outbounds the subscription owns
-// and may replace or delete
-func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[string]any) bool) (domain.SyncResult, error) {
+// and may replace or delete. refused are the fresh outbounds the checks
+// refused (saveMerged): the owned outbound each would have updated is held —
+// left as it is, not removed, nothing repointed — and its tag returned.
+func syncMerge(cfg map[string]any, incoming, refused []map[string]any, mine func(map[string]any) bool) (domain.SyncResult, []string, error) {
 	var result domain.SyncResult
 	original, err := cloneConfig(cfg)
 	if err != nil {
-		return result, err
+		return result, nil, err
 	}
 
-	result.Suffixed = suffixTaken(cfg, incoming, mine)
+	// The refused ones are named along with the others — the same input
+	// gives the same names, whichever are refused — to find the owned
+	// outbound each would have updated
+	all := append(append(make([]map[string]any, 0, len(incoming)+len(refused)), incoming...), refused...)
+	suffixed := suffixTaken(cfg, all, mine, nil)
 	newTags := map[string]bool{}
 	for _, o := range incoming {
 		newTags[tagString(o)] = true
+	}
+	for _, r := range suffixed {
+		if newTags[r.To] {
+			result.Suffixed = append(result.Suffixed, r)
+		}
 	}
 
 	// Owned outbounds the subscription no longer lists, and the incoming ones
 	// with a name the config does not know yet
 	outbounds, _ := cfg["outbounds"].([]any)
 	presentBefore := map[string]bool{}
+	owned := map[string]bool{}
 	var dropped []map[string]any
 	for _, item := range outbounds {
 		o, ok := item.(map[string]any)
@@ -558,8 +597,11 @@ func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[stri
 		}
 		tag := tagString(o)
 		presentBefore[tag] = true
-		if mine(o) && !newTags[tag] {
-			dropped = append(dropped, o)
+		if mine(o) {
+			owned[tag] = true
+			if !newTags[tag] {
+				dropped = append(dropped, o)
+			}
 		}
 	}
 	var appearing []map[string]any
@@ -568,18 +610,58 @@ func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[stri
 			appearing = append(appearing, o)
 		}
 	}
+	// The provider's tags, old and new: a detour naming one is its chain
+	provider := map[string]bool{}
+	for tag := range owned {
+		provider[tag] = true
+	}
+	for _, o := range all {
+		provider[tagString(o)] = true
+	}
+
+	// A refused update keeps the owned copy it would have replaced: the same
+	// tag, or the same node under its previous name (pairRenamed)
+	held := map[string]bool{}
+	var refusedNew []map[string]any
+	for _, o := range refused {
+		if tag := tagString(o); owned[tag] {
+			held[tag] = true
+		} else {
+			refusedNew = append(refusedNew, o)
+		}
+	}
+	var candidates []map[string]any
+	for _, o := range dropped {
+		if !held[tagString(o)] {
+			candidates = append(candidates, o)
+		}
+	}
 
 	// A renamed node takes its new name everywhere first; replacing it by
 	// tag (upsertOutbounds) then keeps its position and its detour. The
 	// others are removed (their tags taken before the renaming changes the
 	// outbounds in place)
-	renames, renamed := pairRenamed(dropped, appearing)
+	renames, renamed := pairRenamed(candidates, appearing, provider)
+	var unpaired []map[string]any
+	for _, o := range candidates {
+		if renames[tagString(o)] == "" {
+			unpaired = append(unpaired, o)
+		}
+	}
+	heldRenames, _ := pairRenamed(unpaired, refusedNew, provider)
 	removed := map[string]bool{}
-	for _, o := range dropped {
-		if tag := tagString(o); renames[tag] == "" {
+	for _, o := range unpaired {
+		if tag := tagString(o); heldRenames[tag] != "" {
+			held[tag] = true
+		} else {
 			removed[tag] = true
 		}
 	}
+	heldTags := make([]string, 0, len(held))
+	for tag := range held {
+		heldTags = append(heldTags, tag)
+	}
+	sort.Strings(heldTags)
 	applyRenames(cfg, renames)
 	result.Renamed = renamed
 	outbounds, _ = cfg["outbounds"].([]any)
@@ -592,8 +674,8 @@ func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[stri
 	}
 	cfg["outbounds"] = kept
 
-	if err := upsertOutbounds(cfg, incoming); err != nil {
-		return result, err
+	if err := upsertOutbounds(cfg, incoming, owned); err != nil {
+		return result, nil, err
 	}
 	if len(removed) > 0 {
 		pruneOutboundReferences(cfg, removed, incoming)
@@ -617,7 +699,7 @@ func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[stri
 	// never addresses an outbound by tag at runtime), no restart needed
 	applyRenames(original, renames)
 	result.NeedsRestart = canonical(original) != canonical(cfg)
-	return result, nil
+	return result, heldTags, nil
 }
 
 // ReadSection returns a config section as pretty-printed JSON text for
