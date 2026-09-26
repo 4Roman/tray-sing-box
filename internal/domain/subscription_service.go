@@ -28,11 +28,8 @@ type Subscription struct {
 	// refresh reports only a kind not in it (SubscriptionUpdate.NewProblem):
 	// a provider that switches between two problems, or between a problem
 	// and a clean list, is reported once, not at every refresh. Forgotten
-	// once the subscription has had no problem for problemMemory.
-	//
-	// The previous format kept one hash of all the kinds together in
-	// "problem"; that key is not read (the next save drops it), and such a
-	// subscription's problems are reported once more.
+	// once the subscription has had no problem for problemMemory; a failed
+	// download as soon as a download works again. Least recently seen first.
 	Reported []string `json:"reported,omitempty"`
 	// ProblemSeen ("problem_seen"): when a refresh last found a problem;
 	// what measures problemMemory
@@ -350,7 +347,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 
 	body, err := s.fetch(sub.URL)
 	if err != nil {
-		update.Err = fmt.Errorf("не удалось скачать подписку: %w", &oneLineError{err})
+		update.Err = fmt.Errorf("%s: %w", fetchFailed, &oneLineError{err})
 		// Often a moment without network (right after logon): a problem
 		// only once the servers are getting old
 		if stale := sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter; stale {
@@ -358,6 +355,11 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		}
 		return update
 	}
+	// It downloads again: when the link fails for good later on (the
+	// provider took it away), that is news even if an earlier outage was
+	// reported — the failure counts only after a day without a download
+	// anyway (subscriptionStaleAfter)
+	forgetKind(sub, "error: "+fetchFailed)
 	outbounds, skipped, err := s.parser.Parse(body)
 	update.Skipped = skipped
 	for _, sk := range skipped {
@@ -433,10 +435,15 @@ const subscriptionStaleAfter = 24 * time.Hour
 // otherwise have the unattended popup reappear every few refreshes.
 const problemMemory = 7 * 24 * time.Hour
 
-// reportedLimit bounds the kinds remembered for a subscription, the oldest
-// go first. The app's messages come in far fewer kinds; this only keeps the
-// file small should the leading words of one carry a value after all.
-const reportedLimit = 32
+// fetchFailed begins the error of a failed download: its kind (problemKind)
+const fetchFailed = "не удалось скачать подписку"
+
+// reportedLimit bounds the kinds remembered for a subscription; the ones
+// least recently seen go first, never one the current refresh found (it
+// would be news again at the next one). The parser alone has a few dozen
+// reasons to leave a node out; this only keeps the file small should the
+// leading words of a message carry a value after all.
+const reportedLimit = 128
 
 // problemKinds lists what went wrong in a refresh — the kind of the error
 // and of each reason nodes were left out for, each once, sorted; none when
@@ -494,17 +501,36 @@ func noteProblem(sub *Subscription, update *SubscriptionUpdate) {
 		return
 	}
 	sub.ProblemSeen = now
+	reported := append([]string(nil), sub.Reported...)
 	for _, kind := range kinds {
-		sum := sha256.Sum256([]byte(kind))
-		id := hex.EncodeToString(sum[:8])
-		if !slices.Contains(sub.Reported, id) {
-			sub.Reported = append(sub.Reported, id)
+		id := kindID(kind)
+		if i := slices.Index(reported, id); i >= 0 {
+			// Seen again: to the recent end, out of reach of the trim below
+			reported = slices.Delete(reported, i, i+1)
+		} else {
 			update.NewProblem = true
 		}
+		reported = append(reported, id)
 	}
-	if extra := len(sub.Reported) - reportedLimit; extra > 0 {
-		sub.Reported = append([]string(nil), sub.Reported[extra:]...)
+	// This refresh's kinds are the last len(kinds): the trim takes older ones
+	if extra := len(reported) - max(reportedLimit, len(kinds)); extra > 0 {
+		reported = reported[extra:]
 	}
+	sub.Reported = reported
+}
+
+// forgetKind drops a kind of problem from the ones reported for the
+// subscription: when it comes back, it is news again
+func forgetKind(sub *Subscription, kind string) {
+	if i := slices.Index(sub.Reported, kindID(kind)); i >= 0 {
+		sub.Reported = slices.Delete(append([]string(nil), sub.Reported...), i, i+1)
+	}
+}
+
+// kindID is how a kind of problem is remembered (Subscription.Reported)
+func kindID(kind string) string {
+	sum := sha256.Sum256([]byte(kind))
+	return hex.EncodeToString(sum[:8])
 }
 
 func indexOfSubscription(subs []Subscription, rawURL string) int {

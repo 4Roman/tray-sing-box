@@ -632,7 +632,8 @@ func TestSubscriptionErrorsFromOutsideOnOneLine(t *testing.T) {
 	}
 }
 
-// The kinds remembered for a subscription are bounded, the oldest go first
+// The kinds remembered for a subscription are bounded, the least recently
+// seen go first
 func TestReportedKindsAreBounded(t *testing.T) {
 	const u = "https://p.example/sub"
 	var body string
@@ -710,5 +711,51 @@ func TestFetchFailureReportedWhenStale(t *testing.T) {
 	}
 	if result, _ = svc.UpdateAll(); result.Updates[0].NewProblem {
 		t.Fatal("the same failure reported again")
+	}
+}
+
+// A subscription whose link was down for a day once, then worked, and then
+// is gone for good: the second outage is news — the case the unattended
+// report exists for
+func TestFetchFailureNewAgainAfterADownload(t *testing.T) {
+	const u = "https://p.example/sub"
+	var fetchErr error
+	fetch := func(string) (string, error) { return "node-a", fetchErr }
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now().Add(-48 * time.Hour)}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	fetchErr = errors.New("timeout")
+	if result, _ := svc.UpdateAll(); !result.Updates[0].NewProblem {
+		t.Fatal("the first outage not reported")
+	}
+	fetchErr = nil
+	if result, _ := svc.UpdateAll(); result.Updates[0].NewProblem || len(store.subs[0].Reported) != 0 {
+		t.Fatalf("after a download: %+v, reported %q", result.Updates[0], store.subs[0].Reported)
+	}
+	store.subs[0].Updated = time.Now().Add(-48 * time.Hour)
+	fetchErr = errors.New("HTTP 404 Not Found")
+	if result, _ := svc.UpdateAll(); !result.Updates[0].NewProblem {
+		t.Fatal("the link gone for good not reported")
+	}
+}
+
+// More kinds in one refresh than are remembered: a list that stays the same
+// is reported once — the trim never drops a kind the refresh itself found
+func TestManyKindsInOneRefreshReportedOnce(t *testing.T) {
+	const u = "https://p.example/sub"
+	lines := []string{"node-a"}
+	for i := 0; i < reportedLimit+10; i++ {
+		lines = append(lines, fmt.Sprintf("skip:n%d:причина %d", i, i))
+	}
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetcherFor(map[string]string{u: strings.Join(lines, "\n")}, nil), linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	for i := 0; i < 3; i++ {
+		result, _ := svc.UpdateAll()
+		if got := result.Updates[0].NewProblem; got != (i == 0) {
+			t.Fatalf("refresh %d: NewProblem = %v", i, got)
+		}
+	}
+	if n := len(store.subs[0].Reported); n != reportedLimit+10 {
+		t.Fatalf("%d kinds remembered, want %d", n, reportedLimit+10)
 	}
 }
