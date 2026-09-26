@@ -276,6 +276,12 @@ func (c *collector) singBox(entries []any) {
 			}
 		}
 	}
+	// A repeated tag keeps its name on the first node that has it, the later
+	// ones get a suffix (add): a detour naming a repeated tag means the first
+	// kept node of that name. The ring walk above follows one detour per name
+	// and can be wrong for repeated tags; a profile sing-box itself runs has
+	// none, and a ring that gets through is refused by the config editor's
+	// dependency check.
 	for i, cand := range candidates {
 		if kept[i] {
 			c.add(cand.outbound)
