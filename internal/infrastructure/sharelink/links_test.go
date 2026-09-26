@@ -201,6 +201,21 @@ var acceptedLinks = []linkCase{
 		"vmess://" + testUUID + "@192.0.2.20:8080?type=tcp#vm-url-plain",
 		`{"security":"auto","tls":null,"transport":null}`},
 
+	// A certificate pin sing-box cannot carry over, without an insecure flag:
+	// the ordinary verification stays (a CA-signed server still connects)
+	{"pcs without insecure",
+		"vless://" + testUUID + "@203.0.113.5:443?type=tcp&security=tls&fp=chrome&pcs=ab12cd#pcs-verified",
+		`{"tls":{"enabled":true,"server_name":"203.0.113.5","insecure":null,"pcs":null}}`},
+	{"pcs with insecure=0",
+		"trojan://secret@192.0.2.30:443?sni=example.com&allowInsecure=0&pcs=ab12cd#pcs-insecure-0",
+		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	{"hysteria2 pinSHA256 without insecure",
+		"hysteria2://letmein@192.0.2.50:443/?sni=example.com&pinSHA256=AB%3ACD#hy2-pin",
+		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	{"vcn naming the SNI",
+		"vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&vcn=Example.com#vcn-same",
+		`{"tls":{"server_name":"example.com","insecure":null}}`},
+
 	// Trojan
 	{"trojan without security keeps its TLS parameters",
 		"trojan://secret@192.0.2.30:443?sni=example.com&allowInsecure=1&fp=chrome&alpn=h2%2Chttp%2F1.1#trojan-classic",
@@ -269,6 +284,19 @@ var refusedLinks = []refusalCase{
 	{"enc-other", "vless://" + testUUID + "@192.0.2.10:443?encryption=" + testSecret + "#enc-other", "неизвестный метод"},
 	{"direct-flow", "vless://" + testUUID + "@192.0.2.10:443?security=tls&flow=xtls-rprx-direct#direct-flow", "flow «xtls-rprx-direct»"},
 	{"vless-security", "vless://" + testUUID + "@192.0.2.10:443?security=xyz#vless-security", "режим защиты «xyz»"},
+
+	// A pin (or vcn) with an insecure flag: sing-box would honour the flag
+	// alone and accept any certificate
+	{"pcs-insecure", "vless://" + testUUID + "@203.0.113.5:443?security=tls&allowInsecure=1&pcs=" + testSecret + "#pcs-insecure", "закрепление сертификата (pcs)"},
+	{"trojan-pcs-insecure", "trojan://" + testSecret + "@192.0.2.30:443?insecure=1&pcs=ab12cd#trojan-pcs-insecure", "закрепление сертификата (pcs)"},
+	{"vm-url-pcs-insecure", "vmess://" + testUUID + "@192.0.2.20:443?security=tls&allowInsecure=true&pcs=ab12cd#vm-url-pcs-insecure", "закрепление сертификата (pcs)"},
+	{"hy2-pin-insecure", "hysteria2://" + testSecret + "@192.0.2.50:443/?insecure=1&pinSHA256=" + testSecret + "#hy2-pin-insecure", "закрепление сертификата (pinSHA256)"},
+	{"hy2-pin-lower", "hysteria2://" + testSecret + "@192.0.2.50:443/?insecure=1&pinsha256=AB%3ACD#hy2-pin-lower", "закрепление сертификата (pinSHA256)"},
+	{"hy1-pin-insecure", "hysteria://192.0.2.70:8443?auth=" + testSecret + "&insecure=1&upmbps=10&downmbps=10&pinSHA256=AB#hy1-pin-insecure", "закрепление сертификата (pinSHA256)"},
+	{"tuic-pin-insecure", "tuic://" + testUUID + ":" + testSecret + "@192.0.2.60:443?allow_insecure=1&pinSHA256=AB#tuic-pin-insecure", "закрепление сертификата"},
+	{"anytls-pin-insecure", "anytls://" + testSecret + "@192.0.2.61/?insecure=1&pcs=AB#anytls-pin-insecure", "закрепление сертификата"},
+	{"vcn-other", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=decoy.example&vcn=real.example#vcn-other", "по другому имени (vcn)"},
+	{"vcn-insecure", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&vcn=example.com&allowInsecure=1#vcn-insecure", "(vcn) вместе с флагом insecure"},
 
 	{"long-sid", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=" + testPBK + "&sid=0123456789abcdef01#long-sid", "short_id"},
 	{"odd-sid", "vless://" + testUUID + "@192.0.2.10:443?security=reality&pbk=" + testPBK + "&sid=0123456789abcdef0#odd-sid", "short_id"},

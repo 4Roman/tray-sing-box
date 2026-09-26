@@ -156,7 +156,11 @@ func parseHysteria2(link string) (Outbound, error) {
 	}
 	// No uTLS: this is QUIC
 	tls := map[string]any{"enabled": true, "server_name": serverName}
-	if flagSet(q, insecureKeys...) {
+	insecure, err := certificateCheck(q, serverName)
+	if err != nil {
+		return nil, err
+	}
+	if insecure {
 		tls["insecure"] = true
 	}
 	if alpn := splitList(q.Get("alpn")); len(alpn) > 0 {
@@ -232,7 +236,11 @@ func parseHysteria(link string) (Outbound, error) {
 	}
 	// No uTLS: this is QUIC. Without alpn sing-box uses "hysteria"
 	tls := map[string]any{"enabled": true, "server_name": serverName}
-	if flagSet(q, insecureKeys...) {
+	insecure, err := certificateCheck(q, serverName)
+	if err != nil {
+		return nil, err
+	}
+	if insecure {
 		tls["insecure"] = true
 	}
 	if alpn := splitList(q.Get("alpn")); len(alpn) > 0 {

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -466,6 +467,66 @@ func flagSet(q url.Values, keys ...string) bool {
 // insecureKeys are the spellings of "skip certificate verification" in the
 // links of the various clients
 var insecureKeys = []string{"allowInsecure", "insecure", "allow_insecure", "allowinsecure"}
+
+// pinKeys are a link's certificate pins: Hysteria 2's pinSHA256 and Xray's
+// pcs (pinnedPeerCertSha256, what 3x-ui and v2rayN write since Xray removed
+// allowInsecure), both the SHA-256 of the whole certificate. sing-box can
+// pin only the public key (certificate_public_key_sha256), so a pin cannot
+// be carried over.
+var pinKeys = []string{"pinSHA256", "pcs"}
+
+// certificateCheck decides tls.insecure for a link whose TLS server name is
+// serverName, and refuses the checks sing-box cannot do as the link asks:
+//   - a pin, or Xray's vcn (check the certificate for these names instead of
+//     the SNI) naming only serverName, is dropped: sing-box verifies the
+//     chain against the system roots as usual. A CA-signed certificate still
+//     passes; a self-signed one now fails closed instead of being trusted by
+//     its hash
+//   - vcn naming another host is refused: sing-box checks the server name
+//     only, and the node would never connect
+//   - a pin or vcn together with an insecure flag (there for the clients
+//     that know neither) is refused: sing-box would honour the flag alone
+//     and accept any certificate, and an on-path attacker would get the
+//     credential and the traffic
+func certificateCheck(q url.Values, serverName string) (insecure bool, err error) {
+	insecure = flagSet(q, insecureKeys...)
+	for _, key := range pinKeys {
+		if strings.TrimSpace(foldedGet(q, key)) == "" {
+			continue
+		}
+		if insecure {
+			return false, fmt.Errorf("закрепление сертификата (%s) не поддерживается sing-box, "+
+				"а без него флаг insecure отключает проверку сертификата совсем — соединение можно перехватить", key)
+		}
+		log.Printf("Share link: the certificate pin (%s) is dropped, sing-box verifies the certificate against the system roots instead", key)
+	}
+	if names := splitList(foldedGet(q, "vcn")); len(names) > 0 {
+		for _, name := range names {
+			if !strings.EqualFold(name, serverName) {
+				return false, errors.New("проверка сертификата по другому имени (vcn) не поддерживается sing-box")
+			}
+		}
+		if insecure {
+			return false, errors.New("проверка сертификата по имени (vcn) вместе с флагом insecure: " +
+				"sing-box не проверял бы сертификат совсем — соединение можно перехватить")
+		}
+	}
+	return insecure, nil
+}
+
+// foldedGet is q.Get with the key matched regardless of case: the clients
+// spell these keys differently (pinSHA256, pinsha256)
+func foldedGet(q url.Values, key string) string {
+	if v := q.Get(key); v != "" {
+		return v
+	}
+	for k, values := range q {
+		if strings.EqualFold(k, key) && len(values) > 0 && values[0] != "" {
+			return values[0]
+		}
+	}
+	return ""
+}
 
 // splitList splits a comma-separated value, dropping empty items
 func splitList(s string) []string {

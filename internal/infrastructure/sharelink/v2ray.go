@@ -103,7 +103,11 @@ func tlsConfig(q url.Values, host string) (map[string]any, error) {
 	}
 	tls["server_name"] = serverName
 
-	if flagSet(q, insecureKeys...) {
+	insecure, err := certificateCheck(q, serverName)
+	if err != nil {
+		return nil, err
+	}
+	if insecure {
 		tls["insecure"] = true
 	}
 	if alpn := splitList(q.Get("alpn")); len(alpn) > 0 {

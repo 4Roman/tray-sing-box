@@ -67,16 +67,19 @@ func parseTUIC(link string) (Outbound, error) {
 	}
 
 	// No uTLS: this is QUIC
-	tls := map[string]any{"enabled": true}
-	if sni := q.Get("sni"); sni != "" {
-		tls["server_name"] = sni
-	} else {
-		tls["server_name"] = host
+	serverName := q.Get("sni")
+	if serverName == "" {
+		serverName = host
 	}
+	tls := map[string]any{"enabled": true, "server_name": serverName}
 	if flagSet(q, "disable_sni", "disable-sni") {
 		tls["disable_sni"] = true
 	}
-	if flagSet(q, insecureKeys...) {
+	insecure, err := certificateCheck(q, serverName)
+	if err != nil {
+		return nil, err
+	}
+	if insecure {
 		tls["insecure"] = true
 	}
 	// sing-box's TUIC sets no ALPN of its own (hysteria2 does: h3), and a
@@ -114,15 +117,18 @@ func parseAnyTLS(link string) (Outbound, error) {
 	}
 
 	q := queryValues(u.RawQuery)
-	tls := map[string]any{"enabled": true}
 	// An IP as sni: sing-box verifies against it and sends no SNI, which is
 	// what the URI scheme asks for
-	if sni := q.Get("sni"); sni != "" {
-		tls["server_name"] = sni
-	} else {
-		tls["server_name"] = host
+	serverName := q.Get("sni")
+	if serverName == "" {
+		serverName = host
 	}
-	if flagSet(q, insecureKeys...) {
+	tls := map[string]any{"enabled": true, "server_name": serverName}
+	insecure, err := certificateCheck(q, serverName)
+	if err != nil {
+		return nil, err
+	}
+	if insecure {
 		tls["insecure"] = true
 	}
 	if alpn := splitList(q.Get("alpn")); len(alpn) > 0 {
