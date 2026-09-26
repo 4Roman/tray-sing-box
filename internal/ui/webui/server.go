@@ -850,7 +850,27 @@ func subscriptionResponse(result *domain.SubscriptionResult) map[string]any {
 		}
 		updates = append(updates, entry)
 	}
-	return map[string]any{"updates": updates, "restarted": result.Restarted}
+	resp := map[string]any{"updates": updates, "restarted": result.Restarted}
+	if result.RestartErr != nil {
+		resp["restart_error"] = result.RestartErr.Error()
+	}
+	return resp
+}
+
+// writeSubscriptions answers a subscription operation: its result, or its
+// error. When only the VPN restart after it failed, the operation was done —
+// the nodes it left out are recorded as reported — so the page gets the
+// result with the error (restart_error) instead of the error alone.
+func writeSubscriptions(w http.ResponseWriter, result *domain.SubscriptionResult, err error, extra map[string]any) {
+	if !result.Applied(err) {
+		fail(w, err)
+		return
+	}
+	resp := subscriptionResponse(result)
+	for k, v := range extra {
+		resp[k] = v
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // nonNil makes an empty list a JSON [] rather than null: the page iterates it
@@ -918,11 +938,7 @@ func (s *Server) handleSubscriptionAdd(w http.ResponseWriter, r *http.Request) {
 	defer s.opMu.Unlock()
 
 	result, err := s.subs.Add(req.URL)
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+	writeSubscriptions(w, result, err, nil)
 }
 
 // handleSubscriptionUpdate refreshes one subscription (id set) or all
@@ -954,11 +970,7 @@ func (s *Server) handleSubscriptionUpdate(w http.ResponseWriter, r *http.Request
 			result, err = s.subs.Update(rawURL)
 		}
 	}
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+	writeSubscriptions(w, result, err, nil)
 }
 
 func (s *Server) handleSubscriptionRemove(w http.ResponseWriter, r *http.Request) {
@@ -983,11 +995,7 @@ func (s *Server) handleSubscriptionRemove(w http.ResponseWriter, r *http.Request
 		return
 	}
 	result, err := s.subs.Remove(rawURL)
-	if err != nil {
-		fail(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, subscriptionResponse(result))
+	writeSubscriptions(w, result, err, nil)
 }
 
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
@@ -1027,13 +1035,7 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	// import (same behavior as the tray import items)
 	if s.subs != nil && domain.IsSubscriptionURL(text) {
 		result, err := s.subs.Add(text)
-		if err != nil {
-			fail(w, err)
-			return
-		}
-		resp := subscriptionResponse(result)
-		resp["subscription"] = true
-		writeJSON(w, http.StatusOK, resp)
+		writeSubscriptions(w, result, err, map[string]any{"subscription": true})
 		return
 	}
 

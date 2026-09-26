@@ -87,6 +87,19 @@ type SubscriptionUpdate struct {
 type SubscriptionResult struct {
 	Updates   []SubscriptionUpdate
 	Restarted bool // whether the VPN was restarted to apply config changes
+	// RestartErr: the operation itself was done and saved, only the VPN
+	// restart that applies it failed. The operation returns the same error,
+	// with this result: its problems are already recorded as reported
+	// (NewProblem), so whoever shows the error shows the result with it —
+	// otherwise the user would never hear of them.
+	RestartErr error
+}
+
+// Applied reports whether the operation that returned this result and err
+// was done: err is nil, or it is only the failed VPN restart after it (then
+// the result is shown together with the error)
+func (r *SubscriptionResult) Applied(err error) bool {
+	return err == nil || (r != nil && r.RestartErr != nil)
 }
 
 // SubscriptionService manages proxy subscriptions: a saved URL whose nodes
@@ -256,7 +269,8 @@ func (s *SubscriptionService) Remove(rawURL string) (*SubscriptionResult, error)
 	if sync.NeedsRestart {
 		restarted, err := s.vpn.RestartIfRunning()
 		if err != nil {
-			return result, fmt.Errorf("подписка удалена, но VPN %w", err)
+			result.RestartErr = fmt.Errorf("подписка удалена, но VPN %w", err)
+			return result, result.RestartErr
 		}
 		result.Restarted = restarted
 	}
@@ -299,7 +313,10 @@ func (s *SubscriptionService) refresh(subs []Subscription, onlyURL string) (*Sub
 	if changed {
 		restarted, err := s.vpn.RestartIfRunning()
 		if err != nil {
-			return result, fmt.Errorf("подписки обновлены, но VPN %w", err)
+			// The problems found are saved as reported by now: the result
+			// goes with the error (see RestartErr)
+			result.RestartErr = fmt.Errorf("подписки обновлены, но VPN %w", err)
+			return result, result.RestartErr
 		}
 		result.Restarted = restarted
 	}

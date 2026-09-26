@@ -2,6 +2,7 @@ package webui
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -151,6 +152,62 @@ func TestSubscriptionEndpoints(t *testing.T) {
 	status, data = call(t, http.MethodGet, base+"/api/subscriptions", session, nil)
 	if status != http.StatusOK || len(data["subscriptions"].([]any)) != 0 {
 		t.Fatalf("after remove: status %d, %v", status, data)
+	}
+}
+
+// failingRestart is a running sing-box that does not start again
+type failingRestart struct{ running bool }
+
+func (f *failingRestart) Start() error    { return errors.New("TUN setup failed") }
+func (f *failingRestart) Stop() error     { f.running = false; return nil }
+func (f *failingRestart) IsRunning() bool { return f.running }
+
+// Only the VPN restart after a refresh failed: the subscriptions were
+// refreshed and the nodes left out are recorded as reported, so the page
+// gets the result with the error, not the error alone
+func TestSubscriptionRestartFailureKeepsTheResult(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(configPath, []byte(testConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	editor := configfile.New(configPath)
+	pm := &failingRestart{running: true}
+	vpn := domain.NewVPNService(pm, &nopStorage{state: true})
+	store := subscription.NewStore(filepath.Join(dir, "subscriptions.json"))
+	fetch := func(string) (string, error) {
+		return "vless://u1@a.example.com:443?security=tls#sub-node-1\n" +
+			"vless://@192.0.2.51:443?security=tls#no-uuid", nil
+	}
+	subs := domain.NewSubscriptionService(store, fetch, sharelink.Parser{}, editor, vpn)
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, store, vpn),
+		nil, nil, subs, nil, Sources{}, LogAccess{})
+	base := start(t, server)
+	session := login(t, server)
+
+	status, raw := callRaw(t, http.MethodPost, base+"/api/subscriptions/add", session, map[string]string{"url": secretSubURL})
+	if status != http.StatusOK {
+		t.Fatalf("add: status %d, %s", status, raw)
+	}
+	assertNoSubURL(t, "add", raw)
+	var data struct {
+		Updates []struct {
+			Count   int                  `json:"count"`
+			Skipped []domain.SkippedNode `json:"skipped"`
+		} `json:"updates"`
+		RestartError string `json:"restart_error"`
+	}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(data.RestartError, "TUN setup failed") || len(data.Updates) != 1 ||
+		data.Updates[0].Count != 1 || len(data.Updates[0].Skipped) != 1 || data.Updates[0].Skipped[0].Name != "no-uuid" {
+		t.Fatalf("answer = %s", raw)
+	}
+
+	// A failure of the operation itself is still an error alone
+	if status, _ := call(t, http.MethodPost, base+"/api/subscriptions/update", session, map[string]string{"id": "0123456789abcdef"}); status != http.StatusBadRequest {
+		t.Fatalf("update of an unknown id: status %d", status)
 	}
 }
 

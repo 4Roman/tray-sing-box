@@ -133,3 +133,28 @@ func TestAutoRefreshReport(t *testing.T) {
 		t.Fatalf("report without new problems = %q", got)
 	}
 }
+
+// Only the VPN restart after the refresh failed: the popups show the result
+// and the error. The unattended one does so only for new problems — a
+// restart failure alone is reported by the monitor.
+func TestSubscriptionPopupsWithRestartError(t *testing.T) {
+	restartErr := errors.New("подписки обновлены, но VPN restart failed on start: TUN setup failed")
+	result := &domain.SubscriptionResult{
+		Updates: []domain.SubscriptionUpdate{{
+			URL: "https://p.example/sub", Tags: []string{"a"}, NewProblem: true,
+			Skipped: []domain.SkippedNode{{Name: "bad", Reason: "тип «tor» не поддерживается"}},
+		}},
+		RestartErr: restartErr,
+	}
+	line := domain.RedactURL("https://p.example/sub") + " — серверов: 1\n  пропущены:\n  «bad» — тип «tor» не поддерживается"
+	if got, want := SubscriptionMessage(result), line+"\n\n"+restartErr.Error(); got != want {
+		t.Fatalf("message:\n%q\nwant\n%q", got, want)
+	}
+	if got := AutoRefreshReport(result); !strings.Contains(got, line+"\n\n"+restartErr.Error()+"\n\n") {
+		t.Fatalf("report = %q", got)
+	}
+	result.Updates[0].NewProblem = false
+	if got := AutoRefreshReport(result); got != "" {
+		t.Fatalf("report without new problems = %q", got)
+	}
+}

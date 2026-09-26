@@ -343,17 +343,18 @@ func (a *Application) autoRefreshSubscriptions() {
 		result, err := a.subscriptionService.UpdateAll()
 		if err != nil {
 			log.Printf("Subscription auto-refresh failed: %v", err)
-			return nil
 		}
-		for _, u := range result.Updates {
-			if u.Err != nil {
-				log.Printf("Subscription auto-refresh: %s: %v", domain.RedactURL(u.URL), u.Err)
+		if result != nil {
+			for _, u := range result.Updates {
+				if u.Err != nil {
+					log.Printf("Subscription auto-refresh: %s: %v", domain.RedactURL(u.URL), u.Err)
+				}
 			}
 		}
 		if a.trayUI != nil {
 			a.trayUI.UpdateStatus(a.vpnService.GetStatus())
 		}
-		report := ui.AutoRefreshReport(result)
+		report := autoRefreshText(result, err)
 		if report == "" {
 			return nil
 		}
@@ -361,6 +362,17 @@ func (a *Application) autoRefreshSubscriptions() {
 		// dismissed (it may sit there for hours)
 		return func() { go ui.ShowError(ui.SubsAutoTitle, report) }
 	})
+}
+
+// autoRefreshText is the popup text of an unattended refresh, "" for none. A
+// refresh that failed recorded nothing and reports nothing (the next one
+// tries again). One after which only the VPN restart failed has recorded its
+// new problems as reported: they are shown now or never.
+func autoRefreshText(result *domain.SubscriptionResult, err error) string {
+	if !result.Applied(err) {
+		return ""
+	}
+	return ui.AutoRefreshReport(result)
 }
 
 // connectivityLoop periodically verifies traffic flows while the VPN runs
@@ -482,10 +494,9 @@ func (a *Application) handleImport(source TextSource) {
 			result, err := a.subscriptionService.Add(text)
 			if err != nil {
 				log.Printf("Subscription add failed: %v", err)
-				return errorPopup(ui.SubsErrorTitle, err)
 			}
 			a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-			return infoPopup(ui.SubsAddedTitle, ui.SubscriptionMessage(result))
+			return subscriptionPopup(ui.SubsAddedTitle, result, err)
 		}
 
 		result, err := a.importService.ImportFromText(text)
@@ -541,12 +552,31 @@ func (a *Application) handleUpdateSubscriptions() {
 		result, err := a.subscriptionService.UpdateAll()
 		if err != nil {
 			log.Printf("Subscription update failed: %v", err)
-			return errorPopup(ui.SubsErrorTitle, err)
 		}
 
 		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-		return infoPopup(ui.SubsUpdateDoneTitle, ui.SubscriptionMessage(result))
+		return subscriptionPopup(ui.SubsUpdateDoneTitle, result, err)
 	})
+}
+
+// subscriptionPopup shows the result of subscription work, or its error
+func subscriptionPopup(title string, result *domain.SubscriptionResult, err error) popup {
+	text, failed := subscriptionOutcome(result, err)
+	if failed {
+		return func() { ui.ShowError(ui.SubsErrorTitle, text) }
+	}
+	return infoPopup(title, text)
+}
+
+// subscriptionOutcome is the text the user is told after subscription work
+// and whether it is an error. When only the VPN restart after it failed, the
+// work was done — the nodes it left out are recorded as reported — and the
+// error comes with its result.
+func subscriptionOutcome(result *domain.SubscriptionResult, err error) (text string, failed bool) {
+	if !result.Applied(err) {
+		return err.Error(), true
+	}
+	return ui.SubscriptionMessage(result), err != nil
 }
 
 // handleUpdate downloads and installs the latest sing-box release.

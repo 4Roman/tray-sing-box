@@ -493,6 +493,44 @@ func TestNewProblemOncePerProblem(t *testing.T) {
 	}
 }
 
+// When the VPN restart after a refresh fails, the refresh has happened and
+// its new problem is recorded as reported: the result travels with the
+// error (RestartErr), so it can still be shown — otherwise the user would
+// never hear of the problem, the next refresh no longer finds it new
+func TestRestartFailureKeepsTheResult(t *testing.T) {
+	const u = "https://p.example/sub"
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"old"}}}}
+	pm := &fakeProcessManager{running: true, startErr: errors.New("TUN setup failed")}
+	fetch := fetcherFor(map[string]string{u: "node-a\nskip:bad:тип «tor» не поддерживается"}, nil)
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(pm, &fakeStorage{state: true}))
+
+	result, err := svc.UpdateAll()
+	if err == nil || !strings.Contains(err.Error(), "TUN setup failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if result == nil || result.RestartErr != err || !result.Applied(err) {
+		t.Fatalf("result = %+v", result)
+	}
+	if !result.Updates[0].NewProblem || store.subs[0].Problem == "" {
+		t.Fatalf("update %+v, recorded problem %q", result.Updates[0], store.subs[0].Problem)
+	}
+
+	// Removal too: the servers are gone from the config, only the restart failed
+	pm.setRunning(true)
+	result, err = svc.Remove(u)
+	if err == nil || result == nil || result.RestartErr != err || len(store.subs) != 0 {
+		t.Fatalf("remove: result %+v, err %v", result, err)
+	}
+
+	// A failure of the operation itself is not applied
+	failed := &fakeSubStore{loadErr: errors.New("broken file")}
+	svc = NewSubscriptionService(failed, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(pm, &fakeStorage{state: true}))
+	result, err = svc.UpdateAll()
+	if err == nil || result.Applied(err) {
+		t.Fatalf("a failed load counts as applied: %+v, %v", result, err)
+	}
+}
+
 // A failed download is a problem only once the servers are getting old (at
 // logon the network is often not up yet), and it does not wipe out what an
 // earlier refresh recorded

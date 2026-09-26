@@ -550,13 +550,16 @@ function subsSummary(prefix, d) {
     if ((u.skipped || []).length) line += '\n  пропущены:\n' + skippedLines(u.skipped, '    ');
     return line;
   });
-  return prefix + restartedSuffix(d) + '\n' + lines.join('\n');
+  let text = prefix + restartedSuffix(d) + '\n' + lines.join('\n');
+  // Done, but the VPN restart after it failed: the result and why
+  if (d.restart_error) text += '\n\n' + d.restart_error;
+  return text;
 }
 
 // showSubs shows a subscription result; one with problems stays on screen
 function showSubs(prefix, d) {
   const problems = (d.updates || []).some(u => u.error || (u.skipped || []).length || (u.suffixed || []).length);
-  show(problems ? 'warn' : 'ok', subsSummary(prefix, d));
+  show(d.restart_error ? 'err' : problems ? 'warn' : 'ok', subsSummary(prefix, d));
 }
 
 async function refreshSubs() {

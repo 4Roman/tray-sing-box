@@ -95,7 +95,8 @@ func renameList(renames []domain.TagRename, sep string) string {
 	return strings.Join(items, sep)
 }
 
-// SubscriptionMessage is the popup text for finished subscription work.
+// SubscriptionMessage is the popup text for finished subscription work — and
+// for one after which only the VPN restart failed: then the error closes it.
 // Subscriptions are named by their redacted URL: the full one carries the
 // provider's access token.
 func SubscriptionMessage(result *domain.SubscriptionResult) string {
@@ -107,11 +108,16 @@ func SubscriptionMessage(result *domain.SubscriptionResult) string {
 	if result.Restarted {
 		message += SubsRestartedSuffix
 	}
+	if result.RestartErr != nil {
+		message += "\n\n" + result.RestartErr.Error()
+	}
 	return message
 }
 
 // AutoRefreshReport is the popup text for the problems of an unattended
-// refresh the user has not been told about yet, "" when there are none
+// refresh the user has not been told about yet, "" when there are none. A
+// failed VPN restart after the refresh is added to them (it says why the
+// new servers are not in use); alone it is the monitor's to report.
 func AutoRefreshReport(result *domain.SubscriptionResult) string {
 	var blocks []string
 	for _, u := range result.Updates {
@@ -122,7 +128,11 @@ func AutoRefreshReport(result *domain.SubscriptionResult) string {
 	if len(blocks) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(SubsAutoMsg, strings.Join(blocks, "\n"))
+	report := strings.Join(blocks, "\n")
+	if result.RestartErr != nil {
+		report += "\n\n" + result.RestartErr.Error()
+	}
+	return fmt.Sprintf(SubsAutoMsg, report)
 }
 
 // subscriptionLine describes the outcome for one subscription: the counts,
