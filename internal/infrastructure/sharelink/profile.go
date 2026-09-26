@@ -82,10 +82,11 @@ func (c *collector) profile(text string) (ok bool, err error) {
 		for i, e := range endpoints {
 			m, _ := e.(map[string]any)
 			tag, _ := m["tag"].(string)
-			if strings.TrimSpace(tag) == "" {
-				tag = fmt.Sprintf("endpoint %d", i+1)
+			name := fmt.Sprintf("endpoint %d", i+1)
+			if plainName(tag) {
+				name = shortName(tag)
 			}
-			c.skip(strings.TrimSpace(tag), "endpoint (WireGuard и подобные) приложение не импортирует — только outbound")
+			c.skip(name, "endpoint (WireGuard и подобные) приложение не импортирует — только outbound")
 		}
 		return true, errEmptyProfileIfNone(c)
 	case []any:
@@ -159,7 +160,10 @@ func singBoxOutbounds(entries []any) bool {
 // refuses, a plugin option naming a file) or what the app never adds (a file
 // path — the guard would refuse the whole import for one such node); the
 // rest is left to the guard and `sing-box check` of the config editor.
-// A detour survives only when it names another node that is imported.
+// The keys the app reads are first spelled the way sing-box reads them
+// (foldKeys). A detour survives only when it names another node that is
+// imported, and not in a ring: sing-box does not start with either, and
+// sing-box check does not notice.
 func (c *collector) singBox(entries []any) {
 	type candidate struct {
 		outbound Outbound
@@ -172,16 +176,17 @@ func (c *collector) singBox(entries []any) {
 		if m == nil {
 			continue
 		}
+		foldErr := foldKeys(m) // m is left as it is on an error
 		typ, _ := m["type"].(string)
 		typ = strings.ToLower(typ)
 		tag, _ := m["tag"].(string)
 		tag = strings.TrimSpace(tag)
-		name := tag
-		if name == "" {
-			name = fmt.Sprintf("узел %d", i+1)
+		name := fmt.Sprintf("узел %d", i+1)
+		if plainName(tag) {
+			name = shortName(tag)
 		}
 		if profileStructural[typ] {
-			if typ == "direct" && tag != "" {
+			if typ == "direct" && tag != "" && foldErr == nil {
 				direct[tag] = true
 			}
 			continue
@@ -192,6 +197,10 @@ func (c *collector) singBox(entries []any) {
 			} else {
 				c.skip(name, fmt.Sprintf("тип «%s» не поддерживается", token(typ)))
 			}
+			continue
+		}
+		if foldErr != nil {
+			c.skip(name, foldErr.Error())
 			continue
 		}
 		if tag == "" {
@@ -237,7 +246,33 @@ func (c *collector) singBox(entries []any) {
 				delete(cand.outbound, "detour")
 			case !tags[target]:
 				kept[i], changed = false, true
-				c.skip(cand.name, fmt.Sprintf("узел работает через «%s», которого нет среди импортируемых", target))
+				c.skip(cand.name, fmt.Sprintf("узел работает через «%s», которого нет среди импортируемых", quotedName(target)))
+			}
+		}
+		if changed {
+			continue
+		}
+
+		// A chain that comes back to its start: every node of the ring goes
+		// (the ones chained into it follow in the next round)
+		next := map[string]string{}
+		for i, cand := range candidates {
+			if detour, _ := cand.outbound["detour"].(string); kept[i] && detour != "" {
+				next[cand.outbound.Tag()] = detour
+			}
+		}
+		for i, cand := range candidates {
+			if !kept[i] {
+				continue
+			}
+			tag := cand.outbound.Tag()
+			at := next[tag]
+			for steps := 0; at != "" && at != tag && steps < len(candidates); steps++ {
+				at = next[at]
+			}
+			if at == tag {
+				kept[i], changed = false, true
+				c.skip(cand.name, "цепочка detour узла замыкается в кольцо — с ней sing-box не запустится")
 			}
 		}
 	}
@@ -248,8 +283,50 @@ func (c *collector) singBox(entries []any) {
 	}
 }
 
+// quotedName is a node's tag as a reason may quote it: shortened, "…" when
+// it is not one line
+func quotedName(tag string) string {
+	if plainName(tag) {
+		return shortName(tag)
+	}
+	return "…"
+}
+
+// foldKey is how sing-box's JSON decoder matches a key to an option:
+// case-insensitively, KELVIN SIGN as k (it lowers by itself) and LONG S as s
+func foldKey(key string) string {
+	return strings.ToLower(strings.ReplaceAll(key, "ſ", "s"))
+}
+
+// foldKeys spells the keys of an object of options (an outbound, its tls)
+// the way sing-box reads them, so that the app reads what sing-box reads:
+// to sing-box {"Detour": "x"} is a detour, and the app's checks of a detour,
+// a short_id or a plugin must not miss it. Two keys for one option are
+// refused — which one sing-box takes depends on their order in the text —
+// and m is then left as it is.
+func foldKeys(m map[string]any) error {
+	folded := make(map[string]string, len(m))
+	for key := range m {
+		f := foldKey(key)
+		if _, twice := folded[f]; twice {
+			if !keyPattern.MatchString(f) {
+				f = "…"
+			}
+			return fmt.Errorf("параметр «%s» указан в узле дважды, в разном написании", f)
+		}
+		folded[f] = key
+	}
+	for f, key := range folded {
+		if f != key {
+			m[f] = m[key]
+			delete(m, key)
+		}
+	}
+	return nil
+}
+
 // sanitizeProfileOutbound checks and adjusts one proxy outbound of a
-// sing-box profile in place
+// sing-box profile (its keys folded) in place
 func sanitizeProfileOutbound(o Outbound) error {
 	if key := fileKey(map[string]any(o)); key != "" {
 		return fmt.Errorf("узел ссылается на файл на диске («%s»), через приложение такое не добавить", key)
@@ -258,6 +335,12 @@ func sanitizeProfileOutbound(o Outbound) error {
 	delete(o, "domain_resolver")
 
 	switch o["type"] {
+	case "hysteria2":
+		// Like the hysteria2+realm:// links: a rendezvous server with a
+		// token of its own the app would have to keep secret
+		if _, realm := o["realm"]; realm {
+			return errors.New("режим realm Hysteria 2 приложение не импортирует")
+		}
 	case "vless":
 		flow, _ := o["flow"].(string)
 		normalized, err := vlessFlow(flow)
@@ -297,11 +380,28 @@ func sanitizeProfileOutbound(o Outbound) error {
 		}
 	}
 
+	// The transport: the app tells nodes apart by its type and path
+	if transport, _ := o["transport"].(map[string]any); transport != nil {
+		if err := foldKeys(transport); err != nil {
+			return err
+		}
+	}
 	tls, _ := o["tls"].(map[string]any)
 	if tls == nil {
 		return nil
 	}
+	if err := foldKeys(tls); err != nil {
+		return err
+	}
 	reality, _ := tls["reality"].(map[string]any)
+	utls, _ := tls["utls"].(map[string]any)
+	for _, m := range []map[string]any{reality, utls} {
+		if m != nil {
+			if err := foldKeys(m); err != nil {
+				return err
+			}
+		}
+	}
 	realityOn := reality != nil && reality["enabled"] == true
 	if realityOn {
 		publicKey, _ := reality["public_key"].(string)
@@ -315,7 +415,6 @@ func sanitizeProfileOutbound(o Outbound) error {
 		}
 		reality["public_key"] = checked["public_key"]
 	}
-	utls, _ := tls["utls"].(map[string]any)
 	switch {
 	case utls != nil && utls["enabled"] == true:
 		fp, _ := utls["fingerprint"].(string)
@@ -338,9 +437,7 @@ func fileKey(v any) string {
 	switch x := v.(type) {
 	case map[string]any:
 		for key, child := range x {
-			// Folded as sing-box's JSON decoder matches keys (KELVIN SIGN
-			// lowers to k by itself)
-			k := strings.ToLower(strings.ReplaceAll(key, "ſ", "s"))
+			k := foldKey(key)
 			if k == "executable_path" || k == "extra_args" || k == "torrc" ||
 				strings.HasSuffix(k, "_path") || strings.HasSuffix(k, "_directory") {
 				if keyPattern.MatchString(k) {
@@ -396,9 +493,11 @@ func (c *collector) sip008(servers []any) {
 			decoder := json.NewDecoder(bytes.NewReader(raw))
 			err = decoder.Decode(&s)
 		}
-		name := strings.TrimSpace(s.Remarks)
-		if name == "" {
-			name = fmt.Sprintf("узел %d", i+1)
+		// Named like a link (linkTitle): the remark on one line, shortened
+		// — a provider's text reaches the popups
+		name := fmt.Sprintf("узел %d", i+1)
+		if plainName(s.Remarks) {
+			name = shortName(s.Remarks)
 		}
 		if err != nil {
 			c.skip(name, "запись сервера повреждена")

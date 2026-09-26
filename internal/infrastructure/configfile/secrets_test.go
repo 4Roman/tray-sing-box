@@ -42,6 +42,9 @@ const secretsConfig = `{
      "method": "2022-blake3-aes-128-gcm", "pa\u017F\u017Fword": "secret-ss-H"},
     {"type": "socks", "tag": "socks-i", "server": "127.0.0.1", "server_port": 1080,
      "username": "secret-user-I", "password": ""},
+    {"type": "hysteria2", "tag": "hy2-realm-j", "password": "secret-hy2-J",
+     "realm": {"server_url": "https://visible-realm-J.example.com/x", "token": "secret-realm-token-J", "realm_id": "visible-realm-id-J"},
+     "tls": {"enabled": true, "server_name": "j.example.com"}},
     {"type": "direct", "tag": "direct"}
   ],
   "route": {"rules": [{"protocol": "dns", "action": "hijack-dns"}], "final": "proxy"}
@@ -49,7 +52,7 @@ const secretsConfig = `{
 
 // secretsMasked is the number of credential strings in secretsConfig (the
 // ssh key has three lines, the empty socks password is not one)
-const secretsMasked = 18
+const secretsMasked = 20
 
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
@@ -154,7 +157,7 @@ func TestReadSectionMasksSecrets(t *testing.T) {
 	}
 	for _, visible := range []string{
 		"visible-reality-public-key", "visible-host-C", "visible-peer-public-key",
-		"visible-peer2-public-key", "visible-user-G",
+		"visible-peer2-public-key", "visible-user-G", "visible-realm-J", "visible-realm-id-J",
 	} {
 		if !strings.Contains(text, visible) {
 			t.Errorf("%s masked, it is not a secret", visible)

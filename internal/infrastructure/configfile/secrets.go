@@ -34,8 +34,9 @@ const SecretPlaceholder = "(скрыто)"
 // http and naive username; the reality short_id; wireguard keys (peers
 // included); hysteria auth/auth_str; ssh private key and passphrase; the
 // TLS client key; an authorization header of an http outbound or a
-// transport. The values may be a string or a line array (ssh private_key,
-// tls client_key).
+// transport; the token of a Hysteria 2 realm (its server_url stays visible
+// and compared). The values may be a string or a line array (ssh
+// private_key, tls client_key).
 //
 // Only fields that do not decide where the connection goes: a secret is left
 // out of the "unchanged apart from its secrets" comparison, so a masked
@@ -47,7 +48,7 @@ var secretKeys = map[string]bool{
 	"password": true, "uuid": true, "private_key": true, "pre_shared_key": true,
 	"auth": true, "auth_str": true, "private_key_passphrase": true,
 	"client_key": true, "authorization": true, "proxy-authorization": true,
-	"username": true, "short_id": true,
+	"username": true, "short_id": true, "token": true,
 }
 
 // isSecret reports whether value, found under key, is a credential: a string
