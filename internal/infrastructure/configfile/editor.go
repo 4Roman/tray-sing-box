@@ -510,10 +510,10 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned ma
 //   - the rest of newOutbounds are added or replaced as in AddOutbounds.
 //
 // Outbounds the config check refuses are left out (see saveMerged); an owned
-// one whose update was refused stays as it is — its last working version —
-// and stays owned (listed in Tags). The file is only rewritten when the
-// config actually changed; NeedsRestart is false when nothing but tags
-// changed.
+// one whose update was refused stays as it is — its last working version,
+// with the owned relays it dials through — and stays owned (listed in Tags).
+// The file is only rewritten when the config actually changed; NeedsRestart
+// is false when nothing but tags changed.
 func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any) (*domain.SyncResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -561,7 +561,8 @@ func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any
 // place (see SyncOutbounds); mine tells the outbounds the subscription owns
 // and may replace or delete. refused are the fresh outbounds the checks
 // refused (saveMerged): the owned outbound each would have updated is held —
-// left as it is, not removed, nothing repointed — and its tag returned.
+// left as it is, not removed, nothing repointed, and so are the owned
+// outbounds its detour chain runs through — and the held tags returned.
 func syncMerge(cfg map[string]any, incoming, refused []map[string]any, mine func(map[string]any) bool) (domain.SyncResult, []string, error) {
 	var result domain.SyncResult
 	original, err := cloneConfig(cfg)
@@ -655,6 +656,20 @@ func syncMerge(cfg map[string]any, incoming, refused []map[string]any, mine func
 			held[tag] = true
 		} else {
 			removed[tag] = true
+		}
+	}
+	// A held copy keeps the relays it dials through (its detour, and theirs),
+	// also the ones the provider no longer serves: removed, they would take
+	// its detour along (pruneOutboundReferences), and the node reported as not
+	// updated would dial its server directly, past the relay
+	for changed := true; changed; {
+		changed = false
+		for _, o := range dropped {
+			if relay := detourOf(o); held[tagString(o)] && removed[relay] {
+				delete(removed, relay)
+				held[relay] = true
+				changed = true
+			}
 		}
 	}
 	heldTags := make([]string, 0, len(held))

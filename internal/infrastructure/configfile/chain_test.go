@@ -266,6 +266,56 @@ func TestRefusedRelayKeepsTheChain(t *testing.T) {
 	}
 }
 
+// A held node keeps the relays its copy dials through, also when the
+// provider no longer serves them: the new relay was refused, and the node
+// chained through it with it. Removed, the old relays would take the held
+// node's detour along, and it would dial its server directly — past the
+// relay — while reported as not updated.
+func TestHeldNodeKeepsItsRelays(t *testing.T) {
+	config := `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["relay0", "relay", "exit", "other", "direct"]},
+    {"type": "vless", "tag": "relay0", "server": "192.0.2.9", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "vless", "tag": "relay", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555", "detour": "relay0"},
+    {"type": "vless", "tag": "exit", "server": "192.0.2.11", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555", "Detour": "relay"},
+    {"type": "vless", "tag": "other", "server": "192.0.2.12", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ], "route": {"final": "proxy"}}`
+	editor, path, _ := checkedEditor(t, config)
+
+	relay2 := vlessNode("relay2", "192.0.2.30")
+	relay2["flow"] = "from-a-newer-sing-box"
+	exit := vlessNode("exit", "192.0.2.21")
+	exit["detour"] = "relay2"
+	result, err := editor.SyncOutbounds([]string{"relay0", "relay", "exit", "other"},
+		[]map[string]any{relay2, exit, vlessNode("other", "192.0.2.22")})
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"other", "exit", "relay", "relay0"}) || len(result.Removed) != 0 || len(result.Skipped) != 2 {
+		t.Fatalf("result = %+v", result)
+	}
+	cfg := load(t, path)
+	if n := outboundByTag(t, cfg, "exit"); n == nil || n["Detour"] != "relay" || n["server"] != "192.0.2.11" {
+		t.Fatalf("exit = %v", n)
+	}
+	if n := outboundByTag(t, cfg, "relay"); n == nil || n["detour"] != "relay0" {
+		t.Fatalf("relay = %v", n)
+	}
+	if outboundByTag(t, cfg, "relay0") == nil || outboundByTag(t, cfg, "other")["server"] != "192.0.2.22" {
+		t.Fatalf("outbounds = %v", cfg["outbounds"])
+	}
+
+	// Once the provider's update of the node passes, the relays it no longer
+	// needs go
+	result, err = editor.SyncOutbounds(result.Tags, []map[string]any{vlessNode("exit", "192.0.2.21"), vlessNode("other", "192.0.2.22")})
+	if err != nil {
+		t.Fatalf("SyncOutbounds 2: %v", err)
+	}
+	if !reflect.DeepEqual(result.Removed, []string{"relay", "relay0"}) || len(result.Skipped) != 0 {
+		t.Fatalf("result 2 = %+v", result)
+	}
+}
+
 // A chain between two nodes of a subscription is the provider's: when the
 // provider takes it out (or turns it around), the node dials as served. A
 // chain of the user's (the DPI bypass) stays.
