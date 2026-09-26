@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/bits"
 	"regexp"
 	"sort"
 	"strconv"
@@ -192,7 +193,9 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 		pending = append(pending, i)
 	}
 	if e.validator != nil {
-		e.isolate(outbounds, pending, reasons)
+		// Enough halving rounds to find two crashing nodes among them
+		halvings := 2*bits.Len(uint(len(pending))) + 2
+		e.isolate(outbounds, pending, reasons, &halvings)
 	}
 	return reasons
 }
@@ -204,9 +207,19 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 // (sameUnknownField): a provider serving a field of a newer sing-box in
 // every node costs a round, not one per node. An answer that names no
 // outbound (a crash) splits the list in halves, each checked on its own:
-// a few rounds for one such node, never one per node.
-func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[int]string) {
+// a few rounds for one such node, never one per node. Such a round finds
+// nobody, and with many crashing nodes halving would cost about two checks
+// per node, so the rounds are counted (halvings, shared by the recursion):
+// once they are spent, what is left is checked one node at a time — at
+// worst a check per node plus the rounds spent, never twice that.
+func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[int]string, halvings *int) {
 	for len(pending) > 0 {
+		if len(pending) > 1 && *halvings <= 0 {
+			for _, i := range pending {
+				e.isolate(outbounds, []int{i}, reasons, halvings)
+			}
+			return
+		}
 		list := make([]any, len(pending))
 		for j, i := range pending {
 			list[j] = alone(outbounds[i])
@@ -221,9 +234,10 @@ func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[
 		}
 		j, ok := refusedIndex(err.Error())
 		if !ok || j >= len(pending) {
+			*halvings--
 			half := len(pending) / 2
-			e.isolate(outbounds, append([]int(nil), pending[:half]...), reasons)
-			e.isolate(outbounds, append([]int(nil), pending[half:]...), reasons)
+			e.isolate(outbounds, append([]int(nil), pending[:half]...), reasons, halvings)
+			e.isolate(outbounds, append([]int(nil), pending[half:]...), reasons, halvings)
 			return
 		}
 		refused := outbounds[pending[j]]

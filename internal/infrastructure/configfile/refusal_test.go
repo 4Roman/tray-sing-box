@@ -207,6 +207,45 @@ func TestCrashAmongManyIsBisected(t *testing.T) {
 	}
 }
 
+// Halving pays off for a few crashing nodes; with every node crashing it
+// would cost two checks per node (each a sing-box start under the app's
+// lock). The halving rounds are bounded: at most about one check per node
+// plus a few rounds.
+func TestManyCrashesCostAboutOneCheckEach(t *testing.T) {
+	for _, crashing := range []int{64, 20, 3} {
+		t.Run(fmt.Sprint(crashing), func(t *testing.T) {
+			editor, _, check := checkedEditor(t, sampleConfig)
+
+			var nodes []map[string]any
+			for i := 0; i < 64; i++ {
+				flow := ""
+				if i*crashing/64 != (i+1)*crashing/64 {
+					flow = "crash"
+				}
+				nodes = append(nodes, node(fmt.Sprintf("node-%d", i), flow))
+			}
+			nodes = append(nodes, node("good", ""))
+			result, err := editor.AddOutbounds(nodes, nil)
+			if err != nil {
+				t.Fatalf("AddOutbounds: %v", err)
+			}
+			if len(result.Skipped) != crashing || len(result.Tags) != 65-crashing {
+				t.Fatalf("result: %d saved, %d skipped", len(result.Tags), len(result.Skipped))
+			}
+			for _, sk := range result.Skipped {
+				if !strings.HasPrefix(sk.Reason, "sing-box не принимает: panic:") {
+					t.Fatalf("skipped %+v", sk)
+				}
+			}
+			// The merge and its retry, one check per node checked alone, and
+			// the halving rounds: 2 × log2(65) + 2
+			if limit := 2 + 65 + 2*7 + 2; check.calls > limit {
+				t.Fatalf("validator ran %d times for %d crashing nodes among 65, want at most %d", check.calls, crashing, limit)
+			}
+		})
+	}
+}
+
 // A provider serving an option of a newer sing-box in every node: the nodes
 // of one type with the same unknown key are refused together, with the same
 // reason — one round, not one check per node
