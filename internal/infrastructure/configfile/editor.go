@@ -404,9 +404,29 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 	reservedSet := setOf(reserved)
 	replaceable := importReplaceable(reservedSet)
 	var renamed []domain.TagRename
-	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming, _ []map[string]any) error {
-		renamed = suffixTaken(cfg, incoming, replaceable, reservedSet)
-		return upsertOutbounds(cfg, incoming, nil)
+	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming, refused []map[string]any) error {
+		// The refused ones are named along with the others, as a
+		// subscription's are (syncMerge): the same batch gives the same
+		// names whichever are refused, and a detour naming a refused one
+		// under the name it would have been saved with is the batch's own
+		// chain — a re-import decides it the same as with that node saved
+		all := append(append(make([]map[string]any, 0, len(incoming)+len(refused)), incoming...), refused...)
+		renames := suffixTaken(cfg, all, replaceable, reservedSet)
+		saved := map[string]bool{}
+		for _, o := range incoming {
+			saved[tagString(o)] = true
+		}
+		renamed = nil
+		for _, r := range renames {
+			if saved[r.To] {
+				renamed = append(renamed, r)
+			}
+		}
+		batch := map[string]bool{}
+		for _, o := range refused {
+			batch[tagString(o)] = true
+		}
+		return upsertOutbounds(cfg, incoming, batch)
 	})
 	if err != nil {
 		return nil, err
@@ -424,7 +444,8 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 
 // upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
 // replace by tag or append, then register each tag in selector/urltest groups.
-// owned are the other tags of the source (a subscription's nodes).
+// owned are the other tags of the source (a subscription's nodes, the nodes
+// of an import the checks refused).
 func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned map[string]bool) error {
 	outbounds, _ := cfg["outbounds"].([]any)
 

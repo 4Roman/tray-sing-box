@@ -316,6 +316,47 @@ func TestHeldNodeKeepsItsRelays(t *testing.T) {
 	}
 }
 
+// A re-import decides a detour between two of its nodes the same whether the
+// check refused the relay or not: E1 chained through R is the batch's chain
+// (R is re-imported), and the batch now serves E1 without it; E2 chained
+// through the DPI bypass is the user's, although the batch has a node named
+// like it too (saved under another name, or refused)
+func TestReimportChainNotDecidedByRefusal(t *testing.T) {
+	config := `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["R", "E1", "E2", "direct"]},
+    {"type": "vless", "tag": "R", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "vless", "tag": "E1", "server": "192.0.2.11", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555", "detour": "R"},
+    {"type": "vless", "tag": "E2", "server": "192.0.2.12", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555", "detour": "dpi-bypass"},
+    {"type": "http", "tag": "dpi-bypass", "server": "127.0.0.1", "server_port": 3128},
+    {"type": "direct", "tag": "direct"}
+  ], "route": {"final": "proxy"}}`
+	for name, flow := range map[string]string{"relays accepted": "", "relays refused": "from-a-newer-sing-box"} {
+		t.Run(name, func(t *testing.T) {
+			editor, path, _ := checkedEditor(t, config)
+			relay := vlessNode("R", "192.0.2.20")
+			namesake := vlessNode("dpi-bypass", "192.0.2.23")
+			if flow != "" {
+				relay["flow"] = flow
+				namesake["flow"] = flow
+			}
+			result, err := editor.AddOutbounds([]map[string]any{relay, namesake, vlessNode("E1", "192.0.2.21"), vlessNode("E2", "192.0.2.22")}, nil)
+			if err != nil {
+				t.Fatalf("AddOutbounds: %v", err)
+			}
+			if flow != "" && (!reflect.DeepEqual(result.Tags, []string{"E1", "E2"}) || len(result.Skipped) != 2 || len(result.Renamed) != 0) {
+				t.Fatalf("result = %+v", result)
+			}
+			cfg := load(t, path)
+			if n := outboundByTag(t, cfg, "E1"); n["server"] != "192.0.2.21" || n["detour"] != nil {
+				t.Fatalf("E1 = %v", n)
+			}
+			if n := outboundByTag(t, cfg, "E2"); n["server"] != "192.0.2.22" || n["detour"] != "dpi-bypass" {
+				t.Fatalf("E2 = %v", n)
+			}
+		})
+	}
+}
+
 // A chain between two nodes of a subscription is the provider's: when the
 // provider takes it out (or turns it around), the node dials as served. A
 // chain of the user's (the DPI bypass) stays.
