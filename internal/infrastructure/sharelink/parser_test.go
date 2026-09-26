@@ -8,7 +8,7 @@ import (
 
 func TestParseVLESSReality(t *testing.T) {
 	link := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@example.com:443" +
-		"?type=tcp&security=reality&sni=cdn.example.org&fp=chrome&pbk=PUBKEY&sid=6ba85179&flow=xtls-rprx-vision#My%20Server"
+		"?type=tcp&security=reality&sni=cdn.example.org&fp=chrome&pbk=" + testPBK + "&sid=6ba85179&flow=xtls-rprx-vision#My%20Server"
 
 	o, err := Parse(link)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestParseVLESSReality(t *testing.T) {
 		t.Fatalf("server_name = %v", tls["server_name"])
 	}
 	reality := tls["reality"].(map[string]any)
-	if reality["public_key"] != "PUBKEY" || reality["short_id"] != "6ba85179" {
+	if reality["public_key"] != testPBK || reality["short_id"] != "6ba85179" {
 		t.Fatalf("reality = %v", reality)
 	}
 	utls := tls["utls"].(map[string]any)

@@ -17,7 +17,7 @@ func TestImportLinkIntoConfig(t *testing.T) {
 
 	link := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@imported.example.com:443" +
 		"?type=ws&security=tls&sni=cdn.example.org&path=%2Fws#imported-node"
-	outbounds, err := sharelink.Parser{}.Parse("шум вокруг ссылки " + link + " ещё шум")
+	outbounds, _, err := sharelink.Parser{}.Parse("шум вокруг ссылки " + link + " ещё шум")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

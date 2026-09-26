@@ -1,6 +1,14 @@
 // Package sharelink converts proxy share links (vless://, vmess://, trojan://,
-// ss://, hysteria2://) into sing-box outbound JSON objects. sing-box core has
-// no native share-link import, so the conversion is implemented here.
+// ss://, hysteria2://, hysteria://, tuic://, anytls://, socks://) and
+// subscription bodies (lists of such links, base64 blobs, sing-box and SIP008
+// JSON profiles) into sing-box outbound JSON objects. sing-box core has no
+// native share-link import, so the conversion is implemented here.
+//
+// A link sing-box cannot run as it is meant (an Xray-only transport, VLESS
+// Encryption, a plugin sing-box does not have, ...) is refused, not imported
+// in a form that passes `sing-box check` and then never connects. The reason
+// is in Russian (it reaches the tray popups and the settings page) and never
+// quotes the link: it carries the server's credentials.
 package sharelink
 
 import (
@@ -9,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -21,12 +30,13 @@ type Outbound map[string]any
 // Parser adapts this package to the domain.OutboundParser interface
 type Parser struct{}
 
-// Parse extracts and converts every share link found in text; the links
-// that could not be converted are listed in skipped
+// Parse extracts and converts every share link found in text (or the nodes
+// of a subscription profile); the links that could not be converted are
+// listed in skipped
 func (Parser) Parse(text string) ([]map[string]any, []domain.SkippedNode, error) {
 	outbounds, skipped, err := ParseAllReport(text)
 	if err != nil {
-		return nil, nil, err
+		return nil, skipped, err
 	}
 	result := make([]map[string]any, len(outbounds))
 	for i, o := range outbounds {
@@ -41,40 +51,134 @@ func (o Outbound) Tag() string {
 	return tag
 }
 
-// Parse converts a single share link into a sing-box outbound
-func Parse(link string) (Outbound, error) {
-	link = strings.TrimSpace(link)
-
-	switch {
-	case strings.HasPrefix(link, "vless://"):
-		return parseVLESS(link)
-	case strings.HasPrefix(link, "vmess://"):
-		return parseVMess(link)
-	case strings.HasPrefix(link, "trojan://"):
-		return parseTrojan(link)
-	case strings.HasPrefix(link, "ss://"):
-		return parseShadowsocks(link)
-	case strings.HasPrefix(link, "hysteria2://"), strings.HasPrefix(link, "hy2://"):
-		return parseHysteria2(link)
-	default:
-		return nil, fmt.Errorf("unsupported link format (expected vless://, vmess://, trojan://, ss:// or hysteria2://)")
-	}
+// linkParsers are the supported schemes and their converters
+var linkParsers = []struct {
+	scheme string
+	parse  func(string) (Outbound, error)
+}{
+	{"vless://", parseVLESS},
+	{"vmess://", parseVMess},
+	{"trojan://", parseTrojan},
+	{"ss://", parseShadowsocks},
+	{"hysteria2://", parseHysteria2},
+	{"hy2://", parseHysteria2},
+	{"hysteria://", parseHysteria},
+	{"tuic://", parseTUIC},
+	{"anytls://", parseAnyTLS},
+	{"socks://", parseSOCKS},
+	{"socks5://", parseSOCKS},
+	{"socks5h://", parseSOCKS},
+	{"socks4://", parseSOCKS},
+	{"socks4a://", parseSOCKS},
 }
 
-var schemes = []string{"vless://", "vmess://", "trojan://", "ss://", "hysteria2://", "hy2://"}
+// unsupportedSchemes are proxy links the app recognizes but cannot import:
+// found in a text they are reported with the reason instead of being
+// silently ignored
+var unsupportedSchemes = []struct {
+	scheme, reason string
+}{
+	{"ssr://", "ShadowsocksR не поддерживается sing-box"},
+	{"wireguard://", "ссылки WireGuard приложение не импортирует (в sing-box это endpoint, а не outbound)"},
+	{"wg://", "ссылки WireGuard приложение не импортирует (в sing-box это endpoint, а не outbound)"},
+	{"awg://", "AmneziaWG не поддерживается sing-box"},
+	{"hysteria2+realm://", "режим realm Hysteria 2 приложение не импортирует"},
+	{"hysteria2+realm+http://", "режим realm Hysteria 2 приложение не импортирует"},
+	{"naive+https://", "ссылки NaiveProxy приложение не импортирует"},
+	{"naive+quic://", "ссылки NaiveProxy приложение не импортирует"},
+	{"naive://", "ссылки NaiveProxy приложение не импортирует"},
+}
 
-// extractLinks returns every supported share link found in arbitrary text
+// allSchemes is every scheme extractLinks looks for
+var allSchemes = func() []string {
+	var all []string
+	for _, p := range linkParsers {
+		all = append(all, p.scheme)
+	}
+	for _, u := range unsupportedSchemes {
+		all = append(all, u.scheme)
+	}
+	return all
+}()
+
+// errNoLinks: the text holds nothing the app can read
+var errNoLinks = errors.New("в тексте нет ссылок на серверы (приложение понимает vless://, vmess://, trojan://, ss://, " +
+	"hysteria2://, hysteria://, tuic://, anytls://, socks://, их списки и подписки в base64, профили sing-box и SIP008)")
+
+// nodeError is the refusal of one link: the reason, for the user in Russian,
+// and the node's name when the link has one
+type nodeError struct {
+	name   string
+	reason string
+}
+
+func (e *nodeError) Error() string {
+	if e.name == "" {
+		return e.reason
+	}
+	return fmt.Sprintf("узел «%s»: %s", e.name, e.reason)
+}
+
+// Parse converts a single share link into a sing-box outbound. The error
+// names the node (the link's name) and says in Russian why it was refused.
+func Parse(link string) (Outbound, error) {
+	link = strings.TrimSpace(link)
+	outbound, err := parseLink(link)
+	if err != nil {
+		return nil, &nodeError{name: linkTitle(link), reason: err.Error()}
+	}
+	return outbound, nil
+}
+
+// parseLink converts a link; its error is the bare reason
+func parseLink(link string) (Outbound, error) {
+	for _, p := range linkParsers {
+		if strings.HasPrefix(link, p.scheme) {
+			return p.parse(link)
+		}
+	}
+	for _, u := range unsupportedSchemes {
+		if strings.HasPrefix(link, u.scheme) {
+			return nil, errors.New(u.reason)
+		}
+	}
+	return nil, errors.New("неизвестный формат ссылки (приложение понимает vless://, vmess://, trojan://, ss://, " +
+		"hysteria2://, hysteria://, tuic://, anytls:// и socks://)")
+}
+
+// extractLinks returns every proxy link (supported or recognized as
+// unsupported) found in arbitrary text. A scheme counts only at the start of
+// a word: "wss://" is no "ss://" link, "vmess://" no "ss://" either.
 func extractLinks(text string) []string {
 	var links []string
 	for _, field := range strings.Fields(text) {
-		for _, scheme := range schemes {
-			if idx := strings.Index(field, scheme); idx >= 0 {
-				links = append(links, field[idx:])
-				break
+		best, bestLen := -1, 0
+		for _, scheme := range allSchemes {
+			for from := 0; from < len(field); {
+				i := strings.Index(field[from:], scheme)
+				if i < 0 {
+					break
+				}
+				i += from
+				if i == 0 || !schemeChar(field[i-1]) {
+					if best < 0 || i < best || (i == best && len(scheme) > bestLen) {
+						best, bestLen = i, len(scheme)
+					}
+					break
+				}
+				from = i + 1
 			}
+		}
+		if best >= 0 {
+			links = append(links, field[best:])
 		}
 	}
 	return links
+}
+
+// schemeChar: a character a URL scheme may contain
+func schemeChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.'
 }
 
 // ParseAny extracts the first supported share link from arbitrary text
@@ -82,70 +186,141 @@ func extractLinks(text string) []string {
 func ParseAny(text string) (Outbound, error) {
 	links := extractLinks(text)
 	if len(links) == 0 {
-		return nil, fmt.Errorf("no supported share link found in text")
+		return nil, errNoLinks
 	}
 	return Parse(links[0])
 }
 
 // ParseAll extracts and parses every supported share link in text. If the
 // text contains no links directly, it is treated as a base64 subscription
-// blob (a base64-encoded list of links, the common subscription format).
-// Links that fail to parse are skipped as long as at least one succeeds.
-// Duplicate tags get a numeric suffix so each outbound stays addressable.
+// blob (a base64-encoded list of links, the common subscription format) or
+// a JSON profile (sing-box, SIP008). Links that fail to parse are skipped as
+// long as at least one succeeds. Duplicate tags get a numeric suffix so each
+// outbound stays addressable.
 func ParseAll(text string) ([]Outbound, error) {
 	outbounds, _, err := ParseAllReport(text)
 	return outbounds, err
 }
 
 // ParseAllReport is ParseAll that also names the links it left out, with
-// the reason (never the link: it carries credentials)
+// the reason (never the link: it carries credentials). When nothing could be
+// converted the error lists the reasons.
 func ParseAllReport(text string) ([]Outbound, []domain.SkippedNode, error) {
+	var c collector
+	if ok, err := c.profile(text); ok {
+		return c.result(err)
+	}
+
 	links := extractLinks(text)
+	var decoded string
 	if len(links) == 0 {
 		compact := strings.Join(strings.Fields(text), "")
-		if decoded, err := decodeBase64(compact); err == nil {
-			links = extractLinks(string(decoded))
+		if data, err := decodeBase64(compact); err == nil {
+			decoded = string(data)
+			links = extractLinks(decoded)
+			if len(links) == 0 {
+				if ok, err := c.profile(decoded); ok {
+					return c.result(err)
+				}
+			}
 		}
 	}
 	if len(links) == 0 {
-		return nil, nil, fmt.Errorf("no supported share link found in text")
+		if err := foreignProfile(text); err != nil {
+			return nil, nil, err
+		}
+		if err := foreignProfile(decoded); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, errNoLinks
 	}
 
-	var outbounds []Outbound
-	var skipped []domain.SkippedNode
-	var firstErr error
-	seen := map[string]int{}
 	for i, link := range links {
-		outbound, err := Parse(link)
+		outbound, err := parseLink(link)
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			skipped = append(skipped, domain.SkippedNode{Name: linkName(link, i), Reason: err.Error()})
+			c.skip(linkName(link, i), err.Error())
 			continue
 		}
-		tag := outbound.Tag()
-		seen[tag]++
-		if seen[tag] > 1 {
-			tag = fmt.Sprintf("%s (%d)", tag, seen[tag])
-			outbound["tag"] = tag
-			seen[tag]++
-		}
-		outbounds = append(outbounds, outbound)
+		c.add(outbound)
 	}
+	return c.result(nil)
+}
 
-	if len(outbounds) == 0 {
-		return nil, skipped, fmt.Errorf("no link could be parsed: %w", firstErr)
+// collector gathers the converted outbounds (tags made unique) and the
+// nodes left out
+type collector struct {
+	outbounds []Outbound
+	skipped   []domain.SkippedNode
+	seen      map[string]int
+}
+
+func (c *collector) add(outbound Outbound) {
+	if c.seen == nil {
+		c.seen = map[string]int{}
 	}
-	return outbounds, skipped, nil
+	tag := outbound.Tag()
+	c.seen[tag]++
+	if c.seen[tag] > 1 {
+		tag = fmt.Sprintf("%s (%d)", tag, c.seen[tag])
+		outbound["tag"] = tag
+		c.seen[tag]++
+	}
+	c.outbounds = append(c.outbounds, outbound)
+}
+
+func (c *collector) skip(name, reason string) {
+	c.skipped = append(c.skipped, domain.SkippedNode{Name: name, Reason: reason})
+}
+
+// result: the outbounds, or — nothing converted — an error: err when the
+// source itself was refused, otherwise the list of the reasons
+func (c *collector) result(err error) ([]Outbound, []domain.SkippedNode, error) {
+	if len(c.outbounds) > 0 {
+		return c.outbounds, c.skipped, nil
+	}
+	if err == nil {
+		err = nothingImported(c.skipped)
+	}
+	return nil, c.skipped, err
+}
+
+// nothingImported is the error of a text none of whose nodes could be
+// converted: every reason (the first few), each with its node
+func nothingImported(skipped []domain.SkippedNode) error {
+	if len(skipped) == 0 {
+		return errNoLinks
+	}
+	const limit = 5
+	var parts []string
+	for i, sk := range skipped {
+		if i == limit {
+			parts = append(parts, fmt.Sprintf("и ещё %d", len(skipped)-limit))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("«%s» — %s", sk.Name, sk.Reason))
+	}
+	if len(skipped) == 1 {
+		return fmt.Errorf("сервер не импортирован: %s", parts[0])
+	}
+	return fmt.Errorf("ни один сервер не импортирован: %s", strings.Join(parts, "; "))
 }
 
 // linkName is what a skipped link is called in the report: its name (the
 // URL fragment, or the vmess "ps"), never anything else of the link
 func linkName(link string, index int) string {
+	if name := linkTitle(link); name != "" {
+		return name
+	}
+	return fmt.Sprintf("ссылка %d", index+1)
+}
+
+// linkTitle is the link's own name, "" when it has none. Only a fragment on
+// one line qualifies: Parse is given whatever text its caller has, and after
+// the last '#' of a text with line breaks there could be anything
+func linkTitle(link string) string {
 	if i := strings.LastIndex(link, "#"); i >= 0 {
-		if name, err := url.QueryUnescape(link[i+1:]); err == nil && strings.TrimSpace(name) != "" {
-			return strings.TrimSpace(name)
+		if name, err := url.QueryUnescape(link[i+1:]); err == nil && plainName(name) {
+			return shortName(name)
 		}
 	}
 	if strings.HasPrefix(link, "vmess://") {
@@ -153,12 +328,26 @@ func linkName(link string, index int) string {
 			var v struct {
 				Ps string `json:"ps"`
 			}
-			if json.Unmarshal(payload, &v) == nil && strings.TrimSpace(v.Ps) != "" {
-				return strings.TrimSpace(v.Ps)
+			if json.Unmarshal(payload, &v) == nil && plainName(v.Ps) {
+				return shortName(v.Ps)
 			}
 		}
 	}
-	return fmt.Sprintf("ссылка %d", index+1)
+	return ""
+}
+
+// plainName: a non-empty name on one line
+func plainName(s string) bool {
+	return strings.TrimSpace(s) != "" && !strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7f })
+}
+
+// shortName trims a name for the report (the node's tag keeps it whole)
+func shortName(s string) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > 100 {
+		return string(r[:100]) + "…"
+	}
+	return s
 }
 
 // decodeBase64 decodes standard or URL-safe base64, padded or not
@@ -194,399 +383,104 @@ func tagOrDefault(fragment, proto, host string, port int) string {
 func parseURL(link string) (*url.URL, error) {
 	u, err := url.Parse(link)
 	if err != nil {
-		return nil, errors.New("malformed link")
+		return nil, errors.New("ссылка повреждена")
 	}
 	return u, nil
 }
 
+// serverHost is the link's server address; a link without one is refused
+func serverHost(u *url.URL) (string, error) {
+	host := u.Hostname()
+	if host == "" {
+		return "", errors.New("в ссылке не указан адрес сервера")
+	}
+	return host, nil
+}
+
 func parsePort(s string) (int, error) {
+	if s == "" {
+		return 0, errors.New("в ссылке не указан порт")
+	}
 	port, err := strconv.Atoi(s)
 	if err != nil || port < 1 || port > 65535 {
-		return 0, fmt.Errorf("invalid port: %q", s)
+		return 0, errors.New("неверный порт")
 	}
 	return port, nil
 }
 
-// tlsConfig builds the sing-box tls object from common query params
-func tlsConfig(q url.Values, host string) map[string]any {
-	security := q.Get("security")
-	if security == "" || security == "none" {
-		return nil
+// portOrDefault is parsePort with a default for a link without a port (the
+// hysteria2 and anytls URI schemes say 443)
+func portOrDefault(s string, def int) (int, error) {
+	if s == "" {
+		return def, nil
 	}
-
-	tls := map[string]any{"enabled": true}
-
-	serverName := q.Get("sni")
-	if serverName == "" {
-		serverName = q.Get("host")
-	}
-	if serverName == "" {
-		serverName = host
-	}
-	tls["server_name"] = serverName
-
-	if q.Get("allowInsecure") == "1" || q.Get("insecure") == "1" {
-		tls["insecure"] = true
-	}
-
-	if alpn := q.Get("alpn"); alpn != "" {
-		tls["alpn"] = strings.Split(alpn, ",")
-	}
-
-	if fp := q.Get("fp"); fp != "" {
-		tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
-	}
-
-	if security == "reality" {
-		reality := map[string]any{"enabled": true, "public_key": q.Get("pbk")}
-		if sid := q.Get("sid"); sid != "" {
-			reality["short_id"] = sid
-		}
-		tls["reality"] = reality
-	}
-
-	return tls
+	return parsePort(s)
 }
 
-// transportConfig builds the sing-box transport object from common query params.
-// network values follow the v2ray share-link convention ("type" param).
-func transportConfig(q url.Values) map[string]any {
-	switch q.Get("type") {
-	case "", "tcp":
-		return nil
-	case "ws":
-		transport := map[string]any{"type": "ws"}
-		if path := q.Get("path"); path != "" {
-			transport["path"] = path
+// queryValues parses a link's query like url.ParseQuery, except that a ';'
+// belongs to the value: net/url drops a whole pair that contains one, and a
+// SIP002 plugin value ("obfs-local;obfs=http") is often left unescaped. A
+// value that is not valid percent-encoding is kept as it is.
+func queryValues(raw string) url.Values {
+	values := url.Values{}
+	for _, pair := range strings.Split(raw, "&") {
+		if pair == "" {
+			continue
 		}
-		if host := q.Get("host"); host != "" {
-			transport["headers"] = map[string]any{"Host": host}
+		key, value, _ := strings.Cut(pair, "=")
+		if k, err := url.QueryUnescape(key); err == nil {
+			key = k
 		}
-		return transport
-	case "grpc":
-		transport := map[string]any{"type": "grpc"}
-		if svc := q.Get("serviceName"); svc != "" {
-			transport["service_name"] = svc
+		if v, err := url.QueryUnescape(value); err == nil {
+			value = v
 		}
-		return transport
-	case "http", "h2":
-		transport := map[string]any{"type": "http"}
-		if path := q.Get("path"); path != "" {
-			transport["path"] = path
-		}
-		if host := q.Get("host"); host != "" {
-			transport["host"] = strings.Split(host, ",")
-		}
-		return transport
-	case "httpupgrade":
-		transport := map[string]any{"type": "httpupgrade"}
-		if path := q.Get("path"); path != "" {
-			transport["path"] = path
-		}
-		if host := q.Get("host"); host != "" {
-			transport["host"] = host
-		}
-		return transport
-	default:
-		return nil
+		values.Add(key, value)
 	}
+	return values
 }
 
-func parseVLESS(link string) (Outbound, error) {
-	u, err := parseURL(link)
-	if err != nil {
-		return nil, fmt.Errorf("invalid vless link: %w", err)
+// flagSet reports whether any of the keys is set to 1 or true
+func flagSet(q url.Values, keys ...string) bool {
+	for _, k := range keys {
+		switch strings.ToLower(strings.TrimSpace(q.Get(k))) {
+		case "1", "true":
+			return true
+		}
 	}
-	if u.User == nil || u.User.Username() == "" {
-		return nil, fmt.Errorf("vless link is missing uuid")
-	}
-	port, err := parsePort(u.Port())
-	if err != nil {
-		return nil, fmt.Errorf("vless link: %w", err)
-	}
-
-	q := u.Query()
-	outbound := Outbound{
-		"type":        "vless",
-		"tag":         tagOrDefault(u.Fragment, "vless", u.Hostname(), port),
-		"server":      u.Hostname(),
-		"server_port": port,
-		"uuid":        u.User.Username(),
-	}
-	if flow := q.Get("flow"); flow != "" {
-		outbound["flow"] = flow
-	}
-	if tls := tlsConfig(q, u.Hostname()); tls != nil {
-		outbound["tls"] = tls
-	}
-	if transport := transportConfig(q); transport != nil {
-		outbound["transport"] = transport
-	}
-	return outbound, nil
+	return false
 }
 
-// vmessLink is the v2rayN-style base64 JSON payload of a vmess:// link
-type vmessLink struct {
-	Ps   string          `json:"ps"`
-	Add  string          `json:"add"`
-	Port json.RawMessage `json:"port"`
-	ID   string          `json:"id"`
-	Aid  json.RawMessage `json:"aid"`
-	Scy  string          `json:"scy"`
-	Net  string          `json:"net"`
-	Host string          `json:"host"`
-	Path string          `json:"path"`
-	TLS  string          `json:"tls"`
-	SNI  string          `json:"sni"`
-	Alpn string          `json:"alpn"`
-	Fp   string          `json:"fp"`
+// insecureKeys are the spellings of "skip certificate verification" in the
+// links of the various clients
+var insecureKeys = []string{"allowInsecure", "insecure", "allow_insecure", "allowinsecure"}
+
+// splitList splits a comma-separated value, dropping empty items
+func splitList(s string) []string {
+	var items []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
-// rawInt parses a JSON value that may be a number or a quoted number
-func rawInt(raw json.RawMessage) (int, error) {
-	s := strings.Trim(strings.TrimSpace(string(raw)), `"`)
-	if s == "" || s == "null" {
-		return 0, nil
+// firstOf is the first item of a comma-separated value
+func firstOf(s string) string {
+	if items := splitList(s); len(items) > 0 {
+		return items[0]
 	}
-	return strconv.Atoi(s)
+	return ""
 }
 
-func parseVMess(link string) (Outbound, error) {
-	payload, err := decodeBase64(strings.TrimPrefix(link, "vmess://"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid vmess link: %w", err)
-	}
+// tokenPattern: a value short and plain enough to be named in a reason — a
+// transport, flow or plugin name, never a credential-like blob
+var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$`)
 
-	var v vmessLink
-	if err := json.Unmarshal(payload, &v); err != nil {
-		return nil, fmt.Errorf("invalid vmess link payload: %w", err)
+// token returns s when it can be quoted in a reason, "…" otherwise
+func token(s string) string {
+	if tokenPattern.MatchString(s) {
+		return s
 	}
-
-	port, err := rawInt(v.Port)
-	if err != nil || port < 1 || port > 65535 {
-		return nil, fmt.Errorf("vmess link: invalid port")
-	}
-	alterID, err := rawInt(v.Aid)
-	if err != nil {
-		return nil, fmt.Errorf("vmess link: invalid aid")
-	}
-
-	security := v.Scy
-	if security == "" {
-		security = "auto"
-	}
-
-	tag := strings.TrimSpace(v.Ps)
-	if tag == "" {
-		tag = fmt.Sprintf("vmess-%s-%d", v.Add, port)
-	}
-
-	outbound := Outbound{
-		"type":        "vmess",
-		"tag":         tag,
-		"server":      v.Add,
-		"server_port": port,
-		"uuid":        v.ID,
-		"security":    security,
-		"alter_id":    alterID,
-	}
-
-	if v.TLS == "tls" {
-		tls := map[string]any{"enabled": true}
-		serverName := v.SNI
-		if serverName == "" {
-			serverName = v.Host
-		}
-		if serverName == "" {
-			serverName = v.Add
-		}
-		tls["server_name"] = serverName
-		if v.Alpn != "" {
-			tls["alpn"] = strings.Split(v.Alpn, ",")
-		}
-		if v.Fp != "" {
-			tls["utls"] = map[string]any{"enabled": true, "fingerprint": v.Fp}
-		}
-		outbound["tls"] = tls
-	}
-
-	// Reuse the query-param transport builder via equivalent values
-	q := url.Values{}
-	q.Set("type", v.Net)
-	q.Set("path", v.Path)
-	q.Set("host", v.Host)
-	if v.Net == "h2" {
-		q.Set("type", "http")
-	}
-	if transport := transportConfig(q); transport != nil {
-		outbound["transport"] = transport
-	}
-
-	return outbound, nil
-}
-
-func parseTrojan(link string) (Outbound, error) {
-	u, err := parseURL(link)
-	if err != nil {
-		return nil, fmt.Errorf("invalid trojan link: %w", err)
-	}
-	if u.User == nil || u.User.Username() == "" {
-		return nil, fmt.Errorf("trojan link is missing password")
-	}
-	port, err := parsePort(u.Port())
-	if err != nil {
-		return nil, fmt.Errorf("trojan link: %w", err)
-	}
-
-	password := u.User.Username()
-	if pw, ok := u.User.Password(); ok {
-		password = password + ":" + pw
-	}
-
-	q := u.Query()
-	outbound := Outbound{
-		"type":        "trojan",
-		"tag":         tagOrDefault(u.Fragment, "trojan", u.Hostname(), port),
-		"server":      u.Hostname(),
-		"server_port": port,
-		"password":    password,
-	}
-
-	// Trojan implies TLS; honor explicit params but default to enabled
-	if tls := tlsConfig(q, u.Hostname()); tls != nil {
-		outbound["tls"] = tls
-	} else {
-		serverName := q.Get("sni")
-		if serverName == "" {
-			serverName = u.Hostname()
-		}
-		outbound["tls"] = map[string]any{"enabled": true, "server_name": serverName}
-	}
-
-	if transport := transportConfig(q); transport != nil {
-		outbound["transport"] = transport
-	}
-	return outbound, nil
-}
-
-func parseShadowsocks(link string) (Outbound, error) {
-	raw := strings.TrimPrefix(link, "ss://")
-
-	// Legacy format: the whole authority is base64(method:password@host:port)
-	if !strings.Contains(raw, "@") {
-		body := raw
-		var fragment string
-		if idx := strings.Index(body, "#"); idx >= 0 {
-			fragment = body[idx+1:]
-			body = body[:idx]
-		}
-		decoded, err := decodeBase64(body)
-		if err != nil {
-			return nil, fmt.Errorf("invalid ss link: %w", err)
-		}
-		// Re-encoded into the SIP002 form below: the password may contain
-		// '/', '?' or '#' (base64-generated ones do), which would end the
-		// authority of a URL
-		at := strings.LastIndex(string(decoded), "@")
-		if at < 0 {
-			return nil, fmt.Errorf("ss link is missing credentials")
-		}
-		raw = base64.RawURLEncoding.EncodeToString(decoded[:at]) + string(decoded[at:])
-		if fragment != "" {
-			raw += "#" + fragment
-		}
-	}
-
-	u, err := parseURL("ss://" + raw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid ss link: %w", err)
-	}
-	if u.User == nil {
-		return nil, fmt.Errorf("ss link is missing credentials")
-	}
-	port, err := parsePort(u.Port())
-	if err != nil {
-		return nil, fmt.Errorf("ss link: %w", err)
-	}
-
-	var method, password string
-	if pw, ok := u.User.Password(); ok {
-		// Plain method:password in userinfo
-		method = u.User.Username()
-		password = pw
-	} else {
-		// SIP002: userinfo is base64(method:password)
-		decoded, err := decodeBase64(u.User.Username())
-		if err != nil {
-			return nil, fmt.Errorf("invalid ss link userinfo: %w", err)
-		}
-		method, password, ok = strings.Cut(string(decoded), ":")
-		if !ok {
-			return nil, fmt.Errorf("invalid ss link userinfo: expected method:password")
-		}
-	}
-
-	if plugin := u.Query().Get("plugin"); plugin != "" {
-		// Named without its options: they may carry the plugin's own
-		// credential (ck-client UID, shadow-tls password, kcptun key)
-		name, _, _ := strings.Cut(plugin, ";")
-		return nil, fmt.Errorf("ss link uses plugin %q which is not supported", name)
-	}
-
-	return Outbound{
-		"type":        "shadowsocks",
-		"tag":         tagOrDefault(u.Fragment, "ss", u.Hostname(), port),
-		"server":      u.Hostname(),
-		"server_port": port,
-		"method":      method,
-		"password":    password,
-	}, nil
-}
-
-func parseHysteria2(link string) (Outbound, error) {
-	link = strings.Replace(link, "hy2://", "hysteria2://", 1)
-	u, err := parseURL(link)
-	if err != nil {
-		return nil, fmt.Errorf("invalid hysteria2 link: %w", err)
-	}
-	port, err := parsePort(u.Port())
-	if err != nil {
-		return nil, fmt.Errorf("hysteria2 link: %w", err)
-	}
-
-	var password string
-	if u.User != nil {
-		password = u.User.Username()
-		if pw, ok := u.User.Password(); ok {
-			password = password + ":" + pw
-		}
-	}
-
-	q := u.Query()
-	serverName := q.Get("sni")
-	if serverName == "" {
-		serverName = u.Hostname()
-	}
-	tls := map[string]any{"enabled": true, "server_name": serverName}
-	if q.Get("insecure") == "1" || q.Get("allowInsecure") == "1" {
-		tls["insecure"] = true
-	}
-
-	outbound := Outbound{
-		"type":        "hysteria2",
-		"tag":         tagOrDefault(u.Fragment, "hysteria2", u.Hostname(), port),
-		"server":      u.Hostname(),
-		"server_port": port,
-		"password":    password,
-		"tls":         tls,
-	}
-
-	if obfs := q.Get("obfs"); obfs != "" {
-		outbound["obfs"] = map[string]any{
-			"type":     obfs,
-			"password": q.Get("obfs-password"),
-		}
-	}
-
-	return outbound, nil
+	return "…"
 }
