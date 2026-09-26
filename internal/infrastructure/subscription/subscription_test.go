@@ -1,6 +1,7 @@
 package subscription
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -42,6 +43,52 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// The reported problems are kept under fixed names ("reported",
+// "problem_seen") and left out while there are none; a list written by an
+// earlier build, with one hash of all the kinds under "problem", still loads
+// (its problems are simply not remembered as reported)
+func TestStoreProblemMemoryFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "subscriptions.json")
+	store := NewStore(path)
+	seen := time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC)
+	want := []domain.Subscription{
+		{URL: "https://p.example/a", Tags: []string{"a"}, Reported: []string{"0123456789abcdef"}, ProblemSeen: seen},
+		{URL: "https://p.example/b", Tags: []string{"b"}},
+	}
+	if err := store.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	var raw []map[string]any
+	data, err := os.ReadFile(path)
+	if err == nil {
+		err = json.Unmarshal(data, &raw)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(raw[0]["reported"], []any{"0123456789abcdef"}) || raw[0]["problem_seen"] != "2026-09-20T08:00:00Z" {
+		t.Fatalf("saved as %s", data)
+	}
+	if _, ok := raw[1]["reported"]; ok {
+		t.Fatalf("no problem, but saved: %s", data)
+	}
+	if _, ok := raw[1]["problem_seen"]; ok {
+		t.Fatalf("no problem, but saved: %s", data)
+	}
+	if got, err := store.Load(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+
+	previous := `[{"url": "https://p.example/a", "tags": ["a"], "updated": "2026-09-20T08:00:00Z", "problem": "0123456789abcdef"}]`
+	if err := os.WriteFile(path, []byte(previous), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil || len(got) != 1 || got[0].URL != "https://p.example/a" || got[0].Reported != nil {
+		t.Fatalf("the previous format: %+v, %v", got, err)
 	}
 }
 

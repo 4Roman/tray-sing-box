@@ -9,22 +9,34 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Subscription is one saved subscription URL and the outbound tags it owns
+// Subscription is one saved subscription URL and the outbound tags it owns.
+// The JSON names are the format of subscriptions.json and stay as they are.
 type Subscription struct {
 	URL     string    `json:"url"`
 	Tags    []string  `json:"tags"`
 	Updated time.Time `json:"updated"`
-	// Problem identifies what went wrong at the last refresh (a hash of the
-	// error and the reasons nodes were skipped; empty: nothing): an
-	// unattended refresh tells the user about a problem only when it differs
-	// from this one (SubscriptionUpdate.NewProblem)
-	Problem string `json:"problem,omitempty"`
+	// Reported ("reported"): the kinds of problem the user has been told
+	// about for this subscription (problemKinds), each as a short hash — the
+	// text may name nodes, and the file needs none of it. An unattended
+	// refresh reports only a kind not in it (SubscriptionUpdate.NewProblem):
+	// a provider that switches between two problems, or between a problem
+	// and a clean list, is reported once, not at every refresh. Forgotten
+	// once the subscription has had no problem for problemMemory.
+	//
+	// The previous format kept one hash of all the kinds together in
+	// "problem"; that key is not read (the next save drops it), and such a
+	// subscription's problems are reported once more.
+	Reported []string `json:"reported,omitempty"`
+	// ProblemSeen ("problem_seen"): when a refresh last found a problem;
+	// what measures problemMemory
+	ProblemSeen time.Time `json:"problem_seen,omitzero"`
 }
 
 // SyncResult describes how SubscriptionConfigStore.SyncOutbounds changed the
@@ -75,8 +87,9 @@ type SubscriptionUpdate struct {
 	Suffixed []TagRename   // nodes saved as "<name> (N)": the name was taken
 	Skipped  []SkippedNode // nodes of the body left out, with the reason
 	Err      error
-	// NewProblem: Err or Skipped differ from what the previous refresh of
-	// this subscription found — an unattended refresh reports only these
+	// NewProblem: Err or Skipped show a kind of problem the user has not
+	// been told about for this subscription (Subscription.Reported) — an
+	// unattended refresh reports only these
 	NewProblem bool
 
 	changedConfig bool // the sync changed config.json in a way sing-box sees
@@ -341,7 +354,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		// Often a moment without network (right after logon): a problem
 		// only once the servers are getting old
 		if stale := sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter; stale {
-			noteProblem(sub, &update, "fetch")
+			noteProblem(sub, &update)
 		}
 		return update
 	}
@@ -352,14 +365,14 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	}
 	if err != nil {
 		update.Err = noneUsable("не удалось разобрать подписку", skipped, err)
-		noteProblem(sub, &update, problemKey(update))
+		noteProblem(sub, &update)
 		return update
 	}
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)
 	if err != nil {
 		update.Err = fmt.Errorf("не удалось обновить конфиг: %w", err)
-		noteProblem(sub, &update, problemKey(update))
+		noteProblem(sub, &update)
 		return update
 	}
 	for _, sk := range sync.Skipped {
@@ -370,7 +383,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		// Every node refused: nothing was saved, the servers of the last
 		// refresh stay (and stay owned)
 		update.Err = noneUsable("ни один сервер подписки не подошёл", update.Skipped, nil)
-		noteProblem(sub, &update, problemKey(update))
+		noteProblem(sub, &update)
 		return update
 	}
 
@@ -385,7 +398,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	update.Renamed = sync.Renamed
 	update.Suffixed = sync.Suffixed
 	update.changedConfig = sync.NeedsRestart
-	noteProblem(sub, &update, problemKey(update))
+	noteProblem(sub, &update)
 	for _, r := range sync.Suffixed {
 		log.Printf("Subscription %s: %q saved as %q (the name is taken)", RedactURL(sub.URL), r.From, r.To)
 	}
@@ -400,29 +413,44 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 // fresh one is not: the next refresh usually makes it)
 const subscriptionStaleAfter = 24 * time.Hour
 
-// problemKey sums up what went wrong in a refresh — the kind of the error
-// and of each reason nodes were left out for; "" when nothing did. The kinds
-// only, as a set: the rest of a message is the provider's to vary — node
-// names carry live counters (3x-ui's default remark ends with the traffic
-// and days left), sing-box's refusal quotes the node's own field names and
-// values, and the number of nodes left out changes with the provider's list
-// — and none of that may make the same problem new at every refresh (a
-// hostile provider could otherwise have the unattended popup appear every
-// few hours).
-func problemKey(update SubscriptionUpdate) string {
-	kinds := map[string]bool{}
+// problemMemory: the kinds of problem reported for a subscription are
+// forgotten once it has had none for this long, and one that comes back
+// after that is news again. Not sooner: a provider whose list goes back and
+// forth between a problem and none (a node that fails every other day) would
+// otherwise have the unattended popup reappear every few refreshes.
+const problemMemory = 7 * 24 * time.Hour
+
+// reportedLimit bounds the kinds remembered for a subscription, the oldest
+// go first. The app's messages come in far fewer kinds; this only keeps the
+// file small should the leading words of one carry a value after all.
+const reportedLimit = 32
+
+// problemKinds lists what went wrong in a refresh — the kind of the error
+// and of each reason nodes were left out for, each once, sorted; none when
+// nothing did. The kinds only: the rest of a message is the provider's to
+// vary — node names carry live counters (3x-ui's default remark ends with
+// the traffic and days left), sing-box's refusal quotes the node's own field
+// names and values, and the number of nodes left out changes with the
+// provider's list — and none of that may make the same problem new at every
+// refresh (a hostile provider could otherwise have the unattended popup
+// appear every few hours).
+func problemKinds(update SubscriptionUpdate) []string {
+	seen := map[string]bool{}
+	var kinds []string
+	add := func(kind string) {
+		if !seen[kind] {
+			seen[kind] = true
+			kinds = append(kinds, kind)
+		}
+	}
 	if update.Err != nil {
-		kinds["error: "+problemKind(update.Err.Error())] = true
+		add("error: " + problemKind(update.Err.Error()))
 	}
 	for _, sk := range update.Skipped {
-		kinds["skipped: "+problemKind(sk.Reason)] = true
+		add("skipped: " + problemKind(sk.Reason))
 	}
-	parts := make([]string, 0, len(kinds))
-	for kind := range kinds {
-		parts = append(parts, kind)
-	}
-	sort.Strings(parts)
-	return strings.Join(parts, "\n")
+	sort.Strings(kinds)
+	return kinds
 }
 
 // problemKind is the kind of problem a message describes: its leading words,
@@ -436,18 +464,34 @@ func problemKind(message string) string {
 	return strings.TrimSpace(message)
 }
 
-// noteProblem records the problem of this refresh in the subscription and
-// flags it as new when it differs from the one recorded before. Stored as a
-// hash: the text may name nodes, and the file needs none of it.
-func noteProblem(sub *Subscription, update *SubscriptionUpdate, key string) {
-	if key == "" {
-		sub.Problem = ""
+// noteProblem records the kinds of problem of this refresh as reported for
+// the subscription (Subscription.Reported) and flags the refresh as bringing
+// a new problem when one of them was not recorded yet. Only a kind not seen
+// before counts: when the set of kinds merely changed — one of two went
+// away, or all of them and then came back — the user has heard of every one
+// already. A refresh without a problem forgets them once the last problem is
+// problemMemory old.
+func noteProblem(sub *Subscription, update *SubscriptionUpdate) {
+	kinds := problemKinds(*update)
+	now := time.Now()
+	if len(kinds) == 0 {
+		if len(sub.Reported) > 0 && now.Sub(sub.ProblemSeen) >= problemMemory {
+			sub.Reported, sub.ProblemSeen = nil, time.Time{}
+		}
 		return
 	}
-	sum := sha256.Sum256([]byte(key))
-	id := hex.EncodeToString(sum[:8])
-	update.NewProblem = id != sub.Problem
-	sub.Problem = id
+	sub.ProblemSeen = now
+	for _, kind := range kinds {
+		sum := sha256.Sum256([]byte(kind))
+		id := hex.EncodeToString(sum[:8])
+		if !slices.Contains(sub.Reported, id) {
+			sub.Reported = append(sub.Reported, id)
+			update.NewProblem = true
+		}
+	}
+	if extra := len(sub.Reported) - reportedLimit; extra > 0 {
+		sub.Reported = append([]string(nil), sub.Reported[extra:]...)
+	}
 }
 
 func indexOfSubscription(subs []Subscription, rawURL string) int {

@@ -323,9 +323,9 @@ func (a *Application) subscriptionLoop() {
 }
 
 // autoRefreshSubscriptions refreshes every subscription. A problem the user
-// has not been told about yet (SubscriptionUpdate.NewProblem: a failure, or
-// nodes left out, that differs from what the previous refresh found) gets
-// one popup; the same problem again does not — an unattended refresh must
+// has not been told about yet (SubscriptionUpdate.NewProblem: a kind of
+// failure, or of nodes left out, not reported for that subscription before)
+// gets one popup; the same problem again does not — an unattended refresh must
 // not nag every few hours, but a subscription that silently stopped updating
 // (one odd node refused, the provider's link gone) would leave the user on
 // servers the provider has long rotated out.

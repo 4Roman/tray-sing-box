@@ -446,7 +446,8 @@ func TestRenamesOnlyDoNotRestart(t *testing.T) {
 
 // An unattended refresh reports a problem once: the same problem at the
 // next refresh is not new — also when the node names carry live counters —,
-// a different one is, and one that went away and came back is again
+// a different one is; one that went away and came back is not, until the
+// subscription has had no problem for problemMemory
 func TestNewProblemOncePerProblem(t *testing.T) {
 	const u = "https://p.example/sub"
 	body := "node-a\nskip:info|12.4GB:тип ссылки не поддерживается"
@@ -474,12 +475,23 @@ func TestNewProblemOncePerProblem(t *testing.T) {
 		t.Fatal("a different problem not reported")
 	}
 	body = "node-a"
-	if newProblem() || store.subs[0].Problem != "" {
-		t.Fatalf("no problem, but NewProblem or a recorded one (%q)", store.subs[0].Problem)
+	if newProblem() || len(store.subs[0].Reported) != 2 {
+		t.Fatalf("no problem: NewProblem, or the reported kinds forgotten at once (%q)", store.subs[0].Reported)
+	}
+	body = "node-a\nskip:x:другая причина"
+	if newProblem() {
+		t.Fatal("a problem that came back after a day reported again")
+	}
+
+	// A week without a problem: forgotten, and the problem is news again
+	body = "node-a"
+	store.subs[0].ProblemSeen = time.Now().Add(-problemMemory - time.Minute)
+	if newProblem() || store.subs[0].Reported != nil || !store.subs[0].ProblemSeen.IsZero() {
+		t.Fatalf("a week without a problem, still remembered: %+v", store.subs[0])
 	}
 	body = "node-a\nskip:x:другая причина"
 	if !newProblem() {
-		t.Fatal("a problem that came back not reported")
+		t.Fatal("a problem that came back after a week not reported")
 	}
 
 	// An error naming nodes: their live counters do not make it new
@@ -538,6 +550,78 @@ func TestNewProblemIgnoresWhatTheProviderVaries(t *testing.T) {
 	}
 }
 
+// A provider whose list switches between two kinds of problem, or between a
+// problem and none, gets one popup per kind — not one at every refresh, as
+// when only the kinds of the last refresh were remembered. A problem at any
+// refresh keeps the kinds remembered for another problemMemory.
+func TestNewProblemNotRepeatedWhenTheProviderAlternates(t *testing.T) {
+	const u = "https://p.example/sub"
+	const (
+		clean   = "node-a"
+		tor     = clean + "\nskip:t:тип «tor» не поддерживается"
+		unknown = clean + "\nskip:u:sing-box не принимает: json: unknown field \"zz\""
+		both    = tor + "\nskip:u:sing-box не принимает: json: unknown field \"q\""
+	)
+	var body string
+	fetch := func(string) (string, error) { return body, nil }
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	var popups []int
+	refresh := func(i int, b string) {
+		t.Helper()
+		body = b
+		result, err := svc.UpdateAll()
+		if err != nil {
+			t.Fatalf("UpdateAll: %v", err)
+		}
+		if result.Updates[0].NewProblem {
+			popups = append(popups, i)
+		}
+	}
+
+	for i, b := range []string{tor, unknown, tor, unknown, clean, tor, clean, unknown, both, clean, tor} {
+		refresh(i, b)
+	}
+	if !reflect.DeepEqual(popups, []int{0, 1}) {
+		t.Fatalf("new problems at refreshes %v, want [0 1]", popups)
+	}
+
+	// The last problem was six days ago: the kinds stay remembered; a
+	// problem now starts the week again
+	popups = nil
+	store.subs[0].ProblemSeen = time.Now().Add(-6 * 24 * time.Hour)
+	refresh(0, clean)
+	refresh(1, tor)
+	store.subs[0].ProblemSeen = time.Now().Add(-6 * 24 * time.Hour)
+	refresh(2, unknown)
+	refresh(3, clean)
+	if popups != nil || len(store.subs[0].Reported) != 2 {
+		t.Fatalf("new problems at %v, reported %q", popups, store.subs[0].Reported)
+	}
+}
+
+// The kinds remembered for a subscription are bounded, the oldest go first
+func TestReportedKindsAreBounded(t *testing.T) {
+	const u = "https://p.example/sub"
+	var body string
+	fetch := func(string) (string, error) { return body, nil }
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	for i := 1; i <= reportedLimit+8; i++ {
+		body = fmt.Sprintf("node-a\nskip:n:причина %d", i)
+		if result, _ := svc.UpdateAll(); !result.Updates[0].NewProblem {
+			t.Fatalf("kind %d not new", i)
+		}
+	}
+	if n := len(store.subs[0].Reported); n != reportedLimit {
+		t.Fatalf("%d kinds remembered, want %d", n, reportedLimit)
+	}
+	body = fmt.Sprintf("node-a\nskip:n:причина %d", reportedLimit+8)
+	if result, _ := svc.UpdateAll(); result.Updates[0].NewProblem {
+		t.Fatal("the latest kind forgotten")
+	}
+}
+
 // When the VPN restart after a refresh fails, the refresh has happened and
 // its new problem is recorded as reported: the result travels with the
 // error (RestartErr), so it can still be shown — otherwise the user would
@@ -556,8 +640,8 @@ func TestRestartFailureKeepsTheResult(t *testing.T) {
 	if result == nil || result.RestartErr != err || !result.Applied(err) {
 		t.Fatalf("result = %+v", result)
 	}
-	if !result.Updates[0].NewProblem || store.subs[0].Problem == "" {
-		t.Fatalf("update %+v, recorded problem %q", result.Updates[0], store.subs[0].Problem)
+	if !result.Updates[0].NewProblem || len(store.subs[0].Reported) == 0 {
+		t.Fatalf("update %+v, reported %q", result.Updates[0], store.subs[0].Reported)
 	}
 
 	// Removal too: the servers are gone from the config, only the restart failed
@@ -581,12 +665,12 @@ func TestRestartFailureKeepsTheResult(t *testing.T) {
 // earlier refresh recorded
 func TestFetchFailureReportedWhenStale(t *testing.T) {
 	const u = "https://p.example/sub"
-	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now(), Problem: "earlier"}}}
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now(), Reported: []string{"earlier"}}}}
 	svc := NewSubscriptionService(store, fetcherFor(nil, map[string]error{u: errors.New("timeout")}), linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
 
 	result, _ := svc.UpdateAll()
-	if result.Updates[0].NewProblem || store.subs[0].Problem != "earlier" {
-		t.Fatalf("a fresh subscription's failed download: %+v, problem %q", result.Updates[0], store.subs[0].Problem)
+	if result.Updates[0].NewProblem || !reflect.DeepEqual(store.subs[0].Reported, []string{"earlier"}) {
+		t.Fatalf("a fresh subscription's failed download: %+v, reported %q", result.Updates[0], store.subs[0].Reported)
 	}
 	store.subs[0].Updated = time.Now().Add(-48 * time.Hour)
 	if result, _ = svc.UpdateAll(); !result.Updates[0].NewProblem {
