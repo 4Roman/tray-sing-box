@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"net/url"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -363,7 +361,8 @@ func parseVLESS(link string) (Outbound, error) {
 // addTLSAndTransport sets tls and transport of a vless, trojan or vmess-URL
 // outbound from the link's query
 func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
-	if err := finalMask(q.Get("fm")); err != nil {
+	quic := strings.EqualFold(strings.TrimSpace(q.Get("type")), "quic")
+	if err := finalMask(q.Get("fm"), quic); err != nil {
 		return err
 	}
 	tls, err := tlsConfig(q, host)
@@ -392,23 +391,36 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 // obfuscations — transform the stream on both ends: a server with one drops
 // a client that does not apply it, and sing-box has none of them. Only
 // "fragment" is the client's own business (it splits the TLS ClientHello)
-// and is dropped. Just the mask's type is named: its settings carry
-// passwords.
-func finalMask(raw string) error {
+// and is dropped. Only the layer the stream travels on counts: Xray applies
+// the "udp" masks to what it sends over UDP (mKCP, hysteria, the UDP
+// dialer), never to the TCP transports of these links, so they are ignored
+// like the other settings — except under sing-box's QUIC transport, which
+// runs over UDP (overUDP). The layers are read as Xray reads them
+// (encoding/json: a key in any case). Just the mask's type is named: its
+// settings carry passwords.
+func finalMask(raw string, overUDP bool) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
-	var layers map[string]json.RawMessage
-	if json.Unmarshal([]byte(raw), &layers) != nil {
-		return errors.New("параметр fm (finalmask) в ссылке повреждён")
+	broken := errors.New("параметр fm (finalmask) в ссылке повреждён")
+	var layers struct {
+		TCP json.RawMessage `json:"tcp"`
+		UDP json.RawMessage `json:"udp"`
 	}
-	for _, layer := range slices.Sorted(maps.Keys(layers)) {
+	if json.Unmarshal([]byte(raw), &layers) != nil {
+		return broken
+	}
+	lists := []json.RawMessage{layers.TCP}
+	if overUDP {
+		lists = append(lists, layers.UDP)
+	}
+	for _, list := range lists {
 		var masks []struct {
 			Type string `json:"type"`
 		}
-		if json.Unmarshal(layers[layer], &masks) != nil {
-			continue // a setting of the layer, not a list of masks
+		if len(list) > 0 && json.Unmarshal(list, &masks) != nil {
+			return broken // no list of masks: Xray refuses such a stream too
 		}
 		for _, mask := range masks {
 			if kind := strings.ToLower(strings.TrimSpace(mask.Type)); kind != "fragment" {
@@ -534,7 +546,7 @@ func parseVMess(link string) (Outbound, error) {
 	if json.Unmarshal(v.Fm, &fm) != nil {
 		fm = string(v.Fm) // an object, not a string holding one
 	}
-	if err := finalMask(fm); err != nil {
+	if err := finalMask(fm, quic); err != nil {
 		return nil, err
 	}
 

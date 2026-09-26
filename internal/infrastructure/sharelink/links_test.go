@@ -142,6 +142,19 @@ var acceptedLinks = []linkCase{
 	{"vmess finalmask with only fragment",
 		vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"tcp","tls":"tls","fm":"{\"tcp\":[{\"type\":\"fragment\"}]}"}`),
 		`{"fm":null,"tls":{"enabled":true}}`},
+	// The udp layer's masks: Xray applies them to UDP only, never to these
+	// TCP transports
+	{"finalmask udp masks leave a TCP stream alone",
+		"trojan://secret@192.0.2.30:443?sni=example.com&fm=" +
+			url.QueryEscape(`{"udp":[{"type":"salamander","settings":{"password":"x"}}]}`) + "#fm-udp",
+		`{"type":"trojan","tls":{"enabled":true},"transport":null}`},
+	{"finalmask of fragment, udp masks and other settings",
+		"vless://" + testUUID + "@192.0.2.10:443?type=ws&path=%2Fws&security=tls&sni=example.com&fm=" +
+			url.QueryEscape(`{"tcp":[{"type":"fragment"}],"udp":[{"type":"noise"},{"type":"xdns"}],"quicParams":{"congestion":"bbr"}}`) + "#fm-mixed",
+		`{"transport":{"type":"ws","path":"/ws"}}`},
+	{"vmess finalmask with udp masks",
+		vmessJSON(`{"ps":"vm-fm-udp","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","path":"/ws","tls":"tls","fm":{"udp":[{"type":"salamander"}]}}`),
+		`{"transport":{"type":"ws"}}`},
 
 	// sing-box's own QUIC transport (s-ui exports it as type=quic): TLS
 	// without uTLS
@@ -338,8 +351,14 @@ var refusedLinks = []refusalCase{
 	{"vm-quic-encrypted", vmessJSON(`{"ps":"vm-quic-encrypted","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"quic","host":"chacha20-poly1305","path":"` + testSecret + `","tls":"tls"}`), "шифрование QUIC «chacha20-poly1305»"},
 	{"fm-sudoku", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&security=tls&fm=" +
 		url.QueryEscape(`{"tcp":[{"type":"fragment"},{"type":"sudoku","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-sudoku", "маскировка finalmask «sudoku»"},
-	{"fm-udp", "trojan://" + testSecret + "@192.0.2.30:443?fm=" +
-		url.QueryEscape(`{"udp":[{"type":"salamander","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-udp", "маскировка finalmask «salamander»"},
+	{"fm-tcp-upper", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=" +
+		url.QueryEscape(`{"TCP":[{"type":"xmc","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-tcp-upper", "маскировка finalmask «xmc»"},
+	{"fm-tcp-object", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=" +
+		url.QueryEscape(`{"tcp":{"type":"sudoku","settings":{"password":"`+testSecret+`"}}}`) + "#fm-tcp-object", "fm (finalmask) в ссылке повреждён"},
+	// sing-box's QUIC transport runs over UDP: there the udp layer counts
+	{"fm-quic-udp", "vless://" + testUUID + "@192.0.2.10:443?type=quic&security=tls&sni=example.com&fm=" +
+		url.QueryEscape(`{"udp":[{"type":"salamander","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-quic-udp", "маскировка finalmask «salamander»"},
+	{"vm-fm-quic-udp", vmessJSON(`{"ps":"vm-fm-quic-udp","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"quic","tls":"tls","fm":{"udp":[{"type":"salamander","settings":{"password":"` + testSecret + `"}}]}}`), "маскировка finalmask «salamander»"},
 	{"fm-broken", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=%7B" + testSecret + "#fm-broken", "fm (finalmask) в ссылке повреждён"},
 	{"vm-fm", vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":"443","id":"` + testUUID + `","fm":{"tcp":[{"type":"header-custom","settings":{"clients":["` + testSecret + `"]}}]}}`), "маскировка finalmask «header-custom»"},
 	{"grpc-custom-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fcustom%2Fpath%7Cp2&security=tls#grpc-custom-path", "собственный путь gRPC"},
