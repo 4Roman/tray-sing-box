@@ -84,7 +84,8 @@ func fetcherFor(bodies map[string]string, errs map[string]error) SubscriptionFet
 }
 
 // linkParser maps each line of the body to an outbound tagged with the line;
-// a line "skip:<name>:<reason>" is a link it leaves out
+// a line "skip:<name>:<reason>" is a link it leaves out, "info:<name>" the
+// provider's info entry (3x-ui: socks://127.0.0.1:1080#<name>)
 type linkParser struct{}
 
 func (linkParser) Parse(text string) ([]map[string]any, []SkippedNode, error) {
@@ -96,6 +97,10 @@ func (linkParser) Parse(text string) ([]map[string]any, []SkippedNode, error) {
 		}
 		if parts := strings.SplitN(line, ":", 3); len(parts) == 3 && parts[0] == "skip" {
 			skipped = append(skipped, SkippedNode{Name: parts[1], Reason: parts[2]})
+			continue
+		}
+		if name, ok := strings.CutPrefix(line, "info:"); ok {
+			outbounds = append(outbounds, map[string]any{"tag": name, "type": "socks", "server": "127.0.0.1", "server_port": 1080})
 			continue
 		}
 		outbounds = append(outbounds, map[string]any{"tag": line, "type": "vless"})
@@ -785,10 +790,10 @@ func (s *stageStore) SyncOutbounds(owned []string, outbounds []map[string]any) (
 }
 
 // Every stage of a refresh that saves nothing — the body cannot be read,
-// the config cannot be changed, no node can be used — is a problem for the
-// unattended popup only once the servers are a day old, as a failed
-// download: often it is a moment's trouble the next refresh no longer has.
-// What an earlier refresh recorded stays.
+// the config cannot be changed, no node can be used, the body holds no
+// server — is a problem for the unattended popup only once the servers are
+// a day old, as a failed download: often it is a moment's trouble the next
+// refresh no longer has. What an earlier refresh recorded stays.
 func TestRefreshFailureReportedWhenStale(t *testing.T) {
 	const u = "https://p.example/sub"
 	for _, stage := range []struct {
@@ -799,6 +804,7 @@ func TestRefreshFailureReportedWhenStale(t *testing.T) {
 		{"parse", "skip:DE:транспорт XHTTP не поддерживается sing-box", &stageStore{}},
 		{"config", "node-a", &stageStore{err: errors.New("failed to write config: used by another process")}},
 		{"none fit", "node-a", &stageStore{refuse: true}},
+		{"info only", "info:⛔ user | Expired", &stageStore{}},
 	} {
 		store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now(), Reported: []string{"earlier"}}}}
 		svc := NewSubscriptionService(store, fetcherFor(map[string]string{u: stage.body}, nil), linkParser{}, stage.sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
@@ -833,6 +839,7 @@ func TestRefreshFailureNewAgainOnceItsStageWorked(t *testing.T) {
 		{"parse", func(body *string, _ *stageStore) { *body = xhttp }},
 		{"config", func(_ *string, sync *stageStore) { sync.err = errors.New("sing-box check: FATAL x") }},
 		{"none fit", func(_ *string, sync *stageStore) { sync.refuse = true }},
+		{"info only", func(body *string, _ *stageStore) { *body = "info:⛔ user | Expired" }},
 	} {
 		body := works
 		sync := &stageStore{}
@@ -886,5 +893,71 @@ func TestConfigFailureRecordsOnlyTheErrorAsReported(t *testing.T) {
 	sync.err = nil
 	if result, _ = svc.UpdateAll(); !result.Updates[0].NewProblem {
 		t.Fatalf("the node left out, first listed now, not reported: %+v", result.Updates[0])
+	}
+}
+
+// 3x-ui's info entry (socks://127.0.0.1:1080 named with the traffic and the
+// days left) is not a server: left out before the sync — not a problem, not
+// a node left out. A body of nothing else (the client expired) saves nothing
+// and says why; the servers of the last refresh stay.
+func TestSubscriptionInfoNodesLeftOut(t *testing.T) {
+	const u = "https://p.example/sub"
+	var body string
+	fetch := func(string) (string, error) { return body, nil }
+	sync := &stageStore{}
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	body = "info:user|📊100GB|⏳30D\nDE\nNL"
+	result, err := svc.UpdateAll()
+	if err != nil || len(sync.calls) != 1 || !reflect.DeepEqual(sync.calls[0].tags, []string{"DE", "NL"}) {
+		t.Fatalf("err %v, synced %+v", err, sync.calls)
+	}
+	if u := result.Updates[0]; u.Err != nil || u.Skipped != nil || u.NewProblem || len(store.subs[0].Reported) != 0 {
+		t.Fatalf("update %+v, reported %q", u, store.subs[0].Reported)
+	}
+
+	body = "info:⛔ user | Expired"
+	store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
+	result, _ = svc.UpdateAll()
+	if len(sync.calls) != 1 || !reflect.DeepEqual(store.subs[0].Tags, []string{"DE", "NL"}) {
+		t.Fatalf("an info-only body synced: %+v, tags %v", sync.calls, store.subs[0].Tags)
+	}
+	if e := result.Updates[0].Err; e == nil || !strings.HasPrefix(e.Error(), "в подписке нет серверов: ") || !result.Updates[0].NewProblem {
+		t.Fatalf("update %+v", result.Updates[0])
+	}
+	if _, err := svc.Update(u); err == nil || strings.Contains(err.Error(), "Expired") {
+		t.Fatalf("targeted update: %v", err)
+	}
+
+	// With nodes the parser left out: those are what could not be used
+	body = "info:⛔ user | Expired\nskip:DE xhttp:транспорт XHTTP не поддерживается sing-box"
+	result, _ = svc.UpdateAll()
+	if e := result.Updates[0].Err; e == nil || e.Error() != "ни один сервер подписки не подошёл:\n«DE xhttp» — транспорт XHTTP не поддерживается sing-box" || len(sync.calls) != 1 {
+		t.Fatalf("update %+v", result.Updates[0])
+	}
+}
+
+func TestIsLocalServer(t *testing.T) {
+	for server, want := range map[string]bool{
+		"127.0.0.1": true, "127.8.9.10": true, "::1": true, "[::1]": true, "::1%lo": true,
+		"0.0.0.0": true, "::": true, "::ffff:127.0.0.1": true,
+		"localhost": true, "LocalHost.": true, "a.localhost": true,
+		"192.0.2.10": false, "fe80::1%lo": false, "de.example.com": false,
+		"localhost.example.com": false, "": false,
+	} {
+		if got := isLocalServer(server); got != want {
+			t.Errorf("isLocalServer(%q) = %v, want %v", server, got, want)
+		}
+	}
+}
+
+// A share link to a proxy on this computer, imported by hand, is the user's
+// own: kept (only a subscription's are the provider's info entries)
+func TestImportKeepsALocalProxy(t *testing.T) {
+	editor := &fakeEditor{}
+	imp := NewImportService(linkParser{}, editor, nil, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	if _, err := imp.ImportFromText("info:local"); err != nil || len(editor.added) != 1 || editor.added[0]["server"] != "127.0.0.1" {
+		t.Fatalf("err %v, added %v", err, editor.added)
 	}
 }

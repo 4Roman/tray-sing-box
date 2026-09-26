@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"slices"
 	"sort"
@@ -371,6 +372,19 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		return update
 	}
 	forgetKind(sub, "error: "+parseFailed)
+	outbounds = withoutInfoNodes(sub.URL, outbounds)
+	if len(outbounds) == 0 {
+		// Nothing but the provider's info entries (and nodes left out): not
+		// synced — an empty set would delete every server of the
+		// subscription. The servers of the last refresh stay (and stay
+		// owned), as when the config check refuses every node.
+		update.Err = errOnlyInfoNodes
+		if len(skipped) > 0 {
+			update.Err = noneUsable(noneFit, skipped, nil)
+		}
+		noteFailure(sub, &update)
+		return update
+	}
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)
 	if err != nil {
@@ -397,6 +411,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		return update
 	}
 	forgetKind(sub, "error: "+noneFit)
+	forgetKind(sub, "error: "+onlyInfoNodes)
 
 	tags := append([]string(nil), sync.Tags...)
 	sort.Strings(tags)
@@ -446,14 +461,58 @@ const problemMemory = 7 * 24 * time.Hour
 
 // The leading words of the error of a refresh that saved nothing, each its
 // kind (problemKind): the download failed, the body could not be read, the
-// config could not be changed, no node could be used. Each is forgotten as
-// soon as its stage works again (refreshOne).
+// config could not be changed, no node could be used, the body holds no
+// server at all. Each is forgotten as soon as its stage works again
+// (refreshOne).
 const (
-	fetchFailed  = "не удалось скачать подписку"
-	parseFailed  = "не удалось разобрать подписку"
-	configFailed = "не удалось обновить конфиг"
-	noneFit      = "ни один сервер подписки не подошёл"
+	fetchFailed   = "не удалось скачать подписку"
+	parseFailed   = "не удалось разобрать подписку"
+	configFailed  = "не удалось обновить конфиг"
+	noneFit       = "ни один сервер подписки не подошёл"
+	onlyInfoNodes = "в подписке нет серверов"
 )
+
+// errOnlyInfoNodes: the body holds nothing but the provider's info entries.
+// 3x-ui sends just its info entry to a client whose subscription has expired
+// or whose traffic is used up.
+var errOnlyInfoNodes = errors.New(onlyInfoNodes + ": только сведения провайдера (так бывает, когда подписка истекла или закончился трафик)")
+
+// withoutInfoNodes leaves out the provider's info entries: nodes whose
+// server is this computer or no address at all. 3x-ui ("sub info node")
+// puts a socks://127.0.0.1:1080 link named with the traffic and the days
+// left at the top of every subscription body. Imported, it would be a proxy
+// to whatever listens on that local port — and, as the body's first node,
+// the server the routing falls back to when the provider drops the chosen
+// one. Not a problem and not a node left out: nothing to tell the user.
+// A link to a local proxy imported by hand is kept (ImportService): there
+// it is the user's own.
+func withoutInfoNodes(rawURL string, outbounds []map[string]any) []map[string]any {
+	kept := make([]map[string]any, 0, len(outbounds))
+	for _, o := range outbounds {
+		server, _ := o["server"].(string)
+		if isLocalServer(server) {
+			tag, _ := o["tag"].(string)
+			log.Printf("Subscription %s: %q left out: a provider's info entry (server %s), not a server", RedactURL(rawURL), tag, server)
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept
+}
+
+// isLocalServer reports whether a node's server is this computer (a
+// loopback address, localhost) or the unspecified address
+func isLocalServer(server string) bool {
+	host := strings.TrimSuffix(strings.ToLower(strings.Trim(server, "[]")), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i] // an IPv6 zone
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
 
 // noteFailure is noteProblem for a refresh that saved nothing: a problem
 // only once the subscription is stale (subscriptionStaleAfter). Often it is
