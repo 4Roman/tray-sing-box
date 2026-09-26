@@ -726,6 +726,53 @@ func TestExtractLinksAtWordStart(t *testing.T) {
 	}
 }
 
+// Links glued together without a line break: a scheme in a link's name
+// starts the next link — the longest one ending at its "://", and only in
+// the name — so no credential of the next link becomes a node name
+func TestGluedLinksAreTakenApart(t *testing.T) {
+	cases := []struct {
+		text string
+		want []string
+	}{
+		{"vless://u@h:1#avmess://x", []string{"vless://u@h:1#a", "vmess://x"}},
+		{"vless://u@h:1#nssr://x#m", []string{"vless://u@h:1#n", "ssr://x#m"}},
+		{"vless://u@h:1#hysteria2://x", []string{"vless://u@h:1#", "hysteria2://x"}},
+		// A '#' in the credential: the name is still searched from there
+		{"trojan://Pass#word@h:2#ntrojan://p2@h:3", []string{"trojan://Pass#word@h:2#n", "trojan://p2@h:3"}},
+		// Not the start of a link: another scheme in the name, a scheme
+		// before the name
+		{"vless://u@h:1#see-https://example.com/x", []string{"vless://u@h:1#see-https://example.com/x"}},
+		{"vless://u@h:1?path=/vless://x#n", []string{"vless://u@h:1?path=/vless://x#n"}},
+	}
+	for _, c := range cases {
+		if got := extractLinks(c.text); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("extractLinks(%q) = %q, want %q", c.text, got, c.want)
+		}
+	}
+
+	text := "hysteria2://letmein@192.0.2.50:443#name1" +
+		"hysteria2://" + testSecret + "@192.0.2.51:443#name2" +
+		"vless://" + testUUID + "@192.0.2.10:443?type=kcp#name3" +
+		vmessJSON(`{"ps":"name4","add":"192.0.2.20","port":443,"id":"`+testUUID+`","tls":"tls"}`)
+	outbounds, skipped, err := ParseAllReport(text)
+	if err != nil {
+		t.Fatalf("ParseAllReport: %v", err)
+	}
+	var tags []string
+	for _, o := range outbounds {
+		tags = append(tags, o.Tag())
+	}
+	if want := []string{"name1", "name2", "name4"}; !reflect.DeepEqual(tags, want) {
+		t.Fatalf("tags %q, want %q", tags, want)
+	}
+	if outbounds[0]["password"] != "letmein" || outbounds[1]["password"] != testSecret || outbounds[1]["server"] != "192.0.2.51" {
+		t.Errorf("outbounds %v", outbounds)
+	}
+	if len(skipped) != 1 || skipped[0].Name != "name3" || !strings.Contains(skipped[0].Reason, "mKCP") {
+		t.Errorf("skipped = %+v", skipped)
+	}
+}
+
 func TestNoLinksErrorIsRussian(t *testing.T) {
 	_, _, err := ParseAllReport("просто текст без ссылок")
 	if err == nil || !russian(err.Error()) {

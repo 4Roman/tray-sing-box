@@ -149,7 +149,8 @@ func parseLink(link string) (Outbound, error) {
 
 // extractLinks returns every proxy link (supported or recognized as
 // unsupported) found in arbitrary text. A scheme counts only at the start of
-// a word: "wss://" is no "ss://" link, "vmess://" no "ss://" either.
+// a word: "wss://" is no "ss://" link, "vmess://" no "ss://" either. Links
+// glued together without whitespace are taken apart (gluedLinkAt).
 func extractLinks(text string) []string {
 	var links []string
 	for _, field := range strings.Fields(text) {
@@ -170,11 +171,49 @@ func extractLinks(text string) []string {
 				from = i + 1
 			}
 		}
-		if best >= 0 {
-			links = append(links, field[best:])
+		if best < 0 {
+			continue
+		}
+		for link := field[best:]; link != ""; {
+			end := gluedLinkAt(link)
+			links = append(links, link[:end])
+			link = link[end:]
 		}
 	}
 	return links
+}
+
+// gluedLinkAt is where a second link glued to this one starts ("…#name1
+// hysteria2://pw2@…" without the line break), len(link) when there is none.
+// Read as one link, the second one — its credential included — would be the
+// first one's name, shown in the popups, the log and the settings page. Only
+// the name (the fragment) is searched: a link ends with it as a rule, so
+// that is where the next one gets glued on, while elsewhere in a link a
+// "://" may belong to a value. A name is free text and its last character
+// no word boundary ("name1hysteria2://"), so here a scheme counts anywhere:
+// the longest one ending at a "://" ("vmess://", not its "ss://").
+func gluedLinkAt(link string) int {
+	hash := strings.Index(link, "#")
+	if hash < 0 {
+		return len(link)
+	}
+	for from := hash + 1; ; {
+		i := strings.Index(link[from:], "://")
+		if i < 0 {
+			return len(link)
+		}
+		end := from + i + len("://")
+		start := -1
+		for _, scheme := range allSchemes {
+			if s := end - len(scheme); s > hash && link[s:end] == scheme && (start < 0 || s < start) {
+				start = s
+			}
+		}
+		if start >= 0 {
+			return start
+		}
+		from = end
+	}
 }
 
 // schemeChar: a character a URL scheme may contain
