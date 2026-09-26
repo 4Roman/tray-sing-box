@@ -301,6 +301,15 @@ function renderOutbounds(list, active) {
     type.className = 'type';
     type.textContent = o.type;
     label.append(radio, tag, type);
+    // A ShadowTLS helper only wraps the connection of the server that names
+    // it as its detour: selected itself, nothing connects
+    if (o.type === 'shadowtls') {
+      radio.disabled = true;
+      const hint = document.createElement('span');
+      hint.className = 'type';
+      hint.textContent = 'промежуточный узел, только через detour';
+      label.append(hint);
+    }
     if (o.tag === 'dpi-bypass') {
       const hint = document.createElement('span');
       hint.className = 'type';

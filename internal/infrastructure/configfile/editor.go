@@ -54,6 +54,13 @@ var systemTypes = map[string]bool{
 	"selector": true, "urltest": true,
 }
 
+// relayOnlyTypes are outbound types that carry nothing on their own: a
+// shadowtls outbound ignores the destination it is asked to connect to and
+// only wraps the connection of the outbound that names it as its detour.
+// Offered as a server (a group member, the active outbound, the target of a
+// removed node's references), the traffic sent to it connects nowhere.
+var relayOnlyTypes = map[string]bool{"shadowtls": true}
+
 // editableSections are the config sections exposed for raw JSON editing.
 // The value records whether the section is a JSON array (true) or object.
 var editableSections = map[string]bool{
@@ -524,7 +531,7 @@ func registerInGroups(cfg map[string]any, merged, refused []map[string]any) {
 	outbounds, _ := cfg["outbounds"].([]any)
 	for _, o := range merged {
 		tag := tagString(o)
-		if relays[tag] {
+		if relays[tag] || relayOnlyTypes[fmt.Sprint(o["type"])] {
 			continue
 		}
 		upstream := dependsOn(edges, tag)
@@ -883,7 +890,8 @@ func (e *Editor) ListOutbounds() ([]domain.OutboundInfo, error) {
 }
 
 // proxyTags returns the set of outbound tags that carry traffic to a proxy
-// server (everything except direct/block/dns and selector/urltest groups).
+// server (everything except direct/block/dns, selector/urltest groups and
+// the relay-only types).
 func proxyTags(cfg map[string]any) map[string]bool {
 	tags := map[string]bool{}
 	outbounds, _ := cfg["outbounds"].([]any)
@@ -894,7 +902,7 @@ func proxyTags(cfg map[string]any) map[string]bool {
 		}
 		tag, _ := o["tag"].(string)
 		typ, _ := o["type"].(string)
-		if tag != "" && !systemTypes[typ] {
+		if tag != "" && !systemTypes[typ] && !relayOnlyTypes[typ] {
 			tags[tag] = true
 		}
 	}
@@ -950,6 +958,9 @@ func (e *Editor) SwitchOutbound(tag string) error {
 
 	proxies := proxyTags(cfg)
 	if !proxies[tag] {
+		if typ := outboundTypeIn(cfg, tag); relayOnlyTypes[typ] {
+			return fmt.Errorf("«%s» — промежуточный узел (%s): он работает только как detour другого сервера, выбрать его активным нельзя", tag, typ)
+		}
 		return fmt.Errorf("outbound %q not found or is not a proxy", tag)
 	}
 
@@ -1157,15 +1168,23 @@ func (e *Editor) OutboundType(tag string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if typ := outboundTypeIn(cfg, tag); typ != "" {
+		return typ, nil
+	}
+	return "", fmt.Errorf("outbound %q not found", tag)
+}
 
+// outboundTypeIn is the "type" of the outbound with the given tag in cfg,
+// "" when there is none
+func outboundTypeIn(cfg map[string]any, tag string) string {
 	outbounds, _ := cfg["outbounds"].([]any)
 	for _, item := range outbounds {
 		if o, ok := item.(map[string]any); ok && o["tag"] == tag {
 			typ, _ := o["type"].(string)
-			return typ, nil
+			return typ
 		}
 	}
-	return "", fmt.Errorf("outbound %q not found", tag)
+	return ""
 }
 
 // LocalProxyURL returns a proxy URL for the first local inbound usable as an

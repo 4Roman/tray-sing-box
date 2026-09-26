@@ -435,7 +435,7 @@ func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOut
 	relays := relayTags(cfg, refused)
 	usable := func(o map[string]any) bool {
 		tag := tagString(o)
-		return tag != "" && !relays[tag] && !localServer(o)
+		return tag != "" && !relays[tag] && !relayOnlyTypes[fmt.Sprint(o["type"])] && !localServer(o)
 	}
 	replacement := ""
 	for _, o := range newOutbounds {

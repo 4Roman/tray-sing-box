@@ -2,6 +2,7 @@ package configfile
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -289,5 +290,39 @@ func TestRefreshRepointsReferencesInAnySpelling(t *testing.T) {
 	server := cfg["DNS"].(map[string]any)["Servers"].([]any)[0].(map[string]any)
 	if server["Detour"] != "NL" {
 		t.Fatalf("dns server = %v", server)
+	}
+}
+
+// A ShadowTLS outbound carries nothing on its own — also when no node names
+// it (yet) as its detour: it is not offered as a server, is not where a
+// removed node's references go, and cannot be made the active outbound
+func TestShadowTLSIsNoServer(t *testing.T) {
+	const config = `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["DE", "direct"]},
+    {"type": "vless", "tag": "DE", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ], "route": {"final": "DE"}}`
+	lone := shadowTLSProfile(true)[0] // the helper, without its node
+	path := writeConfig(t, config)
+	editor := New(path)
+	result, err := editor.SyncOutbounds([]string{"DE"}, []map[string]any{lone, vlessNode("NL", "192.0.2.11")})
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Removed, []string{"DE"}) {
+		t.Fatalf("result = %+v", result)
+	}
+	if members := groupMembers(t, path, "proxy"); !reflect.DeepEqual(members, []any{"direct", "NL"}) {
+		t.Fatalf("proxy = %v", members)
+	}
+	if final := load(t, path)["route"].(map[string]any)["final"]; final != "NL" {
+		t.Fatalf("final = %v", final)
+	}
+	err = editor.SwitchOutbound(tagString(lone))
+	if err == nil || !strings.Contains(err.Error(), "промежуточный узел") {
+		t.Fatalf("SwitchOutbound to the helper: %v", err)
+	}
+	if final := load(t, path)["route"].(map[string]any)["final"]; final != "NL" {
+		t.Fatalf("final after the refused switch = %v", final)
 	}
 }
