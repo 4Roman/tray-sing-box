@@ -495,8 +495,11 @@ func TestNewProblemOncePerProblem(t *testing.T) {
 		t.Fatal("a problem that came back after a week not reported")
 	}
 
-	// An error naming nodes: their live counters do not make it new
+	// An error naming nodes: their live counters do not make it new. A
+	// refresh that saves nothing is a problem once the servers are a day
+	// old (noteFailure).
 	refusing := NewSubscriptionService(store, fetch, linkParser{}, &refuseAll{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
 	body = "DE|12.4GB"
 	if r, _ := refusing.UpdateAll(); !r.Updates[0].NewProblem {
 		t.Fatal("refusal not reported")
@@ -757,5 +760,131 @@ func TestManyKindsInOneRefreshReportedOnce(t *testing.T) {
 	}
 	if n := len(store.subs[0].Reported); n != reportedLimit+10 {
 		t.Fatalf("%d kinds remembered, want %d", n, reportedLimit+10)
+	}
+}
+
+// stageStore is a config store the test switches between failing, refusing
+// every node and working
+type stageStore struct {
+	err    error
+	refuse bool
+	calls  []syncCall
+}
+
+func (s *stageStore) SyncOutbounds(owned []string, outbounds []map[string]any) (*SyncResult, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.refuse {
+		return (&refuseAll{}).SyncOutbounds(owned, outbounds)
+	}
+	works := &fakeSyncStore{}
+	result, err := works.SyncOutbounds(owned, outbounds)
+	s.calls = append(s.calls, works.calls...)
+	return result, err
+}
+
+// Every stage of a refresh that saves nothing — the body cannot be read,
+// the config cannot be changed, no node can be used — is a problem for the
+// unattended popup only once the servers are a day old, as a failed
+// download: often it is a moment's trouble the next refresh no longer has.
+// What an earlier refresh recorded stays.
+func TestRefreshFailureReportedWhenStale(t *testing.T) {
+	const u = "https://p.example/sub"
+	for _, stage := range []struct {
+		name string
+		body string
+		sync *stageStore
+	}{
+		{"parse", "skip:DE:транспорт XHTTP не поддерживается sing-box", &stageStore{}},
+		{"config", "node-a", &stageStore{err: errors.New("failed to write config: used by another process")}},
+		{"none fit", "node-a", &stageStore{refuse: true}},
+	} {
+		store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now(), Reported: []string{"earlier"}}}}
+		svc := NewSubscriptionService(store, fetcherFor(map[string]string{u: stage.body}, nil), linkParser{}, stage.sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+		result, _ := svc.UpdateAll()
+		if result.Updates[0].Err == nil || result.Updates[0].NewProblem || !reflect.DeepEqual(store.subs[0].Reported, []string{"earlier"}) {
+			t.Fatalf("%s: a fresh subscription's failed refresh: %+v, reported %q", stage.name, result.Updates[0], store.subs[0].Reported)
+		}
+		store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
+		if result, _ = svc.UpdateAll(); !result.Updates[0].NewProblem {
+			t.Fatalf("%s: a stale subscription's failed refresh not reported: %+v", stage.name, result.Updates[0])
+		}
+		if result, _ = svc.UpdateAll(); result.Updates[0].NewProblem {
+			t.Fatalf("%s: the same failure reported again", stage.name)
+		}
+	}
+}
+
+// A stage of the refresh that works again forgets its failure: when it
+// fails for good later on — for another reason, the kind being the same
+// (the provider now serves a format the app cannot read, sing-box check
+// refuses the config) — that is news. A node left out at every refresh
+// keeps the subscription's problems remembered (problemMemory) all along.
+func TestRefreshFailureNewAgainOnceItsStageWorked(t *testing.T) {
+	const u = "https://p.example/sub"
+	const xhttp = "skip:DE:транспорт XHTTP не поддерживается sing-box"
+	const works = "node-a\n" + xhttp
+	for _, stage := range []struct {
+		name string
+		fail func(body *string, sync *stageStore)
+	}{
+		{"parse", func(body *string, _ *stageStore) { *body = xhttp }},
+		{"config", func(_ *string, sync *stageStore) { sync.err = errors.New("sing-box check: FATAL x") }},
+		{"none fit", func(_ *string, sync *stageStore) { sync.refuse = true }},
+	} {
+		body := works
+		sync := &stageStore{}
+		fetch := func(string) (string, error) { return body, nil }
+		store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"node-a"}}}}
+		svc := NewSubscriptionService(store, fetch, linkParser{}, sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+		refresh := func(step string) bool {
+			t.Helper()
+			result, _ := svc.UpdateAll()
+			if (step == "works") != (result.Updates[0].Err == nil) {
+				t.Fatalf("%s, %s: %+v", stage.name, step, result.Updates[0])
+			}
+			return result.Updates[0].NewProblem
+		}
+
+		if !refresh("works") {
+			t.Fatalf("%s: the node left out not reported", stage.name)
+		}
+		store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
+		stage.fail(&body, sync)
+		if !refresh("fails") {
+			t.Fatalf("%s: the first failure not reported", stage.name)
+		}
+		body, *sync = works, stageStore{}
+		if refresh("works") {
+			t.Fatalf("%s: the node left out reported again", stage.name)
+		}
+		store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
+		stage.fail(&body, sync)
+		if !refresh("fails") {
+			t.Fatalf("%s: failing for good after it worked, not reported", stage.name)
+		}
+	}
+}
+
+// Nodes the parser left out and then the config could not be changed: every
+// message of the refresh shows the error alone, so only the error is
+// recorded as reported — the nodes left out are news at the refresh that
+// lists them
+func TestConfigFailureRecordsOnlyTheErrorAsReported(t *testing.T) {
+	const u = "https://p.example/sub"
+	sync := &stageStore{err: errors.New("failed to write config: locked")}
+	fetch := fetcherFor(map[string]string{u: "node-a\nskip:DE xhttp:транспорт XHTTP не поддерживается sing-box"}, nil)
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"node-a"}}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	result, _ := svc.UpdateAll()
+	if u := result.Updates[0]; u.Err == nil || !u.NewProblem || len(u.Skipped) != 1 || len(store.subs[0].Reported) != 1 {
+		t.Fatalf("update %+v, reported %q", u, store.subs[0].Reported)
+	}
+	sync.err = nil
+	if result, _ = svc.UpdateAll(); !result.Updates[0].NewProblem {
+		t.Fatalf("the node left out, first listed now, not reported: %+v", result.Updates[0])
 	}
 }

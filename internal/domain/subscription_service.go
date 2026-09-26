@@ -28,8 +28,10 @@ type Subscription struct {
 	// refresh reports only a kind not in it (SubscriptionUpdate.NewProblem):
 	// a provider that switches between two problems, or between a problem
 	// and a clean list, is reported once, not at every refresh. Forgotten
-	// once the subscription has had no problem for problemMemory; a failed
-	// download as soon as a download works again. Least recently seen first.
+	// once the subscription has had no problem for problemMemory; the
+	// failure of a stage of the refresh (the download, the parse, the
+	// config, a usable node) as soon as that stage works again. Least
+	// recently seen first.
 	Reported []string `json:"reported,omitempty"`
 	// ProblemSeen ("problem_seen"): when a refresh last found a problem;
 	// what measures problemMemory
@@ -86,7 +88,8 @@ type SubscriptionUpdate struct {
 	Err      error
 	// NewProblem: Err or Skipped show a kind of problem the user has not
 	// been told about for this subscription (Subscription.Reported) — an
-	// unattended refresh reports only these
+	// unattended refresh reports only these. A refresh that saved nothing
+	// has one only once the subscription is stale (noteFailure).
 	NewProblem bool
 
 	changedConfig bool // the sync changed config.json in a way sing-box sees
@@ -348,17 +351,14 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	body, err := s.fetch(sub.URL)
 	if err != nil {
 		update.Err = fmt.Errorf("%s: %w", fetchFailed, &oneLineError{err})
-		// Often a moment without network (right after logon): a problem
-		// only once the servers are getting old
-		if stale := sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter; stale {
-			noteProblem(sub, &update)
-		}
+		noteFailure(sub, &update)
 		return update
 	}
-	// It downloads again: when the link fails for good later on (the
-	// provider took it away), that is news even if an earlier outage was
-	// reported — the failure counts only after a day without a download
-	// anyway (subscriptionStaleAfter)
+	// A stage that works again forgets its own failure: when it fails for
+	// good later on (the provider took the link away, switched to a format
+	// the app cannot read), that is news even if an earlier outage of the
+	// same stage was reported — a failure counts only after a day without a
+	// refresh that saved the servers anyway (noteFailure)
 	forgetKind(sub, "error: "+fetchFailed)
 	outbounds, skipped, err := s.parser.Parse(body)
 	update.Skipped = skipped
@@ -366,17 +366,25 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		log.Printf("Subscription %s: skipped %q: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
 	}
 	if err != nil {
-		update.Err = noneUsable("не удалось разобрать подписку", skipped, err)
-		noteProblem(sub, &update)
+		update.Err = noneUsable(parseFailed, skipped, err)
+		noteFailure(sub, &update)
 		return update
 	}
+	forgetKind(sub, "error: "+parseFailed)
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)
 	if err != nil {
-		update.Err = fmt.Errorf("не удалось обновить конфиг: %w", &oneLineError{err})
-		noteProblem(sub, &update)
+		update.Err = fmt.Errorf("%s: %w", configFailed, &oneLineError{err})
+		// Every message of this refresh shows the error alone, not the nodes
+		// the parser left out (subscriptionLine, the settings page): only its
+		// kind is recorded as reported. The nodes are news at the refresh
+		// that lists them — recorded now, they never would be.
+		shown := SubscriptionUpdate{Err: update.Err}
+		noteFailure(sub, &shown)
+		update.NewProblem = shown.NewProblem
 		return update
 	}
+	forgetKind(sub, "error: "+configFailed)
 	for _, sk := range sync.Skipped {
 		log.Printf("Subscription %s: %q refused by the config check: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
 	}
@@ -384,10 +392,11 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	if len(sync.Tags) == 0 {
 		// Every node refused: nothing was saved, the servers of the last
 		// refresh stay (and stay owned)
-		update.Err = noneUsable("ни один сервер подписки не подошёл", update.Skipped, nil)
-		noteProblem(sub, &update)
+		update.Err = noneUsable(noneFit, update.Skipped, nil)
+		noteFailure(sub, &update)
 		return update
 	}
+	forgetKind(sub, "error: "+noneFit)
 
 	tags := append([]string(nil), sync.Tags...)
 	sort.Strings(tags)
@@ -423,9 +432,9 @@ type oneLineError struct{ err error }
 func (e *oneLineError) Error() string { return clipLine(e.err.Error(), lineLimit) }
 func (e *oneLineError) Unwrap() error { return e.err }
 
-// subscriptionStaleAfter: a subscription that has not been downloaded for
-// this long is reported by the unattended refresh (a failed download of a
-// fresh one is not: the next refresh usually makes it)
+// subscriptionStaleAfter: a subscription whose refresh has saved nothing for
+// this long is reported by the unattended refresh (a failed refresh of a
+// fresh one is not: the next one usually makes it)
 const subscriptionStaleAfter = 24 * time.Hour
 
 // problemMemory: the kinds of problem reported for a subscription are
@@ -435,8 +444,30 @@ const subscriptionStaleAfter = 24 * time.Hour
 // otherwise have the unattended popup reappear every few refreshes.
 const problemMemory = 7 * 24 * time.Hour
 
-// fetchFailed begins the error of a failed download: its kind (problemKind)
-const fetchFailed = "не удалось скачать подписку"
+// The leading words of the error of a refresh that saved nothing, each its
+// kind (problemKind): the download failed, the body could not be read, the
+// config could not be changed, no node could be used. Each is forgotten as
+// soon as its stage works again (refreshOne).
+const (
+	fetchFailed  = "не удалось скачать подписку"
+	parseFailed  = "не удалось разобрать подписку"
+	configFailed = "не удалось обновить конфиг"
+	noneFit      = "ни один сервер подписки не подошёл"
+)
+
+// noteFailure is noteProblem for a refresh that saved nothing: a problem
+// only once the subscription is stale (subscriptionStaleAfter). Often it is
+// a moment's trouble the next refresh no longer has — no network right after
+// logon, a page of the provider's served in place of the list, config.json
+// held by another program —, and a provider whose list fails every other
+// refresh must not bring the popup back each time: its kind is forgotten at
+// the refresh that works. What lasts for a day is news: the servers are
+// getting old.
+func noteFailure(sub *Subscription, update *SubscriptionUpdate) {
+	if sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter {
+		noteProblem(sub, update)
+	}
+}
 
 // reportedLimit bounds the kinds remembered for a subscription; the ones
 // least recently seen go first, never one the current refresh found (it
