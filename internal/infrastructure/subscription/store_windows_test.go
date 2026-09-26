@@ -59,6 +59,14 @@ func TestStoreSaveKeepsTheDirectoryPermissions(t *testing.T) {
 	if strings.Contains(sddl, ";;;WD)") || strings.Contains(sddl, ";;;BU)") || strings.Contains(sddl, ";;;AU)") {
 		t.Fatalf("the saved list is open to others: %s", sddl)
 	}
+	// How SDDL names the current user: the SID, or the alias of a
+	// well-known account (a CI runner's built-in Administrator is "LA")
+	mine, err := windows.SecurityDescriptorFromString("D:(A;;FA;;;" + me + ")")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := mine.String()
+	me = s[strings.LastIndex(s, ";")+1 : len(s)-1]
 	for _, sid := range []string{"SY", "BA", me} {
 		if !strings.Contains(sddl, "(A;ID;FA;;;"+sid+")") {
 			t.Fatalf("the saved list does not carry the directory's permissions (%s): %s", sid, sddl)
