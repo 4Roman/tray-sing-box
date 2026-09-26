@@ -2,6 +2,9 @@ package sharelink
 
 import (
 	"encoding/base64"
+	"fmt"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -189,6 +192,41 @@ func TestParseAllMultipleLinks(t *testing.T) {
 	}
 	if outbounds[0].Tag() != "node" || outbounds[1].Tag() != "node (2)" {
 		t.Fatalf("duplicate tags not disambiguated: %q, %q", outbounds[0].Tag(), outbounds[1].Tag())
+	}
+}
+
+// A suffix never repeats a name that arrived as it is ("X (2)" before a
+// second "X"): the config editor would replace one server with the other,
+// and the import would count both
+func TestParseAllSuffixSkipsTakenNames(t *testing.T) {
+	cases := []struct{ names, want []string }{
+		{[]string{"X", "X (2)", "X"}, []string{"X", "X (2)", "X (3)"}},
+		{[]string{"a (2)", "a", "a"}, []string{"a (2)", "a", "a (3)"}},
+		{[]string{"X", "X", "X (2)", "X"}, []string{"X", "X (2)", "X (2) (2)", "X (3)"}},
+	}
+	for _, c := range cases {
+		var links, entries []string
+		for i, name := range c.names {
+			links = append(links, fmt.Sprintf("trojan://pw@192.0.2.%d:443#%s", 10+i, url.PathEscape(name)))
+			entries = append(entries, fmt.Sprintf(`{"type":"trojan","tag":%q,"server":"192.0.2.%d","server_port":443,"password":"pw"}`, name, 10+i))
+		}
+		// Share links and a profile go through the same collector
+		for _, text := range []string{strings.Join(links, "\n"), "[" + strings.Join(entries, ",") + "]"} {
+			outbounds, err := ParseAll(text)
+			if err != nil {
+				t.Fatalf("ParseAll: %v", err)
+			}
+			var tags []string
+			for i, o := range outbounds {
+				tags = append(tags, o.Tag())
+				if want := fmt.Sprintf("192.0.2.%d", 10+i); o["server"] != want {
+					t.Errorf("%q: server %v, want %s", o.Tag(), o["server"], want)
+				}
+			}
+			if !reflect.DeepEqual(tags, c.want) {
+				t.Errorf("%q: tags %q, want %q", c.names, tags, c.want)
+			}
+		}
 	}
 }
 

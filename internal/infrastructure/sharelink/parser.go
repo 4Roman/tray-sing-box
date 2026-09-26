@@ -251,20 +251,30 @@ func ParseAllReport(text string) ([]Outbound, []domain.SkippedNode, error) {
 type collector struct {
 	outbounds []Outbound
 	skipped   []domain.SkippedNode
-	seen      map[string]int
+	taken     map[string]bool // every tag handed out so far
+	next      map[string]int  // the next suffix to try for a repeated tag
 }
 
+// add appends an outbound; a tag already taken gets the first free " (N)".
+// Free among every tag handed out, not just the repeats of this one: a node
+// may arrive literally named "X (2)", and a second "X" suffixed into that
+// name would make the config editor replace one server with the other — the
+// import would count both.
 func (c *collector) add(outbound Outbound) {
-	if c.seen == nil {
-		c.seen = map[string]int{}
+	if c.taken == nil {
+		c.taken, c.next = map[string]bool{}, map[string]int{}
 	}
 	tag := outbound.Tag()
-	c.seen[tag]++
-	if c.seen[tag] > 1 {
-		tag = fmt.Sprintf("%s (%d)", tag, c.seen[tag])
+	if c.taken[tag] {
+		n := max(c.next[tag], 2)
+		for c.taken[fmt.Sprintf("%s (%d)", tag, n)] {
+			n++
+		}
+		c.next[tag] = n + 1
+		tag = fmt.Sprintf("%s (%d)", tag, n)
 		outbound["tag"] = tag
-		c.seen[tag]++
 	}
+	c.taken[tag] = true
 	c.outbounds = append(c.outbounds, outbound)
 }
 
