@@ -13,21 +13,26 @@ import (
 // for outbound[Y]") or when they depend on each other in a ring ("circular
 // outbound dependency"), whether or not the traffic ever uses them. sing-box
 // check builds the outbounds without starting them and passes such a config;
-// the VPN restarted into it then does not come up, at every retry. Outbounds
-// and endpoints share one namespace, and keys are matched the way sing-box
-// matches them (foldKey): to sing-box {"Detour": "x"} is a detour.
+// the VPN restarted into it then does not come up, at every retry. The same
+// holds for the references from outside the outbounds that sing-box
+// resolves when it starts (referenceProblems). Outbounds and endpoints share
+// one namespace, and keys are matched the way sing-box matches them
+// (foldKey): to sing-box {"Detour": "x"} is a detour.
 
 // dependencyProblem is one reason sing-box would not start
 type dependencyProblem struct {
 	key     string   // the same problem in two configs has the same key
-	tags    []string // the outbounds that cannot start because of it
+	tags    []string // the outbounds that cannot start because of it; none for a reference from elsewhere (origin)
 	missing string   // the tag named but absent; "" for a ring
 	group   bool     // missing is a group member, not a detour
+	origin  string   // what names missing when that is no outbound: route.final, the detour of a DNS server or of NTP
 }
 
 // String describes the problem for the user, naming the outbounds by tag
 func (p dependencyProblem) String() string {
 	switch {
+	case p.origin != "":
+		return fmt.Sprintf("%s указывает на «%s», а такого outbound нет", p.origin, p.missing)
 	case p.missing != "" && p.group:
 		return fmt.Sprintf("в группе «%s» есть «%s», а такого outbound нет", p.tags[0], p.missing)
 	case p.missing != "":
@@ -160,9 +165,102 @@ func dependencyNodes(cfg map[string]any) []dependencyNode {
 }
 
 // dependencyProblems lists what would keep sing-box from starting: every
-// dependency on a tag that does not exist, and every ring (a strongly
-// connected set of outbounds, or one depending on itself)
+// dependency on a tag that does not exist, every ring (a strongly connected
+// set of outbounds, or one depending on itself), and every reference from
+// outside the outbounds to a tag that does not exist (referenceProblems)
 func dependencyProblems(cfg map[string]any) []dependencyProblem {
+	problems := outboundProblems(cfg)
+	return append(problems, referenceProblems(cfg)...)
+}
+
+// referenceProblems lists the references from outside the outbounds that
+// sing-box resolves when it starts, naming a tag no outbound or endpoint
+// has: route.final ("default outbound not found"), the detour of a DNS server
+// and of the NTP client when it is enabled ("outbound detour not found").
+// sing-box check passes all of them, and they are easy to make: renaming or
+// deleting the outbound they name on the settings page, where the DNS
+// section cannot be edited. A route rule naming a missing outbound is not
+// one: it fails only the connections it matches, sing-box starts.
+func referenceProblems(cfg map[string]any) []dependencyProblem {
+	present := map[string]bool{}
+	for _, n := range dependencyNodes(cfg) {
+		present[n.tag] = true
+	}
+	var problems []dependencyProblem
+	seen := map[string]bool{}
+	check := func(key, origin string, value any) {
+		tag, _ := value.(string)
+		key += "\x00" + tag
+		if tag == "" || present[tag] || seen[key] {
+			return
+		}
+		seen[key] = true
+		problems = append(problems, dependencyProblem{key: key, missing: tag, origin: origin})
+	}
+
+	for _, route := range objects(cfg, "route") {
+		for _, final := range fieldValues(route, "final") {
+			check("final", "route.final", final)
+		}
+	}
+	for _, dns := range objects(cfg, "dns") {
+		for _, value := range fieldValues(dns, "servers") {
+			servers, _ := value.([]any)
+			for _, item := range servers {
+				server, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				tag := foldedString(server, "tag")
+				origin := "detour DNS-сервера"
+				if tag != "" {
+					origin += " «" + tag + "»"
+				}
+				for _, detour := range fieldValues(server, "detour") {
+					check("dns\x00"+tag, origin, detour)
+				}
+			}
+		}
+	}
+	// A disabled NTP client is not created, and its detour never looked up
+	for _, ntp := range objects(cfg, "ntp") {
+		if !enabled(ntp) {
+			continue
+		}
+		for _, detour := range fieldValues(ntp, "detour") {
+			check("ntp", "ntp.detour", detour)
+		}
+	}
+	return problems
+}
+
+// objects returns the objects at every key of m that folds to name
+func objects(m map[string]any, name string) []map[string]any {
+	var found []map[string]any
+	for _, v := range fieldValues(m, name) {
+		if o, ok := v.(map[string]any); ok {
+			found = append(found, o)
+		}
+	}
+	return found
+}
+
+// enabled: an "enabled" key of the object, in any spelling, is true (with two
+// spellings sing-box takes the later one; the order of keys is not kept
+// here, and a disabled part refused by mistake costs less than a broken
+// start let through)
+func enabled(m map[string]any) bool {
+	for _, v := range fieldValues(m, "enabled") {
+		if b, ok := v.(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+// outboundProblems lists the dependencies of outbounds and endpoints on a
+// tag that does not exist, and the rings
+func outboundProblems(cfg map[string]any) []dependencyProblem {
 	nodes := dependencyNodes(cfg)
 	present := map[string]bool{}
 	for _, n := range nodes {

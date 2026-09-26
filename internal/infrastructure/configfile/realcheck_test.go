@@ -236,3 +236,25 @@ func TestRealCheckErrorNamesTheOutbound(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// sing-box check passes a route.final, a DNS server's detour and an enabled
+// NTP client's detour naming a missing outbound — sing-box then does not
+// start. The editor refuses what would add one.
+func TestRealCheckMissesStartupReferences(t *testing.T) {
+	validate := realValidator(t)
+	for name, config := range map[string]string{
+		"final":      `{"outbounds": [{"type": "direct", "tag": "direct"}], "route": {"final": "gone"}}`,
+		"DNS detour": `{"dns": {"servers": [{"type": "https", "tag": "remote", "server": "dns.example.com", "detour": "gone"}]}, "outbounds": [{"type": "direct", "tag": "direct"}]}`,
+		"NTP detour": `{"ntp": {"enabled": true, "server": "time.example.com", "detour": "gone"}, "outbounds": [{"type": "direct", "tag": "direct"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate([]byte(config)); err != nil {
+				t.Fatalf("sing-box check refuses it now (%v): the refusal's «sing-box check этого не замечает» is out of date", err)
+			}
+			err := New(filepath.Join(t.TempDir(), "config.json")).CreateConfig([]byte(config))
+			if err == nil || !strings.Contains(err.Error(), "указывает на «gone», а такого outbound нет") {
+				t.Fatalf("CreateConfig: %v", err)
+			}
+		})
+	}
+}

@@ -74,6 +74,157 @@ func TestDependencyProblemsRefused(t *testing.T) {
 	}
 }
 
+const referencesConfig = `{
+  "dns": {"servers": [{"type": "https", "tag": "remote", "server": "dns.example.com", "detour": "proxy"}]},
+  "ntp": {"enabled": true, "server": "time.example.com", "detour": "proxy"},
+  "outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["A", "direct"]},
+    {"type": "vless", "tag": "A", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ],
+  "route": {"final": "proxy"}
+}`
+
+// The references from outside the outbounds that sing-box resolves when it
+// starts: route.final, the detour of a DNS server and of an enabled NTP
+// client. sing-box check passes one naming a missing outbound, sing-box then
+// does not start — the common way there is renaming or deleting the outbound
+// on the settings page, where the DNS section cannot be edited. A save that
+// adds one is refused, naming the reference.
+func TestReferenceProblemsRefused(t *testing.T) {
+	path := writeConfig(t, referencesConfig)
+	renamed := strings.Replace(`[
+    {"type": "selector", "tag": "proxy", "outbounds": ["A", "direct"]},
+    {"type": "vless", "tag": "A", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ]`, `"tag": "proxy"`, `"tag": "proxy2"`, 1)
+	err := New(path).WriteSection("outbounds", []byte(renamed))
+	if err == nil {
+		t.Fatal("saved")
+	}
+	for _, want := range []string{
+		"route.final указывает на «proxy», а такого outbound нет",
+		"detour DNS-сервера «remote» указывает на «proxy», а такого outbound нет",
+		"ntp.detour указывает на «proxy», а такого outbound нет",
+		"sing-box не запустится",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to say %q", err, want)
+		}
+	}
+	if !refusal(err) {
+		t.Fatal("not a refusal")
+	}
+	if outboundByTag(t, load(t, path), "proxy") == nil {
+		t.Fatal("the config was written")
+	}
+
+	// The route section on its own
+	err = New(path).WriteSection("route", []byte(`{"final": "gone"}`))
+	if err == nil || !strings.Contains(err.Error(), "route.final указывает на «gone»") {
+		t.Fatalf("route: %v", err)
+	}
+	if err := New(path).WriteSection("route", []byte(`{"final": "A"}`)); err != nil {
+		t.Fatalf("a final naming an outbound: %v", err)
+	}
+
+	// The first config too
+	err = New(filepath.Join(t.TempDir(), "config.json")).CreateConfig([]byte(`{"outbounds": [{"type": "direct", "tag": "direct"}], "route": {"final": "proxy"}}`))
+	if err == nil || !strings.Contains(err.Error(), "route.final указывает на «proxy»") {
+		t.Fatalf("CreateConfig: %v", err)
+	}
+
+	// One the config already has does not block other saves
+	path = writeConfig(t, strings.Replace(referencesConfig, `"final": "proxy"`, `"final": "gone"`, 1))
+	if err := New(path).AddOutbound(node("new", "")); err != nil {
+		t.Fatalf("an existing problem blocked an import: %v", err)
+	}
+}
+
+// Keys in every spelling sing-box reads as them; a disabled NTP client is
+// not created, its detour never looked up
+func TestReferenceProblemsSpelling(t *testing.T) {
+	for name, tc := range map[string]struct {
+		config string
+		want   []string // the tags reported missing
+	}{
+		"final":             {`{"outbounds": [{"type": "direct", "tag": "direct"}], "Route": {"Final": "gone"}}`, []string{"gone"}},
+		"DNS detour":        {`{"outbounds": [{"type": "direct", "tag": "direct"}], "DNS": {"Servers": [{"type": "udp", "Tag": "local", "server": "192.0.2.53", "DETOUR": "gone"}]}}`, []string{"gone"}},
+		"untagged DNS":      {`{"outbounds": [{"type": "direct", "tag": "direct"}], "dns": {"servers": [{"address": "tls://192.0.2.53", "detour": "gone"}]}}`, []string{"gone"}},
+		"NTP":               {`{"outbounds": [{"type": "direct", "tag": "direct"}], "Ntp": {"Enabled": true, "Detour": "gone"}}`, []string{"gone"}},
+		"NTP disabled":      {`{"outbounds": [{"type": "direct", "tag": "direct"}], "ntp": {"enabled": false, "detour": "gone"}}`, nil},
+		"NTP without state": {`{"outbounds": [{"type": "direct", "tag": "direct"}], "ntp": {"detour": "gone"}}`, nil},
+		"endpoint":          {`{"outbounds": [{"type": "direct", "tag": "direct"}], "endpoints": [{"type": "wireguard", "tag": "wg"}], "route": {"final": "wg"}, "dns": {"servers": [{"type": "udp", "server": "192.0.2.53", "detour": "wg"}]}}`, nil},
+		"empty":             {`{"outbounds": [{"type": "direct", "tag": "direct"}], "route": {"final": ""}}`, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var missing []string
+			for _, p := range referenceProblems(decode(t, tc.config)) {
+				missing = append(missing, p.missing)
+			}
+			if !reflect.DeepEqual(missing, tc.want) {
+				t.Fatalf("missing = %v, want %v", missing, tc.want)
+			}
+		})
+	}
+	if err := checkDependencies(nil, decode(t, `{"dns": {"servers": [{"address": "tls://192.0.2.53", "detour": "gone"}]}}`)); err == nil ||
+		!strings.Contains(err.Error(), "detour DNS-сервера указывает на «gone»") {
+		t.Fatalf("untagged DNS server: %v", err)
+	}
+}
+
+// What the app itself writes never trips the check: a refresh removing the
+// outbound these references name repoints or drops them (here with no
+// proxy left: final to direct, the detours dropped — a detour to a direct
+// outbound is refused by sing-box), and switching the server or wiring the
+// DPI bypass keeps them valid
+func TestReferencesFollowTheAppsOwnEdits(t *testing.T) {
+	config := strings.ReplaceAll(referencesConfig, `"detour": "proxy"`, `"detour": "A"`)
+	config = strings.Replace(config, `"final": "proxy"`, `"rules": [{"domain_suffix": [".example.org"], "outbound": "A"}], "final": "A"`, 1)
+	path := writeConfig(t, config)
+	editor := New(path)
+
+	result, err := editor.SyncOutbounds([]string{"A"}, nil)
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Removed, []string{"A"}) {
+		t.Fatalf("result = %+v", result)
+	}
+	cfg := load(t, path)
+	if final := cfg["route"].(map[string]any)["final"]; final != "direct" {
+		t.Fatalf("final = %v", final)
+	}
+	if _, has := cfg["ntp"].(map[string]any)["detour"]; has {
+		t.Fatal("the NTP detour to the removed node stayed")
+	}
+	if _, has := cfg["dns"].(map[string]any)["servers"].([]any)[0].(map[string]any)["detour"]; has {
+		t.Fatal("the DNS detour to the removed node stayed")
+	}
+
+	if err := editor.AddOutbound(node("B", "")); err != nil {
+		t.Fatalf("AddOutbound: %v", err)
+	}
+	if err := editor.SwitchOutbound("B"); err != nil {
+		t.Fatalf("SwitchOutbound: %v", err)
+	}
+	if err := editor.EnsureBypassOutbound("dpi-bypass", "127.0.0.1", 3128); err != nil {
+		t.Fatalf("EnsureBypassOutbound: %v", err)
+	}
+	if err := editor.SetDetour("B", "dpi-bypass"); err != nil {
+		t.Fatalf("SetDetour: %v", err)
+	}
+	if err := editor.SwitchOutbound("dpi-bypass"); err != nil {
+		t.Fatalf("SwitchOutbound to the bypass: %v", err)
+	}
+	if err := editor.ClearDetour("dpi-bypass"); err != nil {
+		t.Fatalf("ClearDetour: %v", err)
+	}
+	if problems := dependencyProblems(load(t, path)); len(problems) != 0 {
+		t.Fatalf("saved with %v", problems)
+	}
+}
+
 // A node chained through one the checks refused goes with it — saved, it
 // would name an outbound the config does not have. The others are saved.
 func TestRefusedNodeTakesItsChain(t *testing.T) {
