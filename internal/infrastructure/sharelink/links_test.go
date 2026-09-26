@@ -154,6 +154,13 @@ var acceptedLinks = []linkCase{
 	{"vmess quic",
 		vmessJSON(`{"ps":"vm-quic","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"quic","type":"none","host":"none","path":"","tls":"tls","sni":"example.com"}`),
 		`{"transport":{"type":"quic"},"tls":{"enabled":true,"utls":null}}`},
+	// Its "host" is the QUIC encryption, no server name: the address is
+	{"vmess quic without sni",
+		vmessJSON(`{"ps":"vm-quic-nosni","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"quic","type":"none","host":"none","path":"","tls":"tls"}`),
+		`{"transport":{"type":"quic"},"tls":{"server_name":"192.0.2.20"}}`},
+	{"vmess ws takes the server name from host",
+		vmessJSON(`{"ps":"vm-ws-host","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","host":"cdn.example.com","path":"/ws","tls":"tls"}`),
+		`{"tls":{"server_name":"cdn.example.com"}}`},
 
 	// flow
 	{"flow -udp443",

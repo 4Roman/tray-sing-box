@@ -528,6 +528,8 @@ func parseVMess(link string) (Outbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	network := strings.ToLower(strings.TrimSpace(v.Net))
+	quic := network == "quic"
 	var fm string
 	if json.Unmarshal(v.Fm, &fm) != nil {
 		fm = string(v.Fm) // an object, not a string holding one
@@ -558,7 +560,10 @@ func parseVMess(link string) (Outbound, error) {
 		// "tls", and the legacy "xtls" (as mihomo reads it)
 		tls = map[string]any{"enabled": true}
 		serverName := strings.TrimSpace(v.SNI)
-		if serverName == "" {
+		// "host" names the server, except for QUIC: there it is the QUIC
+		// encryption (v2rayN writes "none"), which as the server name would
+		// fail every certificate check
+		if serverName == "" && !quic {
 			serverName = firstOf(v.Host)
 		}
 		if serverName == "" {
@@ -597,7 +602,7 @@ func parseVMess(link string) (Outbound, error) {
 	q.Set("headerType", v.Type)
 	q.Set("path", v.Path)
 	q.Set("host", v.Host)
-	switch strings.ToLower(strings.TrimSpace(v.Net)) {
+	switch network {
 	case "grpc":
 		q.Set("serviceName", v.Path)
 	case "quic":
