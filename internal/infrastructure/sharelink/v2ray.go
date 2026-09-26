@@ -474,6 +474,8 @@ type vmessLink struct {
 	Pcs      string          `json:"pcs"` // Xray's certificate pin (v2rayN, 3x-ui)
 	Vcn      string          `json:"vcn"` // Xray's names to check the certificate for
 	Fm       json.RawMessage `json:"fm"`  // Xray's finalmask, as a JSON text or an object
+	Pbk      string          `json:"pbk"` // REALITY's public key (Marzban)
+	Sid      string          `json:"sid"` // REALITY's short_id
 }
 
 // rawInt parses a JSON value that may be a number or a quoted number
@@ -566,10 +568,15 @@ func parseVMess(link string) (Outbound, error) {
 	}
 
 	var tls map[string]any
-	switch mode := strings.ToLower(strings.TrimSpace(v.TLS)); {
+	mode := strings.ToLower(strings.TrimSpace(v.TLS))
+	// Marzban writes "reality" with pbk, sid, sni and fp for a VMess inbound
+	// on REALITY (Xray limits REALITY by transport, not by protocol), and
+	// sing-box runs VMess over it — built as for the URL form
+	reality := mode == "reality"
+	switch {
 	case mode == "" || mode == "none" || mode == "0" || mode == "false":
-	case strings.HasSuffix(mode, "tls"):
-		// "tls", and the legacy "xtls" (as mihomo reads it)
+	case strings.HasSuffix(mode, "tls") || reality:
+		// "tls", the legacy "xtls" (as mihomo reads it) and "reality"
 		tls = map[string]any{"enabled": true}
 		serverName := strings.TrimSpace(v.SNI)
 		// "host" names the server, except for QUIC: there it is the QUIC
@@ -598,8 +605,15 @@ func parseVMess(link string) (Outbound, error) {
 		if alpn := splitList(v.Alpn); len(alpn) > 0 {
 			tls["alpn"] = alpn
 		}
-		if fp, ok := utlsFingerprint(v.Fp, false); ok {
+		if fp, ok := utlsFingerprint(v.Fp, reality); ok {
 			tls["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+		}
+		if reality {
+			r, err := realityConfig(v.Pbk, v.Sid)
+			if err != nil {
+				return nil, err
+			}
+			tls["reality"] = r
 		}
 		outbound["tls"] = tls
 	default:

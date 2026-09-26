@@ -343,6 +343,17 @@ var acceptedLinks = []linkCase{
 	{"vmess grpc service name from path",
 		"vmess://eyJ2IjoiMiIsInBzIjoidm0tZ3JwYyIsImFkZCI6IjE5Mi4wLjIuMjAiLCJwb3J0IjoiNDQzIiwiaWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6ImdycGMiLCJ0eXBlIjoiZ3VuIiwiaG9zdCI6IiIsInBhdGgiOiJteWdycGMiLCJ0bHMiOiJ0bHMiLCJzbmkiOiJleGFtcGxlLmNvbSIsImZwIjoiY2hyb21lIn0=",
 		`{"type":"vmess","tag":"vm-grpc","transport":{"type":"grpc","service_name":"mygrpc"},"tls":{"server_name":"example.com","utls":{"fingerprint":"chrome"}}}`},
+	// Marzban's VMess over REALITY: built as the URL form builds it, uTLS
+	// always on
+	{"vmess JSON over REALITY",
+		vmessJSON(`{"v":"2","ps":"vm-reality","add":"203.0.113.16","port":443,"id":"` + testUUID + `","aid":"0","scy":"auto","net":"tcp","type":"none","host":"","path":"","tls":"reality","sni":"www.example.com","fp":"chrome","pbk":"` + testPBK + `","sid":"6ba85179","spx":"/"}`),
+		`{"type":"vmess","server":"203.0.113.16","server_port":443,"transport":null,
+		  "tls":{"enabled":true,"server_name":"www.example.com","utls":{"enabled":true,"fingerprint":"chrome"},
+		         "reality":{"enabled":true,"public_key":"` + testPBK + `","short_id":"6ba85179"}}}`},
+	{"vmess JSON over REALITY with fp none still gets uTLS",
+		vmessJSON(`{"ps":"vm-reality-grpc","add":"203.0.113.16","port":443,"id":"` + testUUID + `","net":"grpc","path":"svc","tls":"reality","sni":"www.example.com","fp":"none","pbk":"` + testPBK + `"}`),
+		`{"transport":{"type":"grpc","service_name":"svc"},
+		  "tls":{"utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"short_id":null}}}`},
 	{"vmess insecure and fingerprint",
 		vmessJSON(`{"ps":"vm-insecure","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"tcp","tls":"tls","insecure":"1","fp":"randomizednoalpn","scy":"zero"}`),
 		`{"security":"zero","tls":{"insecure":true,"utls":{"fingerprint":"randomized"}},"transport":null}`},
@@ -490,7 +501,11 @@ var refusedLinks = []refusalCase{
 	{"ss-legacy-ws", "ss://" + b64("aes-256-gcm:pw@192.0.2.40:8388") + "?type=ws&path=%2Fws#ss-legacy-ws", "транспорт «ws» для Shadowsocks"},
 
 	{"vm-cipher", vmessJSON(`{"ps":"vm-cipher","add":"192.0.2.20","port":"443","id":"` + testUUID + `","scy":"aes-128-ctr"}`), "шифрование VMess «aes-128-ctr»"},
-	{"vm-reality", vmessJSON(`{"ps":"vm-reality","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"reality"}`), "режим защиты «reality»"},
+	{"vm-reality", vmessJSON(`{"ps":"vm-reality","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"reality"}`), "не указан публичный ключ REALITY (pbk)"},
+	{"vm-reality-bad-pbk", vmessJSON(`{"ps":"vm-reality-bad-pbk","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"reality","pbk":"` + testSecret + `"}`), "неверный публичный ключ REALITY (pbk)"},
+	{"vm-reality-bad-sid", vmessJSON(`{"ps":"vm-reality-bad-sid","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"reality","pbk":"` + testPBK + `","sid":"` + testSecret + `"}`), "short_id"},
+	{"vm-reality-quic", vmessJSON(`{"ps":"vm-reality-quic","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"quic","tls":"reality","pbk":"` + testPBK + `"}`), "REALITY поверх транспорта QUIC"},
+	{"vm-security", vmessJSON(`{"ps":"vm-security","add":"192.0.2.20","port":"443","id":"` + testUUID + `","tls":"xyz"}`), "режим защиты «xyz» для VMess"},
 	{"vm-noid", vmessJSON(`{"ps":"vm-noid","add":"192.0.2.20","port":"443"}`), "uuid"},
 
 	{"ssr-node", "ssr://" + b64("192.0.2.90:8388:origin:aes-256-cfb:plain:"+testSecret) + "#ssr-node", "ShadowsocksR"},
