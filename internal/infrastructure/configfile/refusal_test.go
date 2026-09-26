@@ -207,10 +207,10 @@ func TestCrashAmongManyIsBisected(t *testing.T) {
 	}
 }
 
-// Halving pays off for a few crashing nodes; with every node crashing it
+// Halving pays off for a few crashing nodes; with most nodes crashing it
 // would cost two checks per node (each a sing-box start under the app's
-// lock). The halving rounds are bounded: at most about one check per node
-// plus a few rounds.
+// lock). The rounds that narrow nothing down are bounded: at most one check
+// per node plus a few rounds.
 func TestManyCrashesCostAboutOneCheckEach(t *testing.T) {
 	for _, crashing := range []int{64, 20, 3} {
 		t.Run(fmt.Sprint(crashing), func(t *testing.T) {
@@ -237,10 +237,56 @@ func TestManyCrashesCostAboutOneCheckEach(t *testing.T) {
 					t.Fatalf("skipped %+v", sk)
 				}
 			}
-			// The merge and its retry, one check per node checked alone, and
-			// the halving rounds: 2 × log2(65) + 2
-			if limit := 2 + 65 + 2*7 + 2; check.calls > limit {
+			// The merge and its retry, the first check of all of them, one
+			// check per node checked alone, and two checks for each of the
+			// halving rounds that narrowed nothing down: 2 × log2(65) + 2
+			if limit := 3 + 65 + 2*(2*7+2); check.calls > limit {
 				t.Fatalf("validator ran %d times for %d crashing nodes among 65, want at most %d", check.calls, crashing, limit)
+			}
+		})
+	}
+}
+
+// A few crashing nodes among many, in a run (one template with a broken
+// option) or scattered: halving finds them in a few rounds each, as long as
+// a round narrows something down. Only rounds with crashes in both halves
+// use up the budget — spending it on the first few crashes made a run of 16
+// among 201 cost 221 checks instead of 43.
+func TestFewCrashesAmongManyStayCheap(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		crash []int // the crashing nodes among 200
+		limit int
+	}{
+		{"run of 16", []int{90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105}, 50},
+		{"3 scattered", []int{17, 118, 181}, 45},
+		{"5 scattered", []int{3, 61, 99, 142, 197}, 70},
+		{"8 spread", []int{12, 37, 62, 87, 112, 137, 162, 187}, 105},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			editor, _, check := checkedEditor(t, sampleConfig)
+			crash := map[int]bool{}
+			for _, i := range tc.crash {
+				crash[i] = true
+			}
+			var nodes []map[string]any
+			for i := 0; i < 200; i++ {
+				flow := ""
+				if crash[i] {
+					flow = "crash"
+				}
+				nodes = append(nodes, node(fmt.Sprintf("node-%d", i), flow))
+			}
+			nodes = append(nodes, node("good", ""))
+			result, err := editor.AddOutbounds(nodes, nil)
+			if err != nil {
+				t.Fatalf("AddOutbounds: %v", err)
+			}
+			if len(result.Skipped) != len(tc.crash) || len(result.Tags) != 201-len(tc.crash) {
+				t.Fatalf("result: %d saved, %d skipped", len(result.Tags), len(result.Skipped))
+			}
+			if check.calls > tc.limit {
+				t.Fatalf("validator ran %d times, want at most %d", check.calls, tc.limit)
 			}
 		})
 	}

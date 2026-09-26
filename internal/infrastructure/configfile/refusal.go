@@ -193,7 +193,8 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 		pending = append(pending, i)
 	}
 	if e.validator != nil {
-		// Enough halving rounds to find two crashing nodes among them
+		// Halving rounds that narrow nothing down: a few, then one check
+		// per node
 		halvings := 2*bits.Len(uint(len(pending))) + 2
 		e.isolate(outbounds, pending, reasons, &halvings)
 	}
@@ -206,39 +207,49 @@ func (e *Editor) refusedAlone(outbounds []map[string]any) map[int]string {
 // together with the others of its type that carry the same unknown field
 // (sameUnknownField): a provider serving a field of a newer sing-box in
 // every node costs a round, not one per node. An answer that names no
-// outbound (a crash) splits the list in halves, each checked on its own:
-// a few rounds for one such node, never one per node. Such a round finds
-// nobody, and with many crashing nodes halving would cost about two checks
-// per node, so the rounds are counted (halvings, shared by the recursion):
-// once they are spent, what is left is checked one node at a time — at
-// worst a check per node plus the rounds spent, never twice that.
-func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[int]string, halvings *int) {
-	for len(pending) > 0 {
-		if len(pending) > 1 && *halvings <= 0 {
-			for _, i := range pending {
-				e.isolate(outbounds, []int{i}, reasons, halvings)
-			}
-			return
-		}
+// outbound (a crash) splits the list in halves, each checked on its own: a
+// few rounds for a crashing node or a run of them, never one per node. With
+// crashing nodes in both halves round after round (most of the nodes crash)
+// halving would cost about two checks per node, so such rounds are counted
+// (halvings, shared by the recursion): once they are spent, a list that
+// crashes is checked one node at a time — at worst a check per node plus the
+// rounds spent. It returns whether its first check crashed.
+func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[int]string, halvings *int) (crashed bool) {
+	for first := true; len(pending) > 0; first = false {
 		list := make([]any, len(pending))
 		for j, i := range pending {
 			list[j] = alone(outbounds[i])
 		}
 		err := e.validate(map[string]any{"outbounds": list})
 		if err == nil {
-			return
+			return crashed
+		}
+		j, ok := refusedIndex(err.Error())
+		unindexed := !ok || j >= len(pending)
+		if first && unindexed {
+			crashed = true
 		}
 		if len(pending) == 1 {
 			reasons[pending[0]] = refusalReason(err, outbounds[pending[0]])
-			return
+			return crashed
 		}
-		j, ok := refusedIndex(err.Error())
-		if !ok || j >= len(pending) {
+		if unindexed {
+			if *halvings <= 0 {
+				for _, i := range pending {
+					e.isolate(outbounds, []int{i}, reasons, halvings)
+				}
+				return crashed
+			}
+			// The round counts only when both halves crash: then halving
+			// did not narrow anything down
 			*halvings--
 			half := len(pending) / 2
-			e.isolate(outbounds, append([]int(nil), pending[:half]...), reasons, halvings)
-			e.isolate(outbounds, append([]int(nil), pending[half:]...), reasons, halvings)
-			return
+			a := e.isolate(outbounds, append([]int(nil), pending[:half]...), reasons, halvings)
+			b := e.isolate(outbounds, append([]int(nil), pending[half:]...), reasons, halvings)
+			if !a || !b {
+				*halvings++
+			}
+			return crashed
 		}
 		refused := outbounds[pending[j]]
 		key := unknownField(err.Error())
@@ -252,6 +263,7 @@ func (e *Editor) isolate(outbounds []map[string]any, pending []int, reasons map[
 		}
 		pending = rest
 	}
+	return crashed
 }
 
 // unknownFieldMessage is sing-box's refusal of a key it does not know in an
