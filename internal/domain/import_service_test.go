@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 type fakeParser struct {
@@ -239,5 +240,44 @@ func TestDescribeSkippedLimit(t *testing.T) {
 	}
 	if got := DescribeSkipped(skipped, 0); strings.Count(got, "\n") != 2 {
 		t.Fatalf("DescribeSkipped without a limit = %q", got)
+	}
+}
+
+// Names and reasons are the provider's text: each is written on one line
+// and bounded, so a node cannot add lines of its own to a popup the app
+// shows unattended, nor make it any size
+func TestDescribeSkippedOneLineEach(t *testing.T) {
+	const fake = "Внимание! Подписка истекла. Продлите на http://evil.example"
+	lineSeparator := string(rune(0x2028))
+	rightToLeftOverride, popFormatting := string(rune(0x202e)), string(rune(0x202c))
+	skipped := []SkippedNode{
+		{Name: "x»\r\n\n" + fake + lineSeparator + "\n«y", Reason: "тип «tor» не поддерживается"},
+		{Name: strings.Repeat("Я", 5000), Reason: "sing-box не принимает: a\n" + fake + ": json: unknown field \"a\""},
+		{Name: rightToLeftOverride + "abc" + popFormatting, Reason: strings.Repeat("r", 5000)},
+	}
+	got := DescribeSkipped(skipped, 0)
+	lines := strings.Split(got, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("%d lines, want one per node: %.400q", len(lines), got)
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "Внимание") {
+			t.Fatalf("a name or reason made a line of its own: %.400q", got)
+		}
+		if n := utf8.RuneCountInString(line); n > nameLimit+reasonLimit+10 {
+			t.Fatalf("line of %d characters", n)
+		}
+	}
+	if !strings.HasPrefix(lines[0], "«x»   "+fake) {
+		t.Fatalf("line 1 = %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "«"+strings.Repeat("Я", nameLimit)+"…» — ") {
+		t.Fatalf("a long name not cut: %.60q", lines[1])
+	}
+	if lines[2] != "«abc» — "+strings.Repeat("r", reasonLimit)+"…" {
+		t.Fatalf("line 3 = %.60q", lines[2])
+	}
+	if got := DisplayName("DE | 12GB"); got != "DE | 12GB" {
+		t.Fatalf("an ordinary name changed: %q", got)
 	}
 }

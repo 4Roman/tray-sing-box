@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -70,13 +71,14 @@ func TestImportMessage(t *testing.T) {
 			Renamed:   []domain.TagRename{{From: "direct", To: "direct (2)"}},
 			Skipped:   []domain.SkippedNode{{Name: "ss-obfs", Reason: "плагин obfs-local не поддерживается"}},
 			Restarted: true,
-		}, "Импортировано серверов: 2 из 3, VPN перезапущен\n\nok\ndirect (2)" +
-			"\n\nИмя уже занято — сохранены под другим:\n«direct» → «direct (2)»" +
-			"\n\nПропущены:\n«ss-obfs» — плагин obfs-local не поддерживается"},
+		}, "Импортировано серверов: 2 из 3, VPN перезапущен" +
+			"\n\nПропущены:\n«ss-obfs» — плагин obfs-local не поддерживается" +
+			"\n\nok\ndirect (2)" +
+			"\n\nИмя уже занято — сохранены под другим:\n«direct» → «direct (2)»"},
 		{"one of two", domain.ImportResult{
 			Tags:    []string{"ok"},
 			Skipped: []domain.SkippedNode{{Name: "ссылка 2", Reason: "ссылка повреждена"}},
-		}, "Импортировано серверов: 1 из 2\n\nok\n\nПропущены:\n«ссылка 2» — ссылка повреждена"},
+		}, "Импортировано серверов: 1 из 2\n\nПропущены:\n«ссылка 2» — ссылка повреждена\n\nok"},
 	} {
 		if got := ImportMessage(&tc.result); got != tc.want {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
@@ -103,8 +105,8 @@ func TestSubscriptionMessage(t *testing.T) {
 	}
 	p, q := domain.RedactURL(url), domain.RedactURL("https://q.example/sub")
 	want := p + " — серверов: 3, новых: 1, удалено: 1, переименовано: 1" +
-		"\n  имя уже занято, сохранены под другим: «direct» → «direct (2)»" +
 		"\n  пропущены:\n  «bad» — sing-box не принимает: unsupported flow: x\n  «tuic-1» — тип ссылки не поддерживается" +
+		"\n  имя уже занято, сохранены под другим: «direct» → «direct (2)»" +
 		"\n" + q + " — ошибка: не удалось скачать подписку: HTTP 502" +
 		"\n\nVPN перезапущен"
 	got := SubscriptionMessage(result)
@@ -156,5 +158,71 @@ func TestSubscriptionPopupsWithRestartError(t *testing.T) {
 	result.Updates[0].NewProblem = false
 	if got := AutoRefreshReport(result); got != "" {
 		t.Fatalf("report without new problems = %q", got)
+	}
+}
+
+// A message box has no scroll bar: every list is bounded, and what went
+// wrong comes before the long lists, where it stays visible
+func TestPopupListsAreBounded(t *testing.T) {
+	var result domain.ImportResult
+	var suffixed []domain.TagRename
+	for i := 1; i <= 60; i++ {
+		tag := fmt.Sprintf("node-%d", i)
+		result.Tags = append(result.Tags, tag+" (2)")
+		result.Renamed = append(result.Renamed, domain.TagRename{From: tag, To: tag + " (2)"})
+		suffixed = append(suffixed, domain.TagRename{From: tag, To: tag + " (2)"})
+	}
+	result.Skipped = []domain.SkippedNode{{Name: "bad", Reason: "тип «tor» не поддерживается"}}
+
+	lines := strings.Split(ImportMessage(&result), "\n")
+	if len(lines) > 3*listLimit+12 {
+		t.Fatalf("%d lines:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[2] != ImportSkippedHeader || lines[3] != "«bad» — тип «tor» не поддерживается" {
+		t.Fatalf("the nodes left out are not first:\n%s", strings.Join(lines, "\n"))
+	}
+	if strings.Count(strings.Join(lines, "\n"), "…и ещё 50") != 2 {
+		t.Fatalf("the lists do not say how many more there are:\n%s", strings.Join(lines, "\n"))
+	}
+
+	message := SubscriptionMessage(&domain.SubscriptionResult{Updates: []domain.SubscriptionUpdate{
+		{URL: "https://p.example/sub", Tags: result.Tags, Suffixed: suffixed},
+	}})
+	if n := strings.Count(message, "→"); n != listLimit || !strings.HasSuffix(message, ", …и ещё 50") {
+		t.Fatalf("%d renames listed: %s", n, message)
+	}
+}
+
+// Tags and names come from links and providers: written on one line each,
+// they cannot add lines to a popup that look like the app's own text
+func TestPopupNamesOnOneLine(t *testing.T) {
+	const fake = "Внимание! Подписка истекла. Продлите на http://evil.example"
+	evil := "x»\n\n" + fake + "\n\n«y"
+	messages := []string{
+		ImportMessage(&domain.ImportResult{Tags: []string{evil}}),
+		ImportMessage(&domain.ImportResult{
+			Tags:    []string{evil, "ok"},
+			Renamed: []domain.TagRename{{From: evil, To: evil + " (2)"}},
+			Skipped: []domain.SkippedNode{{Name: evil, Reason: "тип «tor» не поддерживается"}},
+		}),
+		AutoRefreshReport(&domain.SubscriptionResult{Updates: []domain.SubscriptionUpdate{{
+			URL: "https://p.example/sub", Tags: []string{"ok"}, NewProblem: true,
+			Suffixed: []domain.TagRename{{From: evil, To: evil + " (2)"}},
+			Skipped:  []domain.SkippedNode{{Name: evil, Reason: "sing-box не принимает: " + evil}},
+		}}}),
+	}
+	for _, message := range messages {
+		for _, line := range strings.Split(message, "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "Внимание") || strings.HasPrefix(strings.TrimSpace(line), "«y") {
+				t.Fatalf("a name made a line of its own:\n%s", message)
+			}
+		}
+		if !strings.Contains(message, fake) {
+			t.Fatalf("the name is not shown at all:\n%s", message)
+		}
+	}
+	long := strings.Repeat("Я", 5000)
+	if n := utf8.RuneCountInString(ImportMessage(&domain.ImportResult{Tags: []string{long}})); n > 200 {
+		t.Fatalf("a %d-character message for one long name", n)
 	}
 }

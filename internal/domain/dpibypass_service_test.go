@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -141,6 +142,15 @@ func TestEnableChainRejectsUDPActive(t *testing.T) {
 	}
 	if mgr.started || store.bypassAdded {
 		t.Fatal("nothing should change when the active server is UDP")
+	}
+
+	// The active server may be a subscription's node: its name, the
+	// provider's text, stays on one line of the error popup
+	evil := "hy2\n\nПодписка истекла"
+	store = newBypassStore(evil, map[string]string{evil: "hysteria2"})
+	_, err := NewDPIBypassService(mgr, store, newRunningVPN()).EnableChain()
+	if err == nil || strings.Contains(err.Error(), "\n") || !strings.Contains(err.Error(), "«hy2  Подписка истекла»") {
+		t.Fatalf("error = %q", err)
 	}
 }
 

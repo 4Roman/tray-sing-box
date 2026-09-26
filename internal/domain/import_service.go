@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"unicode"
 )
 
 // SkippedNode is a link or subscription node that was left out, and why.
@@ -153,8 +154,18 @@ func (s *ImportService) subscriptionTags() []string {
 // which grows with its text and has no scroll bar
 const skippedLimit = 10
 
+// nameLimit and reasonLimit bound a node's name and the reason it was left
+// out in a message. Both can be the provider's text of any length: a name is
+// the node's tag, and sing-box's refusal quotes the node's own field names
+// and values.
+const (
+	nameLimit   = 100
+	reasonLimit = 300
+)
+
 // DescribeSkipped lists skipped nodes one per line, "«name» — reason", at
-// most limit of them (0: all) and then how many more there are
+// most limit of them (0: all) and then how many more there are. The name and
+// the reason are put on one line each (see DisplayName).
 func DescribeSkipped(skipped []SkippedNode, limit int) string {
 	lines := make([]string, 0, len(skipped))
 	for i, sk := range skipped {
@@ -162,9 +173,40 @@ func DescribeSkipped(skipped []SkippedNode, limit int) string {
 			lines = append(lines, fmt.Sprintf("…и ещё %d", len(skipped)-limit))
 			break
 		}
-		lines = append(lines, fmt.Sprintf("«%s» — %s", sk.Name, sk.Reason))
+		lines = append(lines, fmt.Sprintf("«%s» — %s", DisplayName(sk.Name), clipLine(sk.Reason, reasonLimit)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// DisplayName is how a node's name or tag is written into a message: on one
+// line and at most nameLimit characters. The name comes from a link or a
+// provider, and a message box would show a line break in it as a line of
+// the app's own text (a provider could write "Подписка истекла, продлите
+// на …" into a popup the app shows unattended). The config keeps the tag as
+// it is; the settings page shows it whole.
+func DisplayName(name string) string {
+	return clipLine(name, nameLimit)
+}
+
+// clipLine puts text on one line — control characters (line breaks, tabs)
+// and the Unicode line and paragraph separators become spaces, the
+// bidirectional controls that reorder what is shown are dropped — and cuts
+// it to limit characters
+func clipLine(text string, limit int) string {
+	text = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsControl(r) || unicode.In(r, unicode.Zl, unicode.Zp):
+			return ' '
+		case unicode.Is(unicode.Bidi_Control, r):
+			return -1
+		}
+		return r
+	}, text)
+	text = strings.TrimSpace(text)
+	if r := []rune(text); len(r) > limit {
+		text = strings.TrimSpace(string(r[:limit])) + "…"
+	}
+	return text
 }
 
 // noneUsableError: not one node of an import or a subscription could be

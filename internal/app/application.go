@@ -639,7 +639,8 @@ func (a *Application) handleToggleDPI() {
 func dpiMessage(status *domain.DPIBypassStatus) string {
 	var message string
 	if status.ChainActive {
-		message = fmt.Sprintf(ui.DPIEnabledMsg, status.ChainTarget)
+		// The active server may be a subscription's node, named by its provider
+		message = fmt.Sprintf(ui.DPIEnabledMsg, domain.DisplayName(status.ChainTarget))
 	} else {
 		message = ui.DPIDisabledMsg
 	}

@@ -122,7 +122,7 @@ func (s *DPIBypassService) EnableChain() (*DPIBypassStatus, error) {
 		return nil, err
 	}
 	if udpOutboundTypes[typ] {
-		return nil, fmt.Errorf("активный сервер «%s» использует %s (UDP) — обход DPI через HTTP-прокси работает только с TCP-серверами (vless/trojan/vmess)", active, typ)
+		return nil, fmt.Errorf("активный сервер «%s» использует %s (UDP) — обход DPI через HTTP-прокси работает только с TCP-серверами (vless/trojan/vmess)", DisplayName(active), typ)
 	}
 
 	// Start the container before editing the config so a restarted sing-box

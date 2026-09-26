@@ -50,3 +50,12 @@ func TestSubscriptionPopupsAfterAFailedRestart(t *testing.T) {
 		t.Fatalf("tray popup = %q (error: %v)", text, failed)
 	}
 }
+
+// The active server may be a subscription's node, named by its provider:
+// the name stays on one line of the popup
+func TestDPIMessageNamesTheServerOnOneLine(t *testing.T) {
+	got := dpiMessage(&domain.DPIBypassStatus{ChainActive: true, ChainTarget: "DE-1\n\nПодписка истекла"})
+	if strings.Contains(got, "\n") || !strings.Contains(got, "«DE-1  Подписка истекла»") {
+		t.Fatalf("message = %q", got)
+	}
+}

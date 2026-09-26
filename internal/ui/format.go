@@ -53,19 +53,23 @@ func PlainNotes(md string) string {
 	return text
 }
 
-// skippedLimit bounds the lists of skipped nodes in a popup: a message box
-// grows with its text and has no scroll bar (the settings page lists all)
-const skippedLimit = 10
+// listLimit bounds every list in a popup (servers imported, renamed, left
+// out): a message box grows with its text and has no scroll bar, and what
+// does not fit on the screen is simply not shown (the settings page lists
+// all)
+const listLimit = 10
 
 // ImportMessage is the popup text for a finished import: the servers
-// imported, the ones saved under another name (theirs was taken), and the
-// links left out with the reason
+// imported, the links left out with the reason, and the servers saved under
+// another name (theirs was taken). What went wrong comes first: the lists
+// after it may be long. Names are the link's or the provider's text, written
+// on one line each (domain.DisplayName).
 func ImportMessage(result *domain.ImportResult) string {
 	total := len(result.Tags) + len(result.Skipped)
 	var message string
 	switch {
 	case len(result.Tags) == 1 && total == 1:
-		message = fmt.Sprintf(ImportOneAdded, result.Tags[0])
+		message = fmt.Sprintf(ImportOneAdded, domain.DisplayName(result.Tags[0]))
 	case total == len(result.Tags):
 		message = fmt.Sprintf(ImportManyAdded, len(result.Tags))
 	default:
@@ -74,23 +78,41 @@ func ImportMessage(result *domain.ImportResult) string {
 	if result.Restarted {
 		message += ImportRestarted
 	}
+	if len(result.Skipped) > 0 {
+		message += "\n\n" + ImportSkippedHeader + "\n" + domain.DescribeSkipped(result.Skipped, listLimit)
+	}
 	if total > 1 {
-		message += "\n\n" + strings.Join(result.Tags, "\n")
+		message += "\n\n" + nameList(result.Tags, "\n")
 	}
 	if len(result.Renamed) > 0 {
 		message += "\n\n" + ImportRenamedHeader + "\n" + renameList(result.Renamed, "\n")
 	}
-	if len(result.Skipped) > 0 {
-		message += "\n\n" + ImportSkippedHeader + "\n" + domain.DescribeSkipped(result.Skipped, skippedLimit)
-	}
 	return message
 }
 
-// renameList shows renamed outbounds as "«old» → «new»"
+// nameList shows tags one per line, at most listLimit of them
+func nameList(tags []string, sep string) string {
+	items := make([]string, len(tags))
+	for i, tag := range tags {
+		items[i] = domain.DisplayName(tag)
+	}
+	return bounded(items, sep)
+}
+
+// renameList shows renamed outbounds as "«old» → «new»", at most listLimit
+// of them
 func renameList(renames []domain.TagRename, sep string) string {
 	items := make([]string, len(renames))
 	for i, r := range renames {
-		items[i] = fmt.Sprintf("«%s» → «%s»", r.From, r.To)
+		items[i] = fmt.Sprintf("«%s» → «%s»", domain.DisplayName(r.From), domain.DisplayName(r.To))
+	}
+	return bounded(items, sep)
+}
+
+// bounded joins the first listLimit items and says how many more there are
+func bounded(items []string, sep string) string {
+	if len(items) > listLimit {
+		items = append(items[:listLimit:listLimit], fmt.Sprintf("…и ещё %d", len(items)-listLimit))
 	}
 	return strings.Join(items, sep)
 }
@@ -136,7 +158,7 @@ func AutoRefreshReport(result *domain.SubscriptionResult) string {
 }
 
 // subscriptionLine describes the outcome for one subscription: the counts,
-// the nodes saved under another name, the nodes left out and why
+// the nodes left out and why, the nodes saved under another name
 func subscriptionLine(u domain.SubscriptionUpdate) string {
 	if u.Err != nil {
 		// The error of a subscription with no usable node lists them itself,
@@ -153,12 +175,12 @@ func subscriptionLine(u domain.SubscriptionUpdate) string {
 	if len(u.Renamed) > 0 {
 		line += fmt.Sprintf(SubsLineRenamed, len(u.Renamed))
 	}
+	if len(u.Skipped) > 0 {
+		skipped := domain.DescribeSkipped(u.Skipped, listLimit)
+		line += fmt.Sprintf(SubsLineSkipped, "  "+strings.ReplaceAll(skipped, "\n", "\n  "))
+	}
 	if len(u.Suffixed) > 0 {
 		line += fmt.Sprintf(SubsLineSuffixed, renameList(u.Suffixed, ", "))
-	}
-	if len(u.Skipped) > 0 {
-		skipped := domain.DescribeSkipped(u.Skipped, skippedLimit)
-		line += fmt.Sprintf(SubsLineSkipped, "  "+strings.ReplaceAll(skipped, "\n", "\n  "))
 	}
 	return line
 }
