@@ -25,7 +25,8 @@
 #   boot-off  after a reboot with the VPN off: the task starts the app, the
 #             VPN stays off; then the tray toggle turns it on
 #   boot-on   after a reboot with the VPN on: restored at logon
-#   import    (after install) a share link from the clipboard and a QR code
+#   import    (after install) a share link from the clipboard, several links
+#             at once (one of them left out with its reason) and a QR code
 #             on the screen (import-qr.png), through the tray items
 #   singbox-update  (networked, after install) the tray item replaces the
 #             running older sing-box with the latest release
@@ -842,6 +843,31 @@ switch ($Phase) {
         if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
         Check 'clipboard: the result is reported' $ok $text
         Check 'clipboard: the server is in the config' ((ConfigText) -match '"clip-node"')
+        [void](WaitFor { @(DialogTexts).Count -eq 0 } 10)
+
+        # Several links at once: REALITY without a fingerprint (gets uTLS),
+        # hysteria2 with port hopping, tuic, and an XHTTP link sing-box cannot
+        # run - left out and named with the reason, the rest imported
+        $uuid = '11111111-2222-4333-8444-555555555555'
+        $pbk = 'jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0'
+        Set-Clipboard -Value (@(
+                "vless://${uuid}@192.0.2.40:443?type=tcp&security=reality&sni=www.example.com&pbk=${pbk}&sid=6ba85179&flow=xtls-rprx-vision#reality-sb",
+                'hysteria2://import-secret@192.0.2.41:443,20000-20100/?sni=example.com#hy2-sb',
+                "tuic://${uuid}:import-secret@192.0.2.42:443?congestion_control=bbr&alpn=h3&sni=example.com#tuic-sb",
+                "vless://${uuid}@192.0.2.43:443?type=xhttp&path=%2Fxh&security=tls&sni=example.com#xhttp-sb") -join "`r`n")
+        Check 'menu: import several links' (MenuClick $menuImportClipboard)
+        $ok = WaitFor { $script:d = @([SbWin]::Dialogs([uint32](FirstPid $exe)))[0]; [bool]$script:d } 60
+        $text = ''
+        if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
+        Check 'links: 3 of 4 imported, the XHTTP one named with its reason' ($ok -and $text -match ': 3 \S+ 4' -and $text -match 'xhttp-sb' -and $text -match 'XHTTP') $text
+        $out = @((ConfigJson).outbounds)
+        $reality = $out | Where-Object { $_.tag -eq 'reality-sb' }
+        Check 'links: REALITY without fp gets uTLS' ([bool]($reality -and $reality.tls.reality.enabled -and $reality.tls.utls.enabled -and $reality.tls.utls.fingerprint)) (ConvertTo-Json $reality.tls -Compress -Depth 5)
+        $hy2 = $out | Where-Object { $_.tag -eq 'hy2-sb' }
+        Check 'links: hysteria2 port hopping' ([bool]($hy2 -and (@($hy2.server_ports) -contains '20000:20100'))) (ConvertTo-Json @($hy2.server_ports) -Compress)
+        Check 'links: tuic' (@($out | Where-Object { $_.tag -eq 'tuic-sb' -and $_.type -eq 'tuic' }).Count -eq 1)
+        Check 'links: the XHTTP node is not in the config' (@($out | Where-Object { $_.tag -eq 'xhttp-sb' }).Count -eq 0)
+        Check 'links: the VPN runs with them' (WaitFor { Running $sb } 30)
         [void](WaitFor { @(DialogTexts).Count -eq 0 } 10)
 
         # The QR image in a window of its own (TopMost, closes itself)
