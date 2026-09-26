@@ -519,12 +519,7 @@ func upsertOutbounds(cfg map[string]any, newOutbounds, refused []map[string]any,
 // ordinary case: registered there, its import would be refused as a ring
 // the user never made.
 func registerInGroups(cfg map[string]any, merged, refused []map[string]any) {
-	relays := detourTargets(cfg)
-	for _, o := range refused {
-		if detour := detourOf(o); detour != "" && detour != tagString(o) {
-			relays[detour] = true
-		}
-	}
+	relays := relayTags(cfg, refused)
 	edges := dependencyGraph(cfg)
 	outbounds, _ := cfg["outbounds"].([]any)
 	for _, o := range merged {
@@ -746,7 +741,7 @@ func syncMerge(cfg map[string]any, incoming, refused []map[string]any, mine func
 		return result, nil, err
 	}
 	if len(removed) > 0 {
-		pruneOutboundReferences(cfg, removed, incoming)
+		pruneOutboundReferences(cfg, removed, incoming, refused)
 	}
 
 	renamedTo := map[string]bool{}

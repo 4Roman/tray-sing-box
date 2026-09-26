@@ -231,3 +231,63 @@ func TestRemovedNodeReplacementIsAServer(t *testing.T) {
 		})
 	}
 }
+
+// The node a relay serves refused, the relay alone saved: the references of
+// a node the refresh removes still do not go to that relay — it is one
+// whether or not its node made it — but to a direct outbound
+func TestRefusedNodesRelayIsNoReplacement(t *testing.T) {
+	const config = `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["DE", "direct"], "default": "DE"},
+    {"type": "vless", "tag": "DE", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ], "route": {"rules": [{"domain_suffix": [".example.org"], "outbound": "DE"}], "final": "DE"}}`
+	for _, helperFirst := range []bool{true, false} {
+		editor, path, _ := checkedEditor(t, config)
+		fresh := shadowTLSProfile(helperFirst)
+		for _, o := range fresh {
+			if o["type"] == "shadowsocks" {
+				o["flow"] = "bogus" // refused by the fake check
+			}
+		}
+		result, err := editor.SyncOutbounds([]string{"DE"}, fresh)
+		if err != nil {
+			t.Fatalf("SyncOutbounds: %v", err)
+		}
+		if !reflect.DeepEqual(result.Tags, []string{"st-ss_shadowtls-out"}) || len(result.Skipped) != 1 {
+			t.Fatalf("helper first %v: result = %+v", helperFirst, result)
+		}
+		route := load(t, path)["route"].(map[string]any)
+		if route["final"] != "direct" {
+			t.Fatalf("helper first %v: final = %v", helperFirst, route["final"])
+		}
+	}
+}
+
+// A config whose sections are spelled otherwise ({"Route": {"Final": …}},
+// read so by sing-box): the merge repoints those references too — the
+// dependency check reads them, and would otherwise refuse the refresh that
+// removed the node they name, at every refresh
+func TestRefreshRepointsReferencesInAnySpelling(t *testing.T) {
+	path := writeConfig(t, `{"outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["DE", "direct"]},
+    {"type": "vless", "tag": "DE", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ], "DNS": {"Servers": [{"type": "https", "tag": "remote", "server": "1.1.1.1", "Detour": "DE"}]},
+  "Route": {"Rules": [{"domain_suffix": [".example.org"], "outbound": "DE"}], "Final": "DE"}}`)
+	result, err := New(path).SyncOutbounds([]string{"DE"}, []map[string]any{vlessNode("NL", "192.0.2.11")})
+	if err != nil {
+		t.Fatalf("SyncOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Removed, []string{"DE"}) || !result.Changed {
+		t.Fatalf("result = %+v", result)
+	}
+	cfg := load(t, path)
+	route := cfg["Route"].(map[string]any)
+	if route["Final"] != "NL" || route["Rules"].([]any)[0].(map[string]any)["outbound"] != "NL" {
+		t.Fatalf("route = %v", route)
+	}
+	server := cfg["DNS"].(map[string]any)["Servers"].([]any)[0].(map[string]any)
+	if server["Detour"] != "NL" {
+		t.Fatalf("dns server = %v", server)
+	}
+}

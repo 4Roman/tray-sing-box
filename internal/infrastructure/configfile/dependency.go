@@ -301,6 +301,22 @@ func detourTargets(cfg map[string]any) map[string]bool {
 	return targets
 }
 
+// relayTags are the outbounds some other one dials through (detourTargets),
+// together with the relays of the incoming nodes the check refused: the
+// refused node is gone, its relay still works only as one. Kept in one
+// place for the two that must agree on it — which incoming outbounds become
+// selectable (registerInGroups) and which one removed references go to
+// (pruneOutboundReferences).
+func relayTags(cfg map[string]any, refused []map[string]any) map[string]bool {
+	relays := detourTargets(cfg)
+	for _, o := range refused {
+		if detour := detourOf(o); detour != "" && detour != tagString(o) {
+			relays[detour] = true
+		}
+	}
+	return relays
+}
+
 // outboundProblems lists the dependencies of outbounds and endpoints on a
 // tag that does not exist, and the rings
 func outboundProblems(cfg map[string]any) []dependencyProblem {

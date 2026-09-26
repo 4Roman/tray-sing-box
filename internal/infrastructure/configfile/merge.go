@@ -300,8 +300,11 @@ const (
 
 // visitRefs calls fn for every outbound tag the config names outside the
 // outbounds list and its groups. fn returns the new value and whether to keep
-// it: false deletes the field, or drops the route rule it decides. A field
-// is found in every spelling sing-box reads as it ({"Detour": ...}).
+// it: false deletes the field, or drops the route rule it decides. A field,
+// and the section and list it is in, is found in every spelling sing-box
+// reads as it ({"Route": {"Final": ...}}, {"Detour": ...}): the dependency
+// check reads them so (dependency.go), and a reference the merge missed
+// would have it refuse the merge's own result.
 func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bool)) {
 	field := func(m map[string]any, name string, kind refKind) {
 		for key, value := range m {
@@ -316,33 +319,36 @@ func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bo
 			}
 		}
 	}
-	each := func(v any, visit func(map[string]any)) {
-		list, _ := v.([]any)
-		for _, item := range list {
-			if m, ok := item.(map[string]any); ok {
-				visit(m)
+	// each visits the objects of the lists m holds under name
+	each := func(m map[string]any, name string, visit func(map[string]any)) {
+		for _, v := range fieldValues(m, name) {
+			list, _ := v.([]any)
+			for _, item := range list {
+				if o, ok := item.(map[string]any); ok {
+					visit(o)
+				}
 			}
 		}
 	}
 
-	each(cfg["outbounds"], func(o map[string]any) { field(o, "detour", refChain) })
-	each(cfg["endpoints"], func(o map[string]any) { field(o, "detour", refDetour) })
-	if ntp, ok := cfg["ntp"].(map[string]any); ok {
+	each(cfg, "outbounds", func(o map[string]any) { field(o, "detour", refChain) })
+	each(cfg, "endpoints", func(o map[string]any) { field(o, "detour", refDetour) })
+	for _, ntp := range objects(cfg, "ntp") {
 		field(ntp, "detour", refDetour)
 	}
-	if dns, ok := cfg["dns"].(map[string]any); ok {
-		each(dns["servers"], func(s map[string]any) { field(s, "detour", refDetour) })
-		each(dns["rules"], func(r map[string]any) { visitMatch(r, fn) })
+	for _, dns := range objects(cfg, "dns") {
+		each(dns, "servers", func(s map[string]any) { field(s, "detour", refDetour) })
+		each(dns, "rules", func(r map[string]any) { visitMatch(r, fn) })
 	}
-	route, ok := cfg["route"].(map[string]any)
-	if !ok {
-		return
+	for _, route := range objects(cfg, "route") {
+		for key, value := range route {
+			if rules, ok := value.([]any); ok && foldKey(key) == "rules" {
+				route[key] = visitRules(rules, fn, false)
+			}
+		}
+		field(route, "final", refFinal)
+		each(route, "rule_set", func(rs map[string]any) { field(rs, "download_detour", refDetour) })
 	}
-	if rules, ok := route["rules"].([]any); ok {
-		route["rules"] = visitRules(rules, fn, false)
-	}
-	field(route, "final", refFinal)
-	each(route["rule_set"], func(rs map[string]any) { field(rs, "download_detour", refDetour) })
 }
 
 // visitRules visits the outbound of each route rule and of the rules nested
@@ -417,16 +423,16 @@ func visitMatch(rule map[string]any, fn func(refKind, string) (string, bool)) {
 // refuses that — and a rule with no usable replacement is dropped).
 //
 // The replacement is never an outbound another one dials through (its
-// detour): that is a relay, often one that works only so — a ShadowTLS
+// detour; relayTags — a refused node's too): that is a relay, often one that works only so — a ShadowTLS
 // helper of a sing-box profile ignores the destination, and the traffic
 // sent to it connects nowhere. Nor one whose server is this machine (the
 // DPI bypass's local proxy, a provider's placeholder node on 127.0.0.1): no
 // server the traffic of a removed node can go on to.
-func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOutbounds []map[string]any) {
+func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOutbounds, refused []map[string]any) {
 	outbounds, _ := cfg["outbounds"].([]any)
 
 	// Pick the replacement for references that pointed at removed tags
-	relays := detourTargets(cfg)
+	relays := relayTags(cfg, refused)
 	usable := func(o map[string]any) bool {
 		tag := tagString(o)
 		return tag != "" && !relays[tag] && !localServer(o)
