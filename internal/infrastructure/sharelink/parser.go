@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -131,11 +132,24 @@ func Parse(link string) (Outbound, error) {
 	return outbound, nil
 }
 
-// parseLink converts a link; its error is the bare reason
+// parseLink converts a link; its error is the bare reason. A link converted
+// with a name that is the rest of its query (continuesQuery) is refused: a
+// value of it held an unescaped '#', the parameters after it are lost, and
+// the tail of that value — often a credential — would become the node's tag,
+// shown unmasked in the popups, the log and the settings page.
 func parseLink(link string) (Outbound, error) {
 	for _, p := range linkParsers {
 		if strings.HasPrefix(link, p.scheme) {
-			return p.parse(link)
+			outbound, err := p.parse(link)
+			if err != nil {
+				return nil, err
+			}
+			// The tag is the text after the first '#', as net/url cuts the
+			// fragment (a legacy base64 body has no '#' of its own)
+			if _, fragment, ok := strings.Cut(link, "#"); ok && continuesQuery(fragment) {
+				return nil, errors.New("ссылка повреждена: символ «#» в значении параметра должен быть закодирован (%23)")
+			}
+			return outbound, nil
 		}
 	}
 	for _, u := range unsupportedSchemes {
@@ -402,15 +416,18 @@ func linkName(link string, index int) string {
 	return fmt.Sprintf("ссылка %d", index+1)
 }
 
-// linkTitle is the link's own name, "" when it has none. Only a fragment on
-// one line qualifies: Parse is given whatever text its caller has, and after
-// the last '#' of a text with line breaks there could be anything. Nor one
-// with an '@': when a credential holds an unescaped '#', what follows it is
-// the rest of the credential and the server's address ("…#tail@host:443"),
-// and the name goes into the log, the popups and the settings page.
+// linkTitle is the link's own name, "" when it has none: the text after the
+// first '#', where net/url starts the fragment the tag is made of. Only a
+// fragment on one line qualifies: Parse is given whatever text its caller
+// has, and after a '#' of a text with line breaks there could be anything.
+// Nor one with an '@': when a credential holds an unescaped '#', what
+// follows it is the rest of the credential and the server's address
+// ("…#tail@host:443"). Nor the rest of a query (continuesQuery): a value
+// with an unescaped '#' ("…&auth=Pa#tail&upmbps=10"). The name goes into
+// the log, the popups and the settings page.
 func linkTitle(link string) string {
-	if i := strings.LastIndex(link, "#"); i >= 0 {
-		if name, err := url.QueryUnescape(link[i+1:]); err == nil && plainName(name) && !strings.Contains(name, "@") {
+	if _, fragment, ok := strings.Cut(link, "#"); ok && !continuesQuery(fragment) {
+		if name, err := url.QueryUnescape(fragment); err == nil && plainName(name) && !strings.Contains(name, "@") {
 			return shortName(name)
 		}
 	}
@@ -425,6 +442,20 @@ func linkTitle(link string) string {
 		}
 	}
 	return ""
+}
+
+// queryPairPattern: a query pair as it goes on after an unescaped '#'
+// ("&sni=")
+var queryPairPattern = regexp.MustCompile(`&[A-Za-z][A-Za-z0-9_-]*=`)
+
+// continuesQuery reports whether a link's raw fragment (as the link has it,
+// before unescaping: an encoded "%26" is a name's '&', "#Tom%20%26%20Jerry"
+// stays a name) is no name but the rest of its query — a value of it held
+// an unescaped '#': the fragment holds a further '#' or a query pair. When
+// that value is the query's last one, what follows the '#' cannot be told
+// from a name.
+func continuesQuery(rawFragment string) bool {
+	return strings.Contains(rawFragment, "#") || queryPairPattern.MatchString(rawFragment)
 }
 
 // plainName: a non-empty name on one line
@@ -477,6 +508,37 @@ func parseURL(link string) (*url.URL, error) {
 		return nil, errors.New("ссылка повреждена")
 	}
 	return u, nil
+}
+
+// errUnescapedPassword refuses a link whose password has an unescaped '/',
+// '?' or '#': net/url ends the authority inside it, the head of the password
+// becomes the server, the rest the path, the query or the name
+var errUnescapedPassword = errors.New("ссылка повреждена: символы «/», «?» и «#» в пароле должны быть закодированы (%2F, %3F, %23)")
+
+// authorityInTail reports whether the text after a link's "://", parsed
+// without a userinfo, holds the link's real server after all: a host:port
+// (or a hysteria port list) after its last '@', up to the next '/', '?' or
+// '#'. The check of the schemes whose credential is optional (socks,
+// hysteria): a password with an unescaped '/', '?' or '#' ends the
+// authority inside it, and a head of digits after the user name reads as a
+// port — "user:2024#tail@host:1080" is server "user", port 2024, the rest
+// of the password and the real server the name. A bare '@' proves nothing
+// there: a name may hold one ("#me@work").
+func authorityInTail(rest string) bool {
+	at := strings.LastIndex(rest, "@")
+	if at < 0 {
+		return false
+	}
+	hostPort := rest[at+1:]
+	if i := strings.IndexAny(hostPort, "/?#"); i >= 0 {
+		hostPort = hostPort[:i]
+	}
+	host, port, err := net.SplitHostPort(hostPort)
+	if err != nil || host == "" {
+		return false
+	}
+	_, _, err = parsePortList(port)
+	return err == nil
 }
 
 // serverHost is the link's server address; a link without one is refused

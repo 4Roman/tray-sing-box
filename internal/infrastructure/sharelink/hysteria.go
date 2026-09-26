@@ -129,7 +129,7 @@ func parseHysteria2(link string) (Outbound, error) {
 	// the rest the path, the query or the name — and with the optional
 	// password and the default port nothing else would refuse the link
 	if u.User == nil && strings.Contains(link, "@") {
-		return nil, errors.New("ссылка повреждена: символы «/», «?» и «#» в пароле должны быть закодированы (%2F, %3F, %23)")
+		return nil, errUnescapedPassword
 	}
 	host, err := serverHost(u)
 	if err != nil {
@@ -203,7 +203,15 @@ func parseHysteria(link string) (Outbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The auth usually travels in the query, the userinfo is optional: a
+	// password there with an unescaped '/', '?' or '#' leaves no userinfo,
+	// and one starting with digits reads as the port of its head taken for
+	// the server (and the SNI; any other head fails the parse). Not a bare
+	// '@' as for Hysteria 2: the auth in the query or the name may hold one
 	u, err := parseURL(link)
+	if (err != nil || u.User == nil) && authorityInTail(strings.TrimPrefix(link, "hysteria://")) {
+		return nil, errUnescapedPassword
+	}
 	if err != nil {
 		return nil, err
 	}

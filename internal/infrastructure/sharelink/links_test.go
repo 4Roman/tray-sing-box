@@ -264,6 +264,29 @@ var acceptedLinks = []linkCase{
 	{"socks legacy base64 body",
 		"socks://" + b64("user:pass@192.0.2.80:1080") + "#s-legacy",
 		`{"server":"192.0.2.80","server_port":1080,"username":"user","password":"pass"}`},
+	// The generators base64-encode the password as it is: a '#', '/', '?'
+	// (or '@', ':') in it is the password's, not the end of the authority
+	{"socks legacy body with URL delimiters in the password",
+		"socks://" + b64("user:2024#p/a?s:s@w@192.0.2.80:1080") + "#s-legacy-pw",
+		`{"tag":"s-legacy-pw","server":"192.0.2.80","server_port":1080,"username":"user","password":"2024#p/a?s:s@w"}`},
+	{"socks legacy body without credentials",
+		"socks://" + b64("192.0.2.80:1080") + "#s-legacy-anon",
+		`{"server":"192.0.2.80","server_port":1080,"username":null,"password":null}`},
+	// No credentials and an '@' in the name: no password was cut short
+	{"socks without credentials, an '@' in the name",
+		"socks5://192.0.2.80:1080#me@work",
+		`{"tag":"me@work","server":"192.0.2.80","server_port":1080,"username":null}`},
+	{"hysteria v1 auth with an '@' in the query",
+		"hysteria://192.0.2.70:8443?auth=user@example.com&upmbps=10&downmbps=10#hy1-at",
+		`{"server":"192.0.2.70","server_port":8443,"auth_str":"user@example.com"}`},
+	// An escaped '&' or '#' belongs to the name: only the raw fragment tells
+	// the rest of a query
+	{"name with an escaped query pair",
+		"trojan://secret@192.0.2.30:443?sni=example.com#Tom%26Jerry%3D1",
+		`{"tag":"Tom&Jerry=1"}`},
+	{"name with an escaped '#'",
+		"trojan://secret@192.0.2.30:443?sni=example.com#DE%231",
+		`{"tag":"DE#1"}`},
 	{"vmess URL form",
 		"vmess://" + testUUID + "@192.0.2.20:443?encryption=auto&type=ws&path=%2Fws&host=example.com&security=tls&sni=example.com&fp=chrome#vm-url",
 		`{"type":"vmess","tag":"vm-url","server":"192.0.2.20","server_port":443,"uuid":"` + testUUID + `","security":"auto","alter_id":0,
@@ -416,6 +439,14 @@ var refusedLinks = []refusalCase{
 	// A password with an unescaped '/' or '?': its head would be the server
 	{"hy2-slash-pw", "hysteria2://Ab3dEf/" + testSecret + "@srv.example.com:8443#hy2-slash-pw", "ссылка повреждена"},
 	{"hy2-query-pw", "hysteria2://Ab3dEf?" + testSecret + "@srv.example.com#hy2-query-pw", "ссылка повреждена"},
+	// The same where the credential is optional (socks, hysteria v1): a head
+	// of digits read as the port of the user name taken for the server
+	{"s5-slash-pw", "socks5://alice:2024/" + testSecret + "@192.0.2.80:1080#s5-slash-pw", "«/», «?» и «#» в пароле"},
+	{"s5-query-pw", "socks5://alice:2024?" + testSecret + "@192.0.2.80:1080#s5-query-pw", "«/», «?» и «#» в пароле"},
+	{"s5-alpha-pw", "socks5://alice:pw/" + testSecret + "@192.0.2.80:1080#s5-alpha-pw", "«/», «?» и «#» в пароле"},
+	{"hy1-slash-pw", "hysteria://ab:12/" + testSecret + "@192.0.2.70:8443?protocol=udp&upmbps=10&downmbps=50#hy1-slash-pw", "«/», «?» и «#» в пароле"},
+	{"hy1-query-pw", "hysteria://ab:12?" + testSecret + "@192.0.2.70:8443?protocol=udp&upmbps=10&downmbps=50#hy1-query-pw", "«/», «?» и «#» в пароле"},
+	{"hy1-list-pw", "hysteria://ab:12/" + testSecret + "@192.0.2.70:8443,20000-30000?upmbps=10&downmbps=50#hy1-list-pw", "«/», «?» и «#» в пароле"},
 	{"hy2-bad-list", "hysteria2://" + testSecret + "@192.0.2.50:443,abc/?sni=example.com#hy2-bad-list", "список портов"},
 	{"hy2-bad-mport", "hysteria2://" + testSecret + "@192.0.2.50:443/?mport=30000-20000#hy2-bad-mport", "список портов «30000-20000»"},
 	{"hy2-port-0", "hysteria2://" + testSecret + "@192.0.2.50:0/?sni=example.com#hy2-port-0", "неверный порт"},
@@ -645,6 +676,11 @@ func TestSkippedLinkNameIsNoCredentialTail(t *testing.T) {
 		"socks5://user:Passw0rd#" + tail + "@srv.example.com:1080",
 		"vless://1111#" + tail + "-3333@srv.example.com:443",
 		"hysteria2://Ab3dEf#" + tail + "@srv.example.com:443",
+		// A head of digits is a port: without the check the user name was
+		// the server and the tail the tag of an accepted node
+		"socks5://user:2024#" + tail + "@srv.example.com:1080",
+		"socks5://user:2024#" + tail + "@srv.example.com:1080#name",
+		"hysteria://ab:12#" + tail + "@srv.example.com:443?protocol=udp&upmbps=10&downmbps=50",
 	}
 	text := "vless://" + testUUID + "@192.0.2.10:443?security=tls#ok\n" + strings.Join(links, "\n")
 	outbounds, skipped, err := ParseAllReport(text)
@@ -662,6 +698,52 @@ func TestSkippedLinkNameIsNoCredentialTail(t *testing.T) {
 	for _, link := range links {
 		if _, err := Parse(link); err == nil || strings.Contains(err.Error(), testSecret) {
 			t.Errorf("Parse: %v", err)
+		}
+	}
+}
+
+// A value in the query with an unescaped '#': what net/url takes for the
+// name is the rest of the value — often a credential — and of the query. No
+// node gets it as its tag (the link is refused: its parameters after the
+// '#' are lost), and the report numbers the link instead of naming it so
+func TestQueryCutByHashIsNoName(t *testing.T) {
+	const damaged = "символ «#» в значении параметра должен быть закодирован (%23)"
+	links := []struct{ link, reason string }{
+		// Accepted before: the obfs password cut short, the tail the tag
+		{"hysteria2://pw@192.0.2.50:443?obfs=salamander&obfs-password=Ob#" + testSecret + "&sni=example.com", damaged},
+		// net/url's fragment runs from the first '#': a name after it does
+		// not make the rest a name
+		{"hysteria2://pw@192.0.2.50:443?obfs=salamander&obfs-password=Ob#" + testSecret + "&sni=example.com#RealName", damaged},
+		{"hysteria2://pw@192.0.2.50:443?obfs=salamander&obfs-password=Ob#" + testSecret + "#" + testSecret, damaged},
+		{"vless://" + testUUID + "@192.0.2.10:443?security=reality&pbk=" + testPBK + "#" + testSecret + "&sid=6ba85179&sni=example.com&fp=chrome", damaged},
+		// Refused for what the '#' cut off: still no name
+		{"hysteria://192.0.2.70:8443?protocol=udp&auth=Pa#" + testSecret + "&upmbps=10&downmbps=50", "скорость"},
+		{"hysteria2://pw@192.0.2.50:443?obfs=salamander&obfs-password=#" + testSecret + "&sni=example.com", "obfs-password"},
+	}
+	var texts []string
+	for _, l := range links {
+		texts = append(texts, l.link)
+	}
+	text := "vless://" + testUUID + "@192.0.2.10:443?security=tls#ok\n" + strings.Join(texts, "\n")
+	outbounds, skipped, err := ParseAllReport(text)
+	if err != nil {
+		t.Fatalf("ParseAllReport: %v", err)
+	}
+	if len(outbounds) != 1 || len(skipped) != len(links) {
+		t.Fatalf("outbounds %v, skipped %+v", outbounds, skipped)
+	}
+	for i, sk := range skipped {
+		if want := fmt.Sprintf("ссылка %d", i+2); sk.Name != want {
+			t.Errorf("skipped[%d].Name = %q, want %q", i, sk.Name, want)
+		}
+		if !strings.Contains(sk.Reason, links[i].reason) || strings.Contains(sk.Reason, testSecret) {
+			t.Errorf("skipped[%d].Reason = %q, want %q", i, sk.Reason, links[i].reason)
+		}
+	}
+	// A single link: refused without a name
+	for _, l := range links {
+		if o, err := Parse(l.link); err == nil || strings.HasPrefix(err.Error(), "узел") || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("Parse = %v, %v", o, err)
 		}
 	}
 }
