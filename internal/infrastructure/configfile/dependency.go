@@ -258,6 +258,35 @@ func enabled(m map[string]any) bool {
 	return false
 }
 
+// dependencyGraph maps every outbound and endpoint to the tags it depends
+// on: its detour, a group's members (dependencyNodes)
+func dependencyGraph(cfg map[string]any) map[string][]string {
+	edges := map[string][]string{}
+	for _, n := range dependencyNodes(cfg) {
+		for _, d := range n.deps {
+			edges[n.tag] = append(edges[n.tag], d.tag)
+		}
+	}
+	return edges
+}
+
+// dependsOn returns every tag the outbound from depends on, directly or
+// through others
+func dependsOn(edges map[string][]string, from string) map[string]bool {
+	found := map[string]bool{}
+	stack := append([]string(nil), edges[from]...)
+	for len(stack) > 0 {
+		tag := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if found[tag] {
+			continue
+		}
+		found[tag] = true
+		stack = append(stack, edges[tag]...)
+	}
+	return found
+}
+
 // outboundProblems lists the dependencies of outbounds and endpoints on a
 // tag that does not exist, and the rings
 func outboundProblems(cfg map[string]any) []dependencyProblem {

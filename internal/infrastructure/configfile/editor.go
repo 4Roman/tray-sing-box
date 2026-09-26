@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -386,9 +387,10 @@ func (e *Editor) AddOutbound(outbound map[string]any) error {
 // outbound, a subscription's node — reserved, also when the config lacks
 // it); then the imported one is saved as "<tag> (N)" and listed in Renamed.
 // New tags are registered in every selector/urltest group so they become
-// selectable. Outbounds the config check refuses are left out and listed in
-// Skipped (saveMerged); when it refuses every one nothing is saved. The
-// previous config is kept as .bak.
+// selectable — not in a group the node dials through (registerInGroups).
+// Outbounds the config check refuses are left out and listed in Skipped
+// (saveMerged); when it refuses every one nothing is saved. The previous
+// config is kept as .bak.
 func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) (*domain.AddResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -443,9 +445,9 @@ func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) 
 }
 
 // upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
-// replace by tag or append, then register each tag in selector/urltest groups.
-// owned are the other tags of the source (a subscription's nodes, the nodes
-// of an import the checks refused).
+// replace by tag or append, then register the tags in selector/urltest groups
+// (registerInGroups). owned are the other tags of the source (a
+// subscription's nodes, the nodes of an import the checks refused).
 func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned map[string]bool) error {
 	outbounds, _ := cfg["outbounds"].([]any)
 
@@ -492,29 +494,44 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any, owned ma
 		if !replaced {
 			outbounds = append(outbounds, any(outbound))
 		}
-
-		// Make the imported outbound selectable in selector/urltest groups
-		for _, item := range outbounds {
-			group, ok := item.(map[string]any)
-			if !ok || !groupTypes[fmt.Sprint(group["type"])] {
-				continue
-			}
-			members, _ := group["outbounds"].([]any)
-			present := false
-			for _, m := range members {
-				if m == any(tag) {
-					present = true
-					break
-				}
-			}
-			if !present {
-				group["outbounds"] = append(members, any(tag))
-			}
-		}
 	}
 
 	cfg["outbounds"] = outbounds
+	registerInGroups(cfg, newOutbounds)
 	return nil
+}
+
+// registerInGroups makes merged outbounds selectable: each is added, in
+// order, to every selector/urltest group that lacks it — decided on the
+// config with all of them in place.
+//
+// Not to a group the outbound itself depends on — its detour, that one's
+// detour, a group on the way and its members: the group would then depend
+// on the outbound and the outbound on the group, a ring sing-box does not
+// start with ("circular outbound dependency"). A re-imported server keeps a
+// chain through a group the user set on it (upsertOutbounds), so this is an
+// ordinary case: registered there, its import would be refused as a ring
+// the user never made.
+func registerInGroups(cfg map[string]any, merged []map[string]any) {
+	edges := dependencyGraph(cfg)
+	outbounds, _ := cfg["outbounds"].([]any)
+	for _, o := range merged {
+		tag := tagString(o)
+		upstream := dependsOn(edges, tag)
+		for _, item := range outbounds {
+			group, ok := item.(map[string]any)
+			if !ok || !groupTypes[fmt.Sprint(group["type"])] || upstream[tagString(group)] {
+				continue
+			}
+			members, _ := group["outbounds"].([]any)
+			if !slices.Contains(members, any(tag)) {
+				group["outbounds"] = append(members, any(tag))
+				// Later outbounds of the batch may reach this group through
+				// this one now
+				edges[tagString(group)] = append(edges[tagString(group)], tag)
+			}
+		}
+	}
 }
 
 // SyncOutbounds reconciles the set of outbounds owned by one subscription
