@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -361,6 +363,9 @@ func parseVLESS(link string) (Outbound, error) {
 // addTLSAndTransport sets tls and transport of a vless, trojan or vmess-URL
 // outbound from the link's query
 func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
+	if err := finalMask(q.Get("fm")); err != nil {
+		return err
+	}
 	tls, err := tlsConfig(q, host)
 	if err != nil {
 		return err
@@ -377,6 +382,39 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 	}
 	if transport != nil {
 		outbound["transport"] = transport
+	}
+	return nil
+}
+
+// finalMask checks Xray's finalmask, which 3x-ui and v2rayN put into a link
+// as fm= (the stream's "finalmask" JSON: mask lists per layer, "tcp" and
+// "udp"). Its masks — header-custom, sudoku, xmc, the UDP headers and
+// obfuscations — transform the stream on both ends: a server with one drops
+// a client that does not apply it, and sing-box has none of them. Only
+// "fragment" is the client's own business (it splits the TLS ClientHello)
+// and is dropped. Just the mask's type is named: its settings carry
+// passwords.
+func finalMask(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var layers map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &layers) != nil {
+		return errors.New("параметр fm (finalmask) в ссылке повреждён")
+	}
+	for _, layer := range slices.Sorted(maps.Keys(layers)) {
+		var masks []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(layers[layer], &masks) != nil {
+			continue // a setting of the layer, not a list of masks
+		}
+		for _, mask := range masks {
+			if kind := strings.ToLower(strings.TrimSpace(mask.Type)); kind != "fragment" {
+				return fmt.Errorf("маскировка finalmask «%s» не поддерживается sing-box", token(kind))
+			}
+		}
 	}
 	return nil
 }
@@ -421,6 +459,7 @@ type vmessLink struct {
 	Alpn     string          `json:"alpn"`
 	Fp       string          `json:"fp"`
 	Insecure json.RawMessage `json:"insecure"`
+	Fm       json.RawMessage `json:"fm"` // Xray's finalmask, as a JSON text or an object
 }
 
 // rawInt parses a JSON value that may be a number or a quoted number
@@ -485,6 +524,13 @@ func parseVMess(link string) (Outbound, error) {
 	}
 	security, err := vmessSecurity(v.Scy)
 	if err != nil {
+		return nil, err
+	}
+	var fm string
+	if json.Unmarshal(v.Fm, &fm) != nil {
+		fm = string(v.Fm) // an object, not a string holding one
+	}
+	if err := finalMask(fm); err != nil {
 		return nil, err
 	}
 

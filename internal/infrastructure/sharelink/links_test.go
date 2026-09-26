@@ -134,6 +134,15 @@ var acceptedLinks = []linkCase{
 		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&security=tls&alpn=h2&sni=example.com#grpc-alpn",
 		`{"tls":{"alpn":["h2"]},"transport":{"type":"grpc"}}`},
 
+	// Xray's finalmask: the client-only fragment is dropped
+	{"finalmask with only fragment",
+		"vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&fm=" +
+			url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200","delay":"10-20"}}]}`) + "#fm-fragment",
+		`{"fm":null,"tls":{"enabled":true},"transport":null}`},
+	{"vmess finalmask with only fragment",
+		vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"tcp","tls":"tls","fm":"{\"tcp\":[{\"type\":\"fragment\"}]}"}`),
+		`{"fm":null,"tls":{"enabled":true}}`},
+
 	// sing-box's own QUIC transport (s-ui exports it as type=quic): TLS
 	// without uTLS
 	{"quic transport",
@@ -309,6 +318,12 @@ var refusedLinks = []refusalCase{
 	{"quic-header", "vless://" + testUUID + "@192.0.2.10:443?type=quic&headerType=wechat-video&security=tls#quic-header", "маскировка QUIC «wechat-video»"},
 	{"quic-reality", "vless://" + testUUID + "@192.0.2.10:443?type=quic&security=reality&sni=www.example.com&pbk=" + testPBK + "#quic-reality", "REALITY поверх транспорта QUIC"},
 	{"vm-quic-encrypted", vmessJSON(`{"ps":"vm-quic-encrypted","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"quic","host":"chacha20-poly1305","path":"` + testSecret + `","tls":"tls"}`), "шифрование QUIC «chacha20-poly1305»"},
+	{"fm-sudoku", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&security=tls&fm=" +
+		url.QueryEscape(`{"tcp":[{"type":"fragment"},{"type":"sudoku","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-sudoku", "маскировка finalmask «sudoku»"},
+	{"fm-udp", "trojan://" + testSecret + "@192.0.2.30:443?fm=" +
+		url.QueryEscape(`{"udp":[{"type":"salamander","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-udp", "маскировка finalmask «salamander»"},
+	{"fm-broken", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=%7B" + testSecret + "#fm-broken", "fm (finalmask) в ссылке повреждён"},
+	{"vm-fm", vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":"443","id":"` + testUUID + `","fm":{"tcp":[{"type":"header-custom","settings":{"clients":["` + testSecret + `"]}}]}}`), "маскировка finalmask «header-custom»"},
 	{"grpc-custom-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fcustom%2Fpath%7Cp2&security=tls#grpc-custom-path", "собственный путь gRPC"},
 	{"grpc-root-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fsvc&security=tls#grpc-root-path", "собственный путь gRPC"},
 	{"grpc-deep-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fa%2Fb%2FTun&security=tls#grpc-deep-path", "собственный путь gRPC"},
