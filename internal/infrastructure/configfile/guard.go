@@ -200,6 +200,17 @@ func walkRisky(v any, parentKey string, items map[string]string) {
 				}
 				risky()
 				continue
+			case k == "plugin_opts":
+				// shadowsocks: a SIP003 string sing-box parses itself; the
+				// v2ray-plugin's "cert" is a certificate file the elevated
+				// sing-box reads (and quotes back when it is no certificate)
+				if s, ok := child.(string); ok {
+					for _, o := range pluginFileOptions(s) {
+						items[fmt.Sprintf("%s.plugin_opts.%s=%s", parentKey, o.key, canonical(o.value))] =
+							parentKey + ".plugin_opts: " + o.key + tagOf(x)
+					}
+				}
+				continue
 			case k == "listen_port" && parentKey == "endpoints":
 				// A wireguard endpoint listening for peers on every interface
 				risky()
@@ -270,6 +281,75 @@ func loopbackListen(v any, hostPort bool) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// pluginOption is one option of a shadowsocks plugin_opts string
+type pluginOption struct {
+	key, value string
+}
+
+// pluginFileOptions returns the options of a plugin_opts string that name a
+// file: "cert" (v2ray-plugin), compared loosely — sing-box itself matches the
+// key exactly, a wider net costs nothing
+func pluginFileOptions(s string) []pluginOption {
+	var files []pluginOption
+	for _, o := range parsePluginOptions(s) {
+		if strings.EqualFold(strings.TrimSpace(o.key), "cert") {
+			files = append(files, o)
+		}
+	}
+	return files
+}
+
+// parsePluginOptions splits a plugin_opts string exactly as sing-box does
+// (transport/sip003 ParsePluginOptions: "k=v;flag", a backslash escapes the
+// next byte, a key without "=" is "1"), so that no spelling reaches sing-box
+// as another key than the guard saw. A string sing-box cannot parse makes it
+// refuse the outbound before any plugin runs: nil.
+func parsePluginOptions(s string) []pluginOption {
+	// indexUnescaped: the index of the first unescaped terminator (or the
+	// end) and the unescaped text before it; ok is false for a trailing "\"
+	indexUnescaped := func(s string, term string) (int, string, bool) {
+		var unesc []byte
+		i := 0
+		for ; i < len(s); i++ {
+			b := s[i]
+			if strings.IndexByte(term, b) >= 0 {
+				break
+			}
+			if b == '\\' {
+				i++
+				if i >= len(s) {
+					return 0, "", false
+				}
+				b = s[i]
+			}
+			unesc = append(unesc, b)
+		}
+		return i, string(unesc), true
+	}
+	var opts []pluginOption
+	for i := 0; i < len(s); {
+		offset, key, ok := indexUnescaped(s[i:], "=;")
+		if !ok || key == "" {
+			return nil
+		}
+		i += offset
+		if i >= len(s) || s[i] != '=' {
+			opts = append(opts, pluginOption{key, "1"})
+			i++
+			continue
+		}
+		i++
+		offset, value, ok := indexUnescaped(s[i:], ";")
+		if !ok {
+			return nil
+		}
+		i += offset
+		opts = append(opts, pluginOption{key, value})
+		i++
+	}
+	return opts
 }
 
 // bareFileName: a plain file name (resolved against sing-box's working

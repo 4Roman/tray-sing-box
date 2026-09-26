@@ -44,6 +44,10 @@ func TestGuardRefusesNewRiskyConstructs(t *testing.T) {
 		"inbound on all":    `{"inbounds":[{"type":"mixed","tag":"in","listen":"0.0.0.0","listen_port":2080}],"outbounds":[]}`,
 		"clash api on all":  `{"experimental":{"clash_api":{"external_controller":"0.0.0.0:9090"}},"outbounds":[]}`,
 		"debug on loopback": `{"experimental":{"debug":{"listen":"127.0.0.1:6060"}},"outbounds":[]}`,
+		// v2ray-plugin reads its "cert" file; sing-box unescapes the key
+		"plugin cert":         `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;host=a.example;cert=C:/x.pem"}]}`,
+		"plugin cert escaped": `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;c\\ert=C:/x.pem"}]}`,
+		"plugin cert flag":    `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","Plugin_Opts":"tls;cert"}]}`,
 	}
 	for name, updated := range refused {
 		err := checkNoNewRisky([]byte(base), decode(t, updated))
@@ -58,6 +62,8 @@ func TestGuardRefusesNewRiskyConstructs(t *testing.T) {
 		"geoip rule":         `{"route":{"rules":[{"geoip":["private"],"outbound":"direct"}]},"outbounds":[]}`,
 		"process path rule":  `{"route":{"rules":[{"process_path":["C:\\a.exe"],"outbound":"direct"}]},"outbounds":[]}`,
 		"remote rule set":    `{"route":{"rule_set":[{"type":"remote","tag":"r","url":"https://x/r.srs"}]},"outbounds":[]}`,
+		"plugin options":     `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;host=cert.example;path=/ws\\;cert=x;mux=0"}]}`,
+		"obfs options":       `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"obfs-local","plugin_opts":"obfs=http;obfs-host=a.example"}]}`,
 		"all protocol types": `{"outbounds":[{"type":"hysteria2","tag":"a"},{"type":"shadowsocks","tag":"b"},{"type":"trojan","tag":"c"},{"type":"vmess","tag":"d"},{"type":"selector","tag":"e"},{"type":"urltest","tag":"f"}]}`,
 	}
 	for name, updated := range allowed {
