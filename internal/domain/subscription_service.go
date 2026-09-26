@@ -355,11 +355,13 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		noteFailure(sub, &update)
 		return update
 	}
-	// A stage that works again forgets its own failure: when it fails for
-	// good later on (the provider took the link away, switched to a format
-	// the app cannot read), that is news even if an earlier outage of the
-	// same stage was reported — a failure counts only after a day without a
-	// refresh that saved the servers anyway (noteFailure)
+	// The download works again: when it fails for good later on (the
+	// provider took the link away), that is news even if an earlier outage
+	// was reported — a failure counts only after a day without a refresh
+	// that saved the servers anyway (noteFailure). The failures of the later
+	// stages are forgotten only by a refresh that saved the servers: one
+	// failing at alternating stages would otherwise be news at every other
+	// refresh.
 	forgetKind(sub, "error: "+fetchFailed)
 	outbounds, skipped, err := s.parser.Parse(body)
 	update.Skipped = skipped
@@ -371,7 +373,6 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		noteFailure(sub, &update)
 		return update
 	}
-	forgetKind(sub, "error: "+parseFailed)
 	outbounds = withoutInfoNodes(sub.URL, outbounds)
 	if len(outbounds) == 0 {
 		// Nothing but the provider's info entries (and nodes left out): not
@@ -398,7 +399,6 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		update.NewProblem = shown.NewProblem
 		return update
 	}
-	forgetKind(sub, "error: "+configFailed)
 	for _, sk := range sync.Skipped {
 		log.Printf("Subscription %s: %q refused by the config check: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
 	}
@@ -410,8 +410,9 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		noteFailure(sub, &update)
 		return update
 	}
-	forgetKind(sub, "error: "+noneFit)
-	forgetKind(sub, "error: "+onlyInfoNodes)
+	for _, failed := range []string{parseFailed, onlyInfoNodes, configFailed, noneFit} {
+		forgetKind(sub, "error: "+failed)
+	}
 
 	tags := append([]string(nil), sync.Tags...)
 	sort.Strings(tags)
@@ -485,12 +486,14 @@ var errOnlyInfoNodes = errors.New(onlyInfoNodes + ": только сведени
 // the server the routing falls back to when the provider drops the chosen
 // one. Not a problem and not a node left out: nothing to tell the user.
 // A link to a local proxy imported by hand is kept (ImportService): there
-// it is the user's own.
+// it is the user's own. So is a node with a detour: it never dials its own
+// server (the inner node of Shadowsocks over ShadowTLS may name 127.0.0.1).
 func withoutInfoNodes(rawURL string, outbounds []map[string]any) []map[string]any {
 	kept := make([]map[string]any, 0, len(outbounds))
 	for _, o := range outbounds {
 		server, _ := o["server"].(string)
-		if isLocalServer(server) {
+		detour, _ := o["detour"].(string)
+		if detour == "" && isLocalServer(server) {
 			tag, _ := o["tag"].(string)
 			log.Printf("Subscription %s: %q left out: a provider's info entry (server %s), not a server", RedactURL(rawURL), tag, server)
 			continue

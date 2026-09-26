@@ -961,3 +961,49 @@ func TestImportKeepsALocalProxy(t *testing.T) {
 		t.Fatalf("err %v, added %v", err, editor.added)
 	}
 }
+
+// A provider failing at alternating stages (a body the parser cannot read,
+// then a config write that fails, again and again) is reported once per
+// kind: a stage's failure is forgotten only by a refresh that saved the
+// servers, not merely by getting past that stage
+func TestAlternatingStageFailuresReportedOnce(t *testing.T) {
+	const u = "https://p.example/sub"
+	body := "node-a"
+	sync := &stageStore{}
+	fetch := func(string) (string, error) { return body, nil }
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"node-a"}}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	var popups []int
+	for i := 0; i < 8; i++ {
+		store.subs[0].Updated = time.Now().Add(-subscriptionStaleAfter - time.Hour)
+		if i%2 == 0 {
+			body, *sync = "skip:DE:транспорт XHTTP не поддерживается sing-box", stageStore{}
+		} else {
+			body, *sync = "node-a", stageStore{err: errors.New("failed to write config: locked")}
+		}
+		if result, _ := svc.UpdateAll(); result.Updates[0].NewProblem {
+			popups = append(popups, i)
+		}
+	}
+	if !reflect.DeepEqual(popups, []int{0, 1}) {
+		t.Fatalf("new problems at refreshes %v, want [0 1]", popups)
+	}
+}
+
+// Only a node that would dial its own local server is a provider's info
+// entry: one with a detour never does (Shadowsocks inside ShadowTLS may
+// name 127.0.0.1)
+func TestInfoNodeFilterKeepsChainedNodes(t *testing.T) {
+	kept := withoutInfoNodes("https://p.example/sub", []map[string]any{
+		{"type": "socks", "tag": "info", "server": "127.0.0.1", "server_port": 1080},
+		{"type": "shadowsocks", "tag": "SS-DE", "server": "127.0.0.1", "server_port": 1080, "detour": "stls-DE"},
+		{"type": "shadowtls", "tag": "stls-DE", "server": "192.0.2.31", "server_port": 443},
+	})
+	var tags []string
+	for _, o := range kept {
+		tags = append(tags, o["tag"].(string))
+	}
+	if !reflect.DeepEqual(tags, []string{"SS-DE", "stls-DE"}) {
+		t.Fatalf("kept %q", tags)
+	}
+}
