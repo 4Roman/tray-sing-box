@@ -477,17 +477,21 @@ var pinKeys = []string{"pinSHA256", "pcs"}
 
 // certificateCheck decides tls.insecure for a link whose TLS server name is
 // serverName, and refuses the checks sing-box cannot do as the link asks:
-//   - a pin, or Xray's vcn (check the certificate for these names instead of
-//     the SNI) naming only serverName, is dropped: sing-box verifies the
-//     chain against the system roots as usual. A CA-signed certificate still
-//     passes; a self-signed one now fails closed instead of being trusted by
-//     its hash
-//   - vcn naming another host is refused: sing-box checks the server name
-//     only, and the node would never connect
-//   - a pin or vcn together with an insecure flag (there for the clients
-//     that know neither) is refused: sing-box would honour the flag alone
-//     and accept any certificate, and an on-path attacker would get the
-//     credential and the traffic
+//   - a pin is dropped: sing-box verifies the chain against the system roots
+//     as usual. A CA-signed certificate still passes; a self-signed one now
+//     fails closed instead of being trusted by its hash
+//   - a pin together with an insecure flag (there for the clients that know
+//     no pins) is refused: sing-box would honour the flag alone and accept
+//     any certificate, and an on-path attacker would get the credential and
+//     the traffic
+//   - Xray's vcn (check the certificate for these names instead of the SNI)
+//     naming another host is refused: sing-box checks the server name only,
+//     and the node would never connect
+//   - vcn naming only serverName is the ordinary check: Xray verifies the
+//     chain against the system roots for that name, and so does sing-box. An
+//     insecure flag next to it is for the clients that know no vcn (Xray
+//     itself has none any more) and is dropped: honoured, it would switch
+//     off exactly the check the link asks for
 func certificateCheck(q url.Values, serverName string) (insecure bool, err error) {
 	insecure = flagSet(q, insecureKeys...)
 	for _, key := range pinKeys {
@@ -507,8 +511,8 @@ func certificateCheck(q url.Values, serverName string) (insecure bool, err error
 			}
 		}
 		if insecure {
-			return false, errors.New("проверка сертификата по имени (vcn) вместе с флагом insecure: " +
-				"sing-box не проверял бы сертификат совсем — соединение можно перехватить")
+			log.Printf("Share link: the insecure flag is dropped, vcn asks for the certificate to be verified for the server name")
+			insecure = false
 		}
 	}
 	return insecure, nil

@@ -459,7 +459,9 @@ type vmessLink struct {
 	Alpn     string          `json:"alpn"`
 	Fp       string          `json:"fp"`
 	Insecure json.RawMessage `json:"insecure"`
-	Fm       json.RawMessage `json:"fm"` // Xray's finalmask, as a JSON text or an object
+	Pcs      string          `json:"pcs"` // Xray's certificate pin (v2rayN, 3x-ui)
+	Vcn      string          `json:"vcn"` // Xray's names to check the certificate for
+	Fm       json.RawMessage `json:"fm"`  // Xray's finalmask, as a JSON text or an object
 }
 
 // rawInt parses a JSON value that may be a number or a quoted number
@@ -563,7 +565,17 @@ func parseVMess(link string) (Outbound, error) {
 			serverName = v.Add
 		}
 		tls["server_name"] = serverName
+		// The certificate check of the URL forms: the JSON carries the same
+		// pcs and vcn (v2rayN's VmessQRCode, 3x-ui)
+		cert := url.Values{"pcs": {v.Pcs}, "vcn": {v.Vcn}}
 		if rawFlag(v.Insecure) {
+			cert.Set("insecure", "1")
+		}
+		insecure, err := certificateCheck(cert, serverName)
+		if err != nil {
+			return nil, err
+		}
+		if insecure {
 			tls["insecure"] = true
 		}
 		if alpn := splitList(v.Alpn); len(alpn) > 0 {

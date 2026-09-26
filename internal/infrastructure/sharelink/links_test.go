@@ -258,6 +258,17 @@ var acceptedLinks = []linkCase{
 	{"vcn naming the SNI",
 		"vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&vcn=Example.com#vcn-same",
 		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	// vcn naming the SNI is the ordinary check (Xray verifies against the
+	// system roots for that name): the insecure flag for other clients goes
+	{"vcn naming the SNI with insecure",
+		"vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&vcn=example.com&allowInsecure=1#vcn-insecure",
+		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	{"vmess pcs without insecure",
+		vmessJSON(`{"ps":"vm-pcs","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"tcp","tls":"tls","sni":"example.com","insecure":"0","pcs":"ab12cd"}`),
+		`{"tls":{"server_name":"example.com","insecure":null,"pcs":null}}`},
+	{"vmess vcn naming the SNI with insecure",
+		vmessJSON(`{"ps":"vm-vcn-insecure","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"tcp","tls":"tls","sni":"example.com","insecure":"1","vcn":"example.com"}`),
+		`{"tls":{"server_name":"example.com","insecure":null,"vcn":null}}`},
 
 	// Trojan
 	{"trojan without security keeps its TLS parameters",
@@ -353,7 +364,11 @@ var refusedLinks = []refusalCase{
 	{"tuic-pin-insecure", "tuic://" + testUUID + ":" + testSecret + "@192.0.2.60:443?allow_insecure=1&pinSHA256=AB#tuic-pin-insecure", "закрепление сертификата"},
 	{"anytls-pin-insecure", "anytls://" + testSecret + "@192.0.2.61/?insecure=1&pcs=AB#anytls-pin-insecure", "закрепление сертификата"},
 	{"vcn-other", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=decoy.example&vcn=real.example#vcn-other", "по другому имени (vcn)"},
-	{"vcn-insecure", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&vcn=example.com&allowInsecure=1#vcn-insecure", "(vcn) вместе с флагом insecure"},
+	// The same in the vmess JSON (v2rayN's VmessQRCode and 3x-ui write pcs
+	// and vcn there too)
+	{"vm-pcs-insecure", vmessJSON(`{"ps":"vm-pcs-insecure","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"tcp","tls":"tls","sni":"a.example","insecure":"1","pcs":"` + testSecret + `"}`), "закрепление сертификата (pcs)"},
+	{"vm-pcs-insecure-true", vmessJSON(`{"ps":"vm-pcs-insecure-true","add":"192.0.2.20","port":443,"id":"` + testUUID + `","tls":"tls","insecure":true,"pcs":"ab12cd"}`), "закрепление сертификата (pcs)"},
+	{"vm-vcn-other", vmessJSON(`{"ps":"vm-vcn-other","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"tcp","tls":"tls","sni":"decoy.example","vcn":"real.example"}`), "по другому имени (vcn)"},
 
 	{"long-sid", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=" + testPBK + "&sid=0123456789abcdef01#long-sid", "short_id"},
 	{"odd-sid", "vless://" + testUUID + "@192.0.2.10:443?security=reality&pbk=" + testPBK + "&sid=0123456789abcdef0#odd-sid", "short_id"},
