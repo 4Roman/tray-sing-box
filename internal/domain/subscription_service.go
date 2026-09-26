@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -401,24 +400,40 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 // fresh one is not: the next refresh usually makes it)
 const subscriptionStaleAfter = 24 * time.Hour
 
-// quotedNames matches the node names in a message: they may carry live
-// counters (3x-ui's default remark ends with the traffic and days left),
-// which must not make the same problem look new at every refresh
-var quotedNames = regexp.MustCompile(`«[^»]*»`)
-
-// problemKey sums up what went wrong in a refresh — the error and the
-// reasons of the skipped nodes, without node names; "" when nothing did
+// problemKey sums up what went wrong in a refresh — the kind of the error
+// and of each reason nodes were left out for; "" when nothing did. The kinds
+// only, as a set: the rest of a message is the provider's to vary — node
+// names carry live counters (3x-ui's default remark ends with the traffic
+// and days left), sing-box's refusal quotes the node's own field names and
+// values, and the number of nodes left out changes with the provider's list
+// — and none of that may make the same problem new at every refresh (a
+// hostile provider could otherwise have the unattended popup appear every
+// few hours).
 func problemKey(update SubscriptionUpdate) string {
-	var parts []string
+	kinds := map[string]bool{}
 	if update.Err != nil {
-		parts = append(parts, "error: "+quotedNames.ReplaceAllString(update.Err.Error(), "«»"))
+		kinds["error: "+problemKind(update.Err.Error())] = true
 	}
-	reasons := make([]string, 0, len(update.Skipped))
 	for _, sk := range update.Skipped {
-		reasons = append(reasons, quotedNames.ReplaceAllString(sk.Reason, "«»"))
+		kinds["skipped: "+problemKind(sk.Reason)] = true
 	}
-	sort.Strings(reasons)
-	return strings.Join(append(parts, reasons...), "\n")
+	parts := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		parts = append(parts, kind)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
+}
+
+// problemKind is the kind of problem a message describes: its leading words,
+// up to the first colon, quote or bracket. Every message of the app starts
+// with its own words ("sing-box не принимает", "тип", "не удалось обновить
+// конфиг") and names or quotes the node's values after them.
+func problemKind(message string) string {
+	if i := strings.IndexAny(message, ":«\"(\n"); i >= 0 {
+		message = message[:i]
+	}
+	return strings.TrimSpace(message)
 }
 
 // noteProblem records the problem of this refresh in the subscription and

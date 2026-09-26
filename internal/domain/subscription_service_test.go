@@ -3,6 +3,7 @@ package domain
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"strings"
@@ -490,6 +491,50 @@ func TestNewProblemOncePerProblem(t *testing.T) {
 	body = "DE|11.9GB"
 	if r, _ := refusing.UpdateAll(); r.Updates[0].NewProblem {
 		t.Fatal("the same refusal reported again under another counter")
+	}
+}
+
+// A provider decides the node names, the field names and values sing-box
+// quotes in its refusal, and how many nodes fail: varying any of it — on
+// purpose or not — is not a new problem, or a hostile provider could have
+// the unattended popup appear at every refresh. Another kind of problem is.
+func TestNewProblemIgnoresWhatTheProviderVaries(t *testing.T) {
+	const u = "https://p.example/sub"
+	var body string
+	fetch := func(string) (string, error) { return body, nil }
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	newProblem := func(skipped ...string) bool {
+		t.Helper()
+		body = "node-a\n" + strings.Join(skipped, "\n")
+		result, err := svc.UpdateAll()
+		if err != nil {
+			t.Fatalf("UpdateAll: %v", err)
+		}
+		return result.Updates[0].NewProblem
+	}
+	unknownField := func(field string) string {
+		return fmt.Sprintf("skip:n-%s:sing-box не принимает: %s: json: unknown field \"%s\"", field, field, field)
+	}
+
+	if !newProblem(unknownField("zz_rand_8841")) {
+		t.Fatal("first problem not new")
+	}
+	for i, skipped := range [][]string{
+		{unknownField("zz_rand_8842")},
+		{unknownField("zz_rand_8843"), unknownField("zz_rand_8844")},
+		{"skip:x:sing-box не принимает: unknown obfs type: bogus"},
+		{"skip:a»b:sing-box не принимает: x", "skip:c:sing-box не принимает: «a»b» (y)"},
+	} {
+		if newProblem(skipped...) {
+			t.Fatalf("variation %d reported as a new problem", i+1)
+		}
+	}
+	if !newProblem(unknownField("zz"), "skip:t:тип «tor» не поддерживается") {
+		t.Fatal("another kind of problem not reported")
+	}
+	if newProblem("skip:t2:тип «hysteria» не поддерживается", unknownField("q")) {
+		t.Fatal("the same kinds again, in another order, reported")
 	}
 }
 
