@@ -217,7 +217,20 @@ func transportConfig(q url.Values, tlsOn bool) (map[string]any, error) {
 	case "kcp", "mkcp":
 		return nil, errors.New("транспорт mKCP не поддерживается sing-box")
 	case "quic":
-		return nil, errors.New("транспорт QUIC из Xray не совместим с sing-box")
+		// Xray has removed its QUIC transport: a type=quic link today comes
+		// from a sing-box server (s-ui writes the transport's type as it
+		// is), and sing-box runs that transport. What only v2ray's QUIC had
+		// — its own encryption over TLS, a packet header — sing-box has not.
+		if !tlsOn {
+			return nil, errors.New("транспорт QUIC работает только с TLS, а в ссылке TLS не включён")
+		}
+		if security := strings.ToLower(strings.TrimSpace(q.Get("quicSecurity"))); security != "" && security != "none" {
+			return nil, fmt.Errorf("шифрование QUIC «%s» (из v2ray) не поддерживается sing-box", token(security))
+		}
+		if header := strings.ToLower(strings.TrimSpace(q.Get("headerType"))); header != "" && header != "none" {
+			return nil, fmt.Errorf("маскировка QUIC «%s» не поддерживается sing-box", token(header))
+		}
+		return map[string]any{"type": "quic"}, nil
 	case "domainsocket":
 		return nil, errors.New("транспорт DomainSocket не поддерживается sing-box")
 	default:
@@ -328,15 +341,41 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 	if err != nil {
 		return err
 	}
-	if tls != nil {
-		outbound["tls"] = tls
-	}
 	transport, err := transportConfig(q, tls != nil)
 	if err != nil {
 		return err
 	}
+	if err := fitTLSToTransport(tls, transport); err != nil {
+		return err
+	}
+	if tls != nil {
+		outbound["tls"] = tls
+	}
 	if transport != nil {
 		outbound["transport"] = transport
+	}
+	return nil
+}
+
+// fitTLSToTransport adjusts the tls object to the transport it carries.
+// ws and httpupgrade are HTTP/1.1 upgrades: sing-box offers http/1.1 when
+// tls.alpn is empty, but sends a configured list as it is — and with the
+// "h2,http/1.1" of 3x-ui's default TLS settings the server picks h2 and
+// drops the upgrade request. Xray clients always offered http/1.1 there, so
+// such links work in them; the alpn is left out. The QUIC transport runs
+// its own TLS: no uTLS (sing-box does none over QUIC), no REALITY.
+func fitTLSToTransport(tls, transport map[string]any) error {
+	if tls == nil || transport == nil {
+		return nil
+	}
+	switch transport["type"] {
+	case "ws", "httpupgrade":
+		delete(tls, "alpn")
+	case "quic":
+		if _, reality := tls["reality"]; reality {
+			return errors.New("REALITY поверх транспорта QUIC не поддерживается sing-box")
+		}
+		delete(tls, "utls")
 	}
 	return nil
 }
@@ -469,18 +508,24 @@ func parseVMess(link string) (Outbound, error) {
 	}
 
 	// The transport through the query-param builder via equivalent values.
-	// In the v2rayN JSON "type" is the header type of tcp, "path" the
-	// service name of grpc
+	// In the v2rayN JSON "type" is the header type of tcp and quic, "path"
+	// the service name of grpc, "host" the encryption of quic
 	q := url.Values{}
 	q.Set("type", v.Net)
 	q.Set("headerType", v.Type)
 	q.Set("path", v.Path)
 	q.Set("host", v.Host)
-	if strings.EqualFold(strings.TrimSpace(v.Net), "grpc") {
+	switch strings.ToLower(strings.TrimSpace(v.Net)) {
+	case "grpc":
 		q.Set("serviceName", v.Path)
+	case "quic":
+		q.Set("quicSecurity", v.Host)
 	}
 	transport, err := transportConfig(q, tls != nil)
 	if err != nil {
+		return nil, err
+	}
+	if err := fitTLSToTransport(tls, transport); err != nil {
 		return nil, err
 	}
 	if transport != nil {

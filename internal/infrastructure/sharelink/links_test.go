@@ -112,6 +112,33 @@ var acceptedLinks = []linkCase{
 		vmessJSON(`{"ps":"vm-ws-ed","add":"192.0.2.20","port":443,"id":"` + testUUID + `","aid":0,"net":"ws","host":"example.com","path":"/ws?ed=2048","tls":"tls","sni":"example.com"}`),
 		`{"transport":{"type":"ws","path":"/ws","max_early_data":2048},"tls":{"utls":{"fingerprint":"chrome"}}}`},
 
+	// ws/httpupgrade over TLS: no alpn, sing-box then offers http/1.1 (with
+	// h2 in the list the server picks h2 and drops the upgrade)
+	{"ws over TLS leaves the alpn out",
+		"vless://" + testUUID + "@192.0.2.10:443?type=ws&path=%2Fws&host=example.com&security=tls&fp=chrome&alpn=h2%2Chttp%2F1.1&sni=example.com#ws-alpn",
+		`{"tls":{"enabled":true,"alpn":null,"utls":{"fingerprint":"chrome"}},"transport":{"type":"ws","path":"/ws"}}`},
+	{"httpupgrade over TLS leaves the alpn out",
+		"trojan://secret@192.0.2.30:443?type=httpupgrade&path=%2Fhu&host=example.com&alpn=h2%2Chttp%2F1.1&sni=example.com#hu-alpn",
+		`{"tls":{"enabled":true,"alpn":null},"transport":{"type":"httpupgrade","path":"/hu"}}`},
+	{"vmess ws over TLS leaves the alpn out",
+		vmessJSON(`{"ps":"vm-ws-alpn","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","path":"/ws","tls":"tls","sni":"example.com","alpn":"h2,http/1.1"}`),
+		`{"tls":{"enabled":true,"alpn":null},"transport":{"type":"ws"}}`},
+	{"grpc keeps the alpn",
+		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&security=tls&alpn=h2&sni=example.com#grpc-alpn",
+		`{"tls":{"alpn":["h2"]},"transport":{"type":"grpc"}}`},
+
+	// sing-box's own QUIC transport (s-ui exports it as type=quic): TLS
+	// without uTLS
+	{"quic transport",
+		"vless://" + testUUID + "@192.0.2.10:443?type=quic&security=tls&sni=example.com#quic",
+		`{"transport":{"type":"quic"},"tls":{"enabled":true,"server_name":"example.com","utls":null}}`},
+	{"quic with v2rayN's empty settings",
+		"vless://" + testUUID + "@192.0.2.10:443?type=quic&quicSecurity=none&key=&headerType=none&security=tls&fp=chrome&sni=example.com#quic-none",
+		`{"transport":{"type":"quic"},"tls":{"utls":null}}`},
+	{"vmess quic",
+		vmessJSON(`{"ps":"vm-quic","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"quic","type":"none","host":"none","path":"","tls":"tls","sni":"example.com"}`),
+		`{"transport":{"type":"quic"},"tls":{"enabled":true,"utls":null}}`},
+
 	// flow
 	{"flow -udp443",
 		"vless://" + testUUID + "@192.0.2.10:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=" + testPBK + "&sid=6ba85179&flow=xtls-rprx-vision-udp443#udp443",
@@ -270,7 +297,11 @@ var refusedLinks = []refusalCase{
 	{"splithttp", "vless://" + testUUID + "@192.0.2.10:443?type=splithttp&path=%2Fsh&security=tls#splithttp", "XHTTP"},
 	{"kcp", "vless://" + testUUID + "@192.0.2.10:443?type=kcp&headerType=wechat-video&seed=" + testSecret + "#kcp", "mKCP"},
 	{"mkcp", "vless://" + testUUID + "@192.0.2.10:443?type=mkcp#mkcp", "mKCP"},
-	{"quic", "vless://" + testUUID + "@192.0.2.10:443?type=quic&security=tls#quic", "QUIC"},
+	{"quic-no-tls", "vless://" + testUUID + "@192.0.2.10:443?type=quic#quic-no-tls", "QUIC работает только с TLS"},
+	{"quic-encrypted", "vless://" + testUUID + "@192.0.2.10:443?type=quic&quicSecurity=aes-128-gcm&key=" + testSecret + "&security=tls#quic-encrypted", "шифрование QUIC «aes-128-gcm»"},
+	{"quic-header", "vless://" + testUUID + "@192.0.2.10:443?type=quic&headerType=wechat-video&security=tls#quic-header", "маскировка QUIC «wechat-video»"},
+	{"quic-reality", "vless://" + testUUID + "@192.0.2.10:443?type=quic&security=reality&sni=www.example.com&pbk=" + testPBK + "#quic-reality", "REALITY поверх транспорта QUIC"},
+	{"vm-quic-encrypted", vmessJSON(`{"ps":"vm-quic-encrypted","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"quic","host":"chacha20-poly1305","path":"` + testSecret + `","tls":"tls"}`), "шифрование QUIC «chacha20-poly1305»"},
 	{"unknown transport", "vless://" + testUUID + "@192.0.2.10:443?type=foo#unknown%20transport", "транспорт «foo»"},
 	{"tcp-http-tls", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&headerType=http&security=tls#tcp-http-tls", "HTTP-маскировкой"},
 	{"tcp-http-reality", "vless://" + testUUID + "@192.0.2.10:443?type=tcp&headerType=http&security=reality&pbk=" + testPBK + "#tcp-http-reality", "HTTP-маскировкой"},
