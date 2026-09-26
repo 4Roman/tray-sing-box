@@ -1,0 +1,242 @@
+package configfile
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+
+	"tray-sing-box/internal/domain"
+)
+
+// fakeCheck imitates sing-box check the way it answers: an outbound with a
+// flow other than "" or "xtls-rprx-vision" is refused with its position in
+// the whole file; a uuid "bad-uuid-…" is refused while decoding, quoting the
+// value and the path of the file under check; the flow "crash" crashes it
+// (a Go panic: no position, a stack trace).
+type fakeCheck struct {
+	calls int
+}
+
+func (f *fakeCheck) validate(raw []byte) error {
+	f.calls++
+	var cfg struct {
+		Outbounds []map[string]any `json:"outbounds"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return err
+	}
+	for i, o := range cfg.Outbounds {
+		flow, _ := o["flow"].(string)
+		uuid, _ := o["uuid"].(string)
+		switch {
+		case flow == "crash":
+			return fmt.Errorf("sing-box check: panic: runtime error: index out of range [8] with length 8\n\ngoroutine 1 [running]:\nencoding/hex.Decode({0x3e3d240d7c8?})\n\tencoding/hex/hex.go:101 +0x105")
+		case flow != "" && flow != "xtls-rprx-vision":
+			return fmt.Errorf("sing-box check: FATAL[0000] initialize outbound[%d]: unsupported flow: %s", i, flow)
+		case strings.HasPrefix(uuid, "bad-uuid-"):
+			return fmt.Errorf("sing-box check: FATAL[0000] decode config at C:\\data\\.singbox-check-4242.json: outbounds[%d].uuid: invalid uuid: %s", i, uuid)
+		}
+	}
+	return nil
+}
+
+func node(tag, flow string) map[string]any {
+	o := map[string]any{"type": "vless", "tag": tag, "server": tag + ".example.com", "server_port": 443,
+		"uuid": "11111111-2222-4333-8444-555555555555"}
+	if flow != "" {
+		o["flow"] = flow
+	}
+	return o
+}
+
+func checkedEditor(t *testing.T, config string) (*Editor, string, *fakeCheck) {
+	t.Helper()
+	path := writeConfig(t, config)
+	check := &fakeCheck{}
+	editor := New(path)
+	editor.SetValidator(check.validate)
+	return editor, path, check
+}
+
+// One node sing-box refuses costs only that node: the others are saved, the
+// refused one is named with sing-box's reason (not its position in the file)
+func TestAddOutboundsLeavesOutRefused(t *testing.T) {
+	editor, path, check := checkedEditor(t, sampleConfig)
+
+	result, err := editor.AddOutbounds([]map[string]any{
+		node("good-1", "xtls-rprx-vision"), node("bad", "xtls-rprx-vision-udp443"), node("good-2", ""), node("good-3", ""),
+	}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"good-1", "good-2", "good-3"}) || !result.Changed {
+		t.Fatalf("result = %+v", result)
+	}
+	want := []domain.SkippedNode{{Name: "bad", Reason: "sing-box не принимает: unsupported flow: xtls-rprx-vision-udp443"}}
+	if !reflect.DeepEqual(result.Skipped, want) {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	// The whole config, the new nodes together, then (without "bad") together
+	// again and the whole config: four sing-box runs, not one per node
+	if check.calls != 4 {
+		t.Fatalf("validator ran %d times, want 4", check.calls)
+	}
+
+	cfg := load(t, path)
+	if outboundByTag(t, cfg, "bad") != nil || outboundByTag(t, cfg, "good-3") == nil {
+		t.Fatalf("outbounds = %v", cfg["outbounds"])
+	}
+	for _, m := range outboundByTag(t, cfg, "proxy")["outbounds"].([]any) {
+		if m == "bad" {
+			t.Fatal("the refused node was registered in the selector")
+		}
+	}
+}
+
+// When every node is refused nothing is saved
+func TestAddOutboundsAllRefused(t *testing.T) {
+	editor, path, _ := checkedEditor(t, sampleConfig)
+
+	result, err := editor.AddOutbounds([]map[string]any{node("bad-1", "x"), node("bad-2", "y")}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Tags) != 0 || len(result.Skipped) != 2 || result.Changed {
+		t.Fatalf("result = %+v", result)
+	}
+	raw, _ := os.ReadFile(path)
+	if !bytes.Equal(raw, []byte(sampleConfig)) {
+		t.Fatal("config changed although every node was refused")
+	}
+	if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("backup written although nothing was saved")
+	}
+}
+
+// A refusal that is not about the new nodes is returned, naming the
+// outbound by tag instead of its position among all outbounds of the file
+func TestCheckErrorNamesTheOutbound(t *testing.T) {
+	broken := strings.Replace(sampleConfig, `"tag": "old-node",`, `"tag": "old-node", "flow": "weird",`, 1)
+	editor, _, _ := checkedEditor(t, broken)
+
+	_, err := editor.AddOutbounds([]map[string]any{node("good", "")}, nil)
+	if err == nil {
+		t.Fatal("a config sing-box refuses was saved")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "outbound «old-node»: unsupported flow: weird") ||
+		strings.Contains(msg, "outbound[") || strings.Contains(msg, "FATAL") {
+		t.Fatalf("error = %q", msg)
+	}
+}
+
+// sing-box's reasons may quote a value: a credential never passes, nor the
+// path of the file under check
+func TestRefusalReasonHidesSecrets(t *testing.T) {
+	editor, _, _ := checkedEditor(t, sampleConfig)
+
+	bad := node("bad", "")
+	bad["uuid"] = "bad-uuid-secretvalue"
+	result, err := editor.AddOutbounds([]map[string]any{node("good", ""), bad}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if len(result.Skipped) != 1 {
+		t.Fatalf("skipped = %+v", result.Skipped)
+	}
+	reason := result.Skipped[0].Reason
+	if strings.Contains(reason, "secretvalue") || strings.Contains(reason, "singbox-check") ||
+		!strings.Contains(reason, "uuid: invalid uuid: "+SecretPlaceholder) {
+		t.Fatalf("reason = %q", reason)
+	}
+
+	// The same in an error about the whole config
+	existing := strings.Replace(sampleConfig, `"tag": "old-node",`, `"tag": "old-node", "uuid": "bad-uuid-othersecret",`, 1)
+	editor, _, _ = checkedEditor(t, existing)
+	_, err = editor.AddOutbounds([]map[string]any{node("good", "")}, nil)
+	if err == nil || strings.Contains(err.Error(), "othersecret") || !strings.Contains(err.Error(), "outbound «old-node».uuid") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// A crash names no outbound: the nodes are then checked one by one, and the
+// reason is the first line of the crash, not its stack
+func TestCrashIsCheckedOneByOne(t *testing.T) {
+	editor, _, _ := checkedEditor(t, sampleConfig)
+
+	result, err := editor.AddOutbounds([]map[string]any{node("good-1", ""), node("crashing", "crash"), node("good-2", "")}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	want := []domain.SkippedNode{{Name: "crashing", Reason: "sing-box не принимает: panic: runtime error: index out of range [8] with length 8"}}
+	if !reflect.DeepEqual(result.Skipped, want) || !reflect.DeepEqual(result.Tags, []string{"good-1", "good-2"}) {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+// What the guard refuses in one node costs only that node too
+func TestGuardRefusalLeavesOutOne(t *testing.T) {
+	path := writeSample(t)
+	risky := node("risky", "")
+	risky["tls"] = map[string]any{"enabled": true, "certificate_path": "ca.pem"}
+
+	result, err := New(path).AddOutbounds([]map[string]any{node("good", ""), risky}, nil)
+	if err != nil {
+		t.Fatalf("AddOutbounds: %v", err)
+	}
+	if !reflect.DeepEqual(result.Tags, []string{"good"}) || len(result.Skipped) != 1 ||
+		result.Skipped[0].Name != "risky" || !strings.HasPrefix(result.Skipped[0].Reason, "приложение не добавляет") {
+		t.Fatalf("result = %+v", result)
+	}
+	if outboundByTag(t, load(t, path), "risky") != nil {
+		t.Fatal("the refused node was saved")
+	}
+}
+
+// A selector default outside the members passes sing-box check, and sing-box
+// then does not start: refused when a save brings it, kept when it was there
+func TestSelectorDefaultOutsideMembers(t *testing.T) {
+	path := writeSample(t)
+	editor := New(path)
+
+	err := editor.WriteSection("outbounds", []byte(`[
+    {"type": "selector", "tag": "proxy", "outbounds": ["old-node", "direct"], "default": "gone"},
+    {"type": "vless", "tag": "old-node", "server": "old.example.com", "server_port": 443},
+    {"type": "direct", "tag": "direct"}
+  ]`))
+	if err == nil || !strings.Contains(err.Error(), "«proxy»") || !strings.Contains(err.Error(), "«gone»") {
+		t.Fatalf("dangling default saved: %v", err)
+	}
+	if err := editor.WriteSection("outbounds", []byte(`[
+    {"type": "selector", "tag": "proxy", "outbounds": ["old-node", "direct"], "default": "old-node"},
+    {"type": "vless", "tag": "old-node", "server": "old.example.com", "server_port": 443},
+    {"type": "direct", "tag": "direct"}
+  ]`)); err != nil {
+		t.Fatalf("a valid default refused: %v", err)
+	}
+
+	// One the config already has does not block other saves
+	dangling := strings.Replace(sampleConfig, `"outbounds": ["old-node", "direct"]}`, `"outbounds": ["old-node", "direct"], "default": "gone"}`, 1)
+	if err := New(writeConfig(t, dangling)).AddOutbound(node("new", "")); err != nil {
+		t.Fatalf("an existing dangling default blocked an import: %v", err)
+	}
+}
+
+func TestCheckMessage(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"sing-box check: FATAL[0000] initialize outbound[2]: unsupported flow: x", "initialize outbound[2]: unsupported flow: x"},
+		{"sing-box check: WARN[0000] something is deprecated\nFATAL[0000] initialize outbound[0]: nope", "initialize outbound[0]: nope"},
+		{`sing-box check: FATAL[0000] decode config at C:\d\.singbox-check-1.json: outbounds[1].encryption: json: unknown field "encryption"`,
+			`outbounds[1].encryption: json: unknown field "encryption"`},
+		{"sing-box check: panic: boom\n\ngoroutine 1 [running]:\nmain.main()", "panic: boom"},
+		{"exit status 1", "exit status 1"},
+	} {
+		if got := checkMessage(tc.in); got != tc.want {
+			t.Errorf("checkMessage(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

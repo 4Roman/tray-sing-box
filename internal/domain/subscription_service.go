@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,14 +21,26 @@ type Subscription struct {
 	URL     string    `json:"url"`
 	Tags    []string  `json:"tags"`
 	Updated time.Time `json:"updated"`
+	// Problem identifies what went wrong at the last refresh (a hash of the
+	// error and the reasons nodes were skipped; empty: nothing): an
+	// unattended refresh tells the user about a problem only when it differs
+	// from this one (SubscriptionUpdate.NewProblem)
+	Problem string `json:"problem,omitempty"`
 }
 
 // SyncResult describes how SubscriptionConfigStore.SyncOutbounds changed the
 // config
 type SyncResult struct {
-	Added   []string // tags that did not exist before
-	Removed []string // owned tags deleted because the subscription dropped them
-	Changed bool     // whether the config file was rewritten
+	Tags     []string      // tags of the subscription's outbounds in the config now
+	Added    []string      // tags that did not exist before
+	Removed  []string      // owned tags deleted because the subscription dropped them
+	Renamed  []TagRename   // owned outbounds the subscription renamed, kept in place under the new tag
+	Suffixed []TagRename   // incoming names taken by outbounds the subscription does not own
+	Skipped  []SkippedNode // refused by the config check, left out
+	Changed  bool          // whether the config file was rewritten
+	// NeedsRestart: the change matters to a running sing-box. Renamed tags
+	// alone do not (the app never addresses outbounds by tag at runtime)
+	NeedsRestart bool
 }
 
 // SubscriptionStore persists the subscription list (implemented by
@@ -42,7 +55,11 @@ type SubscriptionStore interface {
 type SubscriptionFetcher func(url string) (string, error)
 
 // SubscriptionConfigStore reconciles the outbounds owned by a subscription
-// with a freshly fetched set (implemented by configfile.Editor)
+// with a freshly fetched set (implemented by configfile.Editor). An outbound
+// the subscription renamed keeps its place and every reference to it; an
+// incoming name taken by an outbound the subscription does not own gets a
+// " (N)" suffix; outbounds the config check refuses are left out (when it
+// refuses every one, nothing is saved and Tags is empty).
 type SubscriptionConfigStore interface {
 	SyncOutbounds(ownedTags []string, outbounds []map[string]any) (*SyncResult, error)
 }
@@ -51,14 +68,19 @@ type SubscriptionConfigStore interface {
 // the saved URL itself — it carries the provider's access token, so it is
 // shown (logged, put into a popup or a response) only through RedactURL.
 type SubscriptionUpdate struct {
-	URL     string
-	Tags    []string
-	Added   []string
-	Removed []string
-	Skipped []SkippedNode // nodes of the body left out, with the reason
-	Err     error
+	URL      string
+	Tags     []string
+	Added    []string
+	Removed  []string
+	Renamed  []TagRename   // nodes the provider renamed, kept under the new name
+	Suffixed []TagRename   // nodes saved as "<name> (N)": the name was taken
+	Skipped  []SkippedNode // nodes of the body left out, with the reason
+	Err      error
+	// NewProblem: Err or Skipped differ from what the previous refresh of
+	// this subscription found — an unattended refresh reports only these
+	NewProblem bool
 
-	changedConfig bool // the sync rewrote config.json
+	changedConfig bool // the sync changed config.json in a way sing-box sees
 }
 
 // SubscriptionResult describes a finished subscription operation
@@ -231,7 +253,7 @@ func (s *SubscriptionService) Remove(rawURL string) (*SubscriptionResult, error)
 	result := &SubscriptionResult{
 		Updates: []SubscriptionUpdate{{URL: rawURL, Removed: sync.Removed}},
 	}
-	if sync.Changed {
+	if sync.NeedsRestart {
 		restarted, err := s.vpn.RestartIfRunning()
 		if err != nil {
 			return result, fmt.Errorf("подписка удалена, но VPN %w", err)
@@ -300,30 +322,43 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	body, err := s.fetch(sub.URL)
 	if err != nil {
 		update.Err = fmt.Errorf("не удалось скачать подписку: %w", err)
+		// Often a moment without network (right after logon): a problem
+		// only once the servers are getting old
+		if stale := sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter; stale {
+			noteProblem(sub, &update, "fetch")
+		}
 		return update
 	}
 	outbounds, skipped, err := s.parser.Parse(body)
-	if err != nil {
-		update.Err = fmt.Errorf("не удалось разобрать подписку: %w", err)
-		return update
-	}
 	update.Skipped = skipped
 	for _, sk := range skipped {
 		log.Printf("Subscription %s: skipped %q: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
+	}
+	if err != nil {
+		update.Err = noneUsable("не удалось разобрать подписку", skipped, err)
+		noteProblem(sub, &update, problemKey(update))
+		return update
 	}
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)
 	if err != nil {
 		update.Err = fmt.Errorf("не удалось обновить конфиг: %w", err)
+		noteProblem(sub, &update, problemKey(update))
+		return update
+	}
+	for _, sk := range sync.Skipped {
+		log.Printf("Subscription %s: %q refused by the config check: %s", RedactURL(sub.URL), sk.Name, sk.Reason)
+	}
+	update.Skipped = append(update.Skipped, sync.Skipped...)
+	if len(sync.Tags) == 0 {
+		// Every node refused: nothing was saved, the servers of the last
+		// refresh stay (and stay owned)
+		update.Err = noneUsable("ни один сервер подписки не подошёл", update.Skipped, nil)
+		noteProblem(sub, &update, problemKey(update))
 		return update
 	}
 
-	tags := make([]string, 0, len(outbounds))
-	for _, o := range outbounds {
-		if tag, _ := o["tag"].(string); tag != "" {
-			tags = append(tags, tag)
-		}
-	}
+	tags := append([]string(nil), sync.Tags...)
 	sort.Strings(tags)
 	sub.Tags = tags
 	sub.Updated = time.Now()
@@ -331,10 +366,56 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 	update.Tags = tags
 	update.Added = sync.Added
 	update.Removed = sync.Removed
-	update.changedConfig = sync.Changed
-	log.Printf("Subscription refreshed: %s (%d nodes, +%d -%d, changed=%v)",
-		RedactURL(sub.URL), len(tags), len(sync.Added), len(sync.Removed), sync.Changed)
+	update.Renamed = sync.Renamed
+	update.Suffixed = sync.Suffixed
+	update.changedConfig = sync.NeedsRestart
+	noteProblem(sub, &update, problemKey(update))
+	for _, r := range sync.Suffixed {
+		log.Printf("Subscription %s: %q saved as %q (the name is taken)", RedactURL(sub.URL), r.From, r.To)
+	}
+	log.Printf("Subscription refreshed: %s (%d nodes, +%d -%d, renamed %d, skipped %d, changed=%v, restart=%v)",
+		RedactURL(sub.URL), len(tags), len(sync.Added), len(sync.Removed), len(sync.Renamed),
+		len(update.Skipped), sync.Changed, sync.NeedsRestart)
 	return update
+}
+
+// subscriptionStaleAfter: a subscription that has not been downloaded for
+// this long is reported by the unattended refresh (a failed download of a
+// fresh one is not: the next refresh usually makes it)
+const subscriptionStaleAfter = 24 * time.Hour
+
+// quotedNames matches the node names in a message: they may carry live
+// counters (3x-ui's default remark ends with the traffic and days left),
+// which must not make the same problem look new at every refresh
+var quotedNames = regexp.MustCompile(`«[^»]*»`)
+
+// problemKey sums up what went wrong in a refresh — the error and the
+// reasons of the skipped nodes, without node names; "" when nothing did
+func problemKey(update SubscriptionUpdate) string {
+	var parts []string
+	if update.Err != nil {
+		parts = append(parts, "error: "+quotedNames.ReplaceAllString(update.Err.Error(), "«»"))
+	}
+	reasons := make([]string, 0, len(update.Skipped))
+	for _, sk := range update.Skipped {
+		reasons = append(reasons, quotedNames.ReplaceAllString(sk.Reason, "«»"))
+	}
+	sort.Strings(reasons)
+	return strings.Join(append(parts, reasons...), "\n")
+}
+
+// noteProblem records the problem of this refresh in the subscription and
+// flags it as new when it differs from the one recorded before. Stored as a
+// hash: the text may name nodes, and the file needs none of it.
+func noteProblem(sub *Subscription, update *SubscriptionUpdate, key string) {
+	if key == "" {
+		sub.Problem = ""
+		return
+	}
+	sum := sha256.Sum256([]byte(key))
+	id := hex.EncodeToString(sum[:8])
+	update.NewProblem = id != sub.Problem
+	sub.Problem = id
 }
 
 func indexOfSubscription(subs []Subscription, rawURL string) int {

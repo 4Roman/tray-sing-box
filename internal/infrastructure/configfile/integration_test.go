@@ -22,7 +22,7 @@ func TestImportLinkIntoConfig(t *testing.T) {
 		t.Fatalf("Parse: %v", err)
 	}
 
-	if err := New(path).AddOutbounds(outbounds); err != nil {
+	if _, err := New(path).AddOutbounds(outbounds, nil); err != nil {
 		t.Fatalf("AddOutbounds: %v", err)
 	}
 

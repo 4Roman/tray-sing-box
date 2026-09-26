@@ -15,7 +15,7 @@ func missingConfig() error {
 
 func TestImportWithoutAConfigCarriesTheHint(t *testing.T) {
 	vpn := NewVPNService(&fakeProcessManager{}, &fakeStorage{})
-	imp := NewImportService(&fakeParser{tags: []string{"node-1"}}, &fakeEditor{err: missingConfig()}, vpn)
+	imp := NewImportService(&fakeParser{tags: []string{"node-1"}}, &fakeEditor{err: missingConfig()}, nil, vpn)
 	_, err := imp.ImportFromText("vless://...")
 	if err == nil || !strings.Contains(err.Error(), "«Первоначальная настройка»") {
 		t.Fatalf("import error lacks the hint: %v", err)

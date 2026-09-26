@@ -57,6 +57,7 @@
   }
   #msg.ok { display: block; background: #173524; color: #7fe3a1; border: 1px solid #235c39; }
   #msg.err { display: block; background: #3a1d20; color: #f1948f; border: 1px solid #6b3036; }
+  #msg.warn { display: block; background: #352d17; color: #e8c872; border: 1px solid #5c4a23; }
   .notice {
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px;
     background: #3a1d20; color: #f1948f; border: 1px solid #6b3036;
@@ -140,7 +141,7 @@
     <button class="secondary" onclick="updateSubscription('', this)">Обновить все</button>
   </div>
   <div class="vpn-state" style="margin-top:10px">
-    Серверы подписки добавляются в конфиг и обновляются автоматически каждые 6 часов (и при запуске приложения). Подписку также можно добавить, скопировав её URL и нажав «Импорт из буфера обмена».
+    Серверы подписки добавляются в конфиг и обновляются автоматически каждые 6 часов (и при запуске приложения); о проблеме автообновления (подписка не скачивается, серверы пропущены) приложение сообщает один раз. Сервер, который sing-box не принимает, пропускается — остальные добавляются. Подписку также можно добавить, скопировав её URL и нажав «Импорт из буфера обмена».
   </div>
 </section>
 
@@ -507,25 +508,55 @@ function importFrom(source, btn) {
     }
     const d = await api('/api/import', { source });
     if (d.subscription) {
-      show('ok', subsSummary('Подписка добавлена', d));
+      showSubs('Подписка добавлена', d);
       await refresh();
       await refreshSubs();
       return;
     }
-    show('ok', 'Импортировано: ' + d.tags.join(', ') + restartedSuffix(d));
+    const skipped = d.skipped || [], renamed = d.renamed || [];
+    let text = 'Импортировано: ' + d.tags.join(', ') + restartedSuffix(d);
+    if (skipped.length) {
+      text = 'Импортировано ' + d.tags.length + ' из ' + (d.tags.length + skipped.length) +
+        ': ' + d.tags.join(', ') + restartedSuffix(d);
+    }
+    if (renamed.length) text += '\nИмя уже занято — сохранены под другим:\n' + renameLines(renamed, '\n');
+    if (skipped.length) text += '\nПропущены:\n' + skippedLines(skipped, '');
+    // A list to read stays until the next message
+    show(skipped.length || renamed.length ? 'warn' : 'ok', text);
     await refresh();
   });
+}
+
+// Nodes an import or a subscription left out: the name and the reason (the
+// link itself never leaves the app — it carries the server's credentials)
+function skippedLines(list, indent) {
+  return list.map(s => indent + '«' + s.name + '» — ' + s.reason).join('\n');
+}
+
+function renameLines(list, sep) {
+  return list.map(r => '«' + r.from + '» → «' + r.to + '»').join(sep);
 }
 
 // Subscriptions are named by id and a redacted URL ("https://host/… (ab12cd)"):
 // the full URL carries the provider's access token and stays in the app
 function subsSummary(prefix, d) {
-  const lines = (d.updates || []).map(u => u.error
-    ? u.display + ' — ошибка: ' + u.error
-    : u.display + ' — серверов: ' + u.count +
+  const lines = (d.updates || []).map(u => {
+    if (u.error) return u.display + ' — ошибка: ' + u.error;
+    let line = u.display + ' — серверов: ' + u.count +
       (u.added ? ', новых: ' + u.added : '') +
-      (u.removed ? ', удалено: ' + u.removed : ''));
+      (u.removed ? ', удалено: ' + u.removed : '') +
+      (u.renamed ? ', переименовано: ' + u.renamed : '');
+    if ((u.suffixed || []).length) line += '\n  имя уже занято, сохранены под другим: ' + renameLines(u.suffixed, ', ');
+    if ((u.skipped || []).length) line += '\n  пропущены:\n' + skippedLines(u.skipped, '    ');
+    return line;
+  });
   return prefix + restartedSuffix(d) + '\n' + lines.join('\n');
+}
+
+// showSubs shows a subscription result; one with problems stays on screen
+function showSubs(prefix, d) {
+  const problems = (d.updates || []).some(u => u.error || (u.skipped || []).length || (u.suffixed || []).length);
+  show(problems ? 'warn' : 'ok', subsSummary(prefix, d));
 }
 
 async function refreshSubs() {
@@ -574,7 +605,7 @@ function addSubscription(btn) {
     show('ok', 'Скачиваю подписку…');
     const d = await api('/api/subscriptions/add', { url });
     input.value = '';
-    show('ok', subsSummary('Подписка добавлена', d));
+    showSubs('Подписка добавлена', d);
     await refresh();
     await refreshSubs();
   });
@@ -585,7 +616,7 @@ function updateSubscription(id, btn) {
   run(btn, async () => {
     show('ok', 'Обновляю подписки…');
     const d = await api('/api/subscriptions/update', { id });
-    show('ok', subsSummary('Подписки обновлены', d));
+    showSubs('Подписки обновлены', d);
     await refresh();
     await refreshSubs();
   });
@@ -595,7 +626,7 @@ function removeSubscription(sub, btn) {
   if (!confirm('Удалить подписку и все её серверы из конфига?\n' + sub.display)) return;
   run(btn, async () => {
     const d = await api('/api/subscriptions/remove', { id: sub.id });
-    show('ok', subsSummary('Подписка удалена', d));
+    showSubs('Подписка удалена', d);
     await refresh();
     await refreshSubs();
   });

@@ -40,7 +40,7 @@ func TestMissingConfigIsReportedAsSuch(t *testing.T) {
 	if _, err := e.ReadSection("outbounds"); !errors.Is(err, domain.ErrConfigMissing) {
 		t.Fatalf("ReadSection: want ErrConfigMissing, got %v", err)
 	}
-	if err := e.AddOutbounds([]map[string]any{{"type": "direct", "tag": "d"}}); !errors.Is(err, domain.ErrConfigMissing) {
+	if err := e.AddOutbound(map[string]any{"type": "direct", "tag": "d"}); !errors.Is(err, domain.ErrConfigMissing) {
 		t.Fatalf("AddOutbounds: want ErrConfigMissing, got %v", err)
 	}
 }

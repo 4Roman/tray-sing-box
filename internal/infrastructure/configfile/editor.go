@@ -72,34 +72,60 @@ func (e *Editor) load() (map[string]any, []byte, error) {
 		return nil, nil, fmt.Errorf("failed to read config: %w", err)
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var cfg map[string]any
-	if err := decoder.Decode(&cfg); err != nil {
+	cfg, err := decodeConfig(raw)
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 	return cfg, raw, nil
 }
 
+// decodeConfig decodes config JSON, preserving number representation
+func decodeConfig(raw []byte) (map[string]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var cfg map[string]any
+	if err := decoder.Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // save validates the updated config, backs up the original and writes
 func (e *Editor) save(cfg map[string]any, original []byte) error {
+	updated, err := e.check(cfg, original)
+	if err != nil {
+		return err
+	}
+	return e.write(updated, original)
+}
+
+// check runs the pre-save checks on a candidate config and returns it
+// serialized: the guard, the selector defaults, then the validator
+func (e *Editor) check(cfg map[string]any, original []byte) ([]byte, error) {
 	updated, err := marshalIndent(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to serialize config: %w", err)
+		return nil, fmt.Errorf("failed to serialize config: %w", err)
 	}
 
 	// Before anything else: nothing written through the app may give the
 	// elevated sing-box a program to run or a file to write (guard.go)
 	if err := checkNoNewRisky(original, cfg); err != nil {
-		return err
+		return nil, err
+	}
+	if err := checkSelectorDefaults(original, cfg); err != nil {
+		return nil, err
 	}
 	if e.validator != nil {
 		// Without sing-box.exe there is nothing to check with: saved as before
 		if err := e.validator(updated); err != nil && !errors.Is(err, domain.ErrSingBoxMissing) {
-			return fmt.Errorf("config validation failed: %w", err)
+			return nil, newCheckError(err, cfg)
 		}
 	}
+	return updated, nil
+}
 
+// write backs up the original config, archives it and writes the update
+func (e *Editor) write(updated, original []byte) error {
 	if err := os.WriteFile(e.path+".bak", original, 0644); err != nil {
 		return fmt.Errorf("failed to write config backup: %w", err)
 	}
@@ -165,11 +191,14 @@ func (e *Editor) CreateConfig(raw []byte) error {
 		}
 		return err
 	}
+	if err := checkSelectorDefaults(nil, cfg); err != nil {
+		return err
+	}
 	if e.validator != nil {
 		if err := e.validator(updated); errors.Is(err, domain.ErrSingBoxMissing) {
 			return errors.New("сначала скачайте sing-box (кнопка «Скачать sing-box» здесь же): первый конфиг проверяется им перед сохранением — ошибку в разделах, которых нет на этой странице, потом не исправить без администратора")
 		} else if err != nil {
-			return fmt.Errorf("config validation failed: %w", err)
+			return newCheckError(err, cfg)
 		}
 	}
 
@@ -338,25 +367,49 @@ func (e *Editor) RestoreVersion(name string) error {
 
 // AddOutbound inserts a single outbound into the config; see AddOutbounds.
 func (e *Editor) AddOutbound(outbound map[string]any) error {
-	return e.AddOutbounds([]map[string]any{outbound})
+	_, err := e.AddOutbounds([]map[string]any{outbound}, nil)
+	return err
 }
 
-// AddOutbounds inserts the outbounds into the config in one pass. An existing
-// outbound with the same tag is replaced; otherwise the outbound is appended.
-// Each tag is also registered in every selector/urltest group so it becomes
-// selectable. The previous config is kept next to the original as a .bak file.
-func (e *Editor) AddOutbounds(newOutbounds []map[string]any) error {
+// AddOutbounds inserts imported outbounds into the config in one pass. An
+// existing outbound with the same tag is replaced (re-importing a server
+// updates it, keeping a detour set on it) unless an import may not replace
+// it (importReplaceable: direct, block, dns, a group, the DPI-bypass
+// outbound, a subscription's node — reserved); then the imported one is
+// saved as "<tag> (N)" and listed in Renamed. New tags are registered in
+// every selector/urltest group so they become selectable. Outbounds the
+// config check refuses are left out and listed in Skipped (saveMerged); when
+// it refuses every one nothing is saved. The previous config is kept as .bak.
+func (e *Editor) AddOutbounds(newOutbounds []map[string]any, reserved []string) (*domain.AddResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	cfg, raw, err := e.load()
+	_, raw, err := e.load()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := upsertOutbounds(cfg, newOutbounds); err != nil {
-		return err
+	if err := requireTags(newOutbounds); err != nil {
+		return nil, err
 	}
-	return e.save(cfg, raw)
+
+	replaceable := importReplaceable(setOf(reserved))
+	var renamed []domain.TagRename
+	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming []map[string]any) error {
+		renamed = suffixTaken(cfg, incoming, replaceable)
+		return upsertOutbounds(cfg, incoming)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &domain.AddResult{Skipped: outcome.skipped, Changed: outcome.changed}
+	if len(outcome.kept) > 0 {
+		result.Renamed = renamed
+	}
+	for _, o := range outcome.kept {
+		result.Tags = append(result.Tags, tagString(o))
+	}
+	return result, nil
 }
 
 // upsertOutbounds applies the AddOutbounds merge to a loaded config in place:
@@ -379,6 +432,13 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
 			if existing["tag"] == tag {
 				if groupTypes[fmt.Sprint(existing["type"])] {
 					return fmt.Errorf("tag %q is already used by a %v group", tag, existing["type"])
+				}
+				// A detour is a local routing choice (the DPI chain, a hand-made
+				// chain), never part of a share link: it outlives the update
+				if _, has := outbound["detour"]; !has {
+					if detour, ok := existing["detour"]; ok {
+						outbound["detour"] = detour
+					}
 				}
 				outbounds[i] = any(outbound)
 				replaced = true
@@ -413,174 +473,151 @@ func upsertOutbounds(cfg map[string]any, newOutbounds []map[string]any) error {
 	return nil
 }
 
-// SyncOutbounds reconciles the set of outbounds owned by one subscription:
-// outbounds from ownedTags that are absent from newOutbounds are deleted
-// (including their selector/urltest registrations, detour references and
-// route references — the latter are repointed to a surviving outbound), the
-// rest of newOutbounds are added or replaced as in AddOutbounds. The file is
-// only rewritten when the config actually changed.
+// SyncOutbounds reconciles the set of outbounds owned by one subscription
+// with a fresh fetch:
+//   - an incoming name taken by an outbound the subscription does not own
+//     gets a " (N)" suffix (suffixTaken), stable from one refresh to the next;
+//   - an owned outbound the subscription renamed (the same server under a new
+//     name — providers put live counters into the names) keeps its place,
+//     the fields the app added and every reference, under the new tag
+//     (pairRenamed, applyRenames);
+//   - the other owned outbounds absent from newOutbounds are deleted,
+//     including their selector/urltest registrations and detour references;
+//     route references are repointed to a surviving outbound;
+//   - the rest of newOutbounds are added or replaced as in AddOutbounds.
+//
+// Outbounds the config check refuses are left out (see saveMerged). The file
+// is only rewritten when the config actually changed; NeedsRestart is false
+// when nothing but tags changed.
 func (e *Editor) SyncOutbounds(ownedTags []string, newOutbounds []map[string]any) (*domain.SyncResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	cfg, raw, err := e.load()
+	_, raw, err := e.load()
 	if err != nil {
 		return nil, err
 	}
-	before, err := marshalIndent(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize config: %w", err)
-	}
-
-	newTags := map[string]bool{}
-	for _, o := range newOutbounds {
-		tag, _ := o["tag"].(string)
-		if tag == "" {
-			return nil, fmt.Errorf("outbound has no tag")
-		}
-		newTags[tag] = true
-	}
-	owned := map[string]bool{}
-	for _, t := range ownedTags {
-		owned[t] = true
-	}
-
-	// Tags that existed before the sync, to report what was actually added
-	outbounds, _ := cfg["outbounds"].([]any)
-	presentBefore := map[string]bool{}
-	for _, item := range outbounds {
-		if o, ok := item.(map[string]any); ok {
-			if tag, _ := o["tag"].(string); tag != "" {
-				presentBefore[tag] = true
-			}
-		}
-	}
-
-	// Drop owned outbounds that disappeared from the subscription
-	removedSet := map[string]bool{}
-	kept := make([]any, 0, len(outbounds))
-	for _, item := range outbounds {
-		if o, ok := item.(map[string]any); ok {
-			tag, _ := o["tag"].(string)
-			if owned[tag] && !newTags[tag] {
-				removedSet[tag] = true
-				continue
-			}
-		}
-		kept = append(kept, item)
-	}
-	cfg["outbounds"] = kept
-
-	if err := upsertOutbounds(cfg, newOutbounds); err != nil {
+	if err := requireTags(newOutbounds); err != nil {
 		return nil, err
 	}
 
-	if len(removedSet) > 0 {
-		pruneOutboundReferences(cfg, removedSet, newOutbounds)
+	owned := setOf(ownedTags)
+	mine := func(o map[string]any) bool {
+		tag := tagString(o)
+		typ, _ := o["type"].(string)
+		return owned[tag] && !systemTypes[typ] && tag != config.DPIBypassTag
 	}
-
-	result := &domain.SyncResult{}
-	for _, o := range newOutbounds {
-		if tag, _ := o["tag"].(string); !presentBefore[tag] {
-			result.Added = append(result.Added, tag)
-		}
-	}
-	for tag := range removedSet {
-		result.Removed = append(result.Removed, tag)
-	}
-	sort.Strings(result.Removed)
-
-	after, err := marshalIndent(cfg)
+	var result domain.SyncResult
+	outcome, err := e.saveMerged(raw, newOutbounds, func(cfg map[string]any, incoming []map[string]any) error {
+		var err error
+		result, err = syncMerge(cfg, incoming, mine)
+		return err
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize config: %w", err)
+		return nil, err
 	}
-	if bytes.Equal(before, after) {
-		return result, nil
+	if len(newOutbounds) > 0 && len(outcome.kept) == 0 {
+		// Every one refused: nothing saved, the owned outbounds stay
+		return &domain.SyncResult{Skipped: outcome.skipped}, nil
 	}
-	result.Changed = true
-	return result, e.save(cfg, raw)
+
+	for _, o := range outcome.kept {
+		result.Tags = append(result.Tags, tagString(o))
+	}
+	result.Skipped = outcome.skipped
+	result.Changed = outcome.changed
+	result.NeedsRestart = result.NeedsRestart && outcome.changed
+	return &result, nil
 }
 
-// pruneOutboundReferences removes every reference to the removed tags:
-// selector/urltest membership, detour fields, and route rules/final (those
-// are repointed to the first new outbound, else any surviving proxy, else a
-// direct outbound; a rule with no usable replacement is dropped).
-func pruneOutboundReferences(cfg map[string]any, removed map[string]bool, newOutbounds []map[string]any) {
-	outbounds, _ := cfg["outbounds"].([]any)
+// syncMerge applies a subscription's fresh outbounds to a loaded config in
+// place (see SyncOutbounds); mine tells the outbounds the subscription owns
+// and may replace or delete
+func syncMerge(cfg map[string]any, incoming []map[string]any, mine func(map[string]any) bool) (domain.SyncResult, error) {
+	var result domain.SyncResult
+	original, err := cloneConfig(cfg)
+	if err != nil {
+		return result, err
+	}
 
+	result.Suffixed = suffixTaken(cfg, incoming, mine)
+	newTags := map[string]bool{}
+	for _, o := range incoming {
+		newTags[tagString(o)] = true
+	}
+
+	// Owned outbounds the subscription no longer lists, and the incoming ones
+	// with a name the config does not know yet
+	outbounds, _ := cfg["outbounds"].([]any)
+	presentBefore := map[string]bool{}
+	var dropped []map[string]any
 	for _, item := range outbounds {
 		o, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		if groupTypes[fmt.Sprint(o["type"])] {
-			members, _ := o["outbounds"].([]any)
-			filtered := make([]any, 0, len(members))
-			for _, m := range members {
-				if tag, _ := m.(string); !removed[tag] {
-					filtered = append(filtered, m)
-				}
-			}
-			o["outbounds"] = filtered
+		tag := tagString(o)
+		presentBefore[tag] = true
+		if mine(o) && !newTags[tag] {
+			dropped = append(dropped, o)
 		}
-		if detour, _ := o["detour"].(string); removed[detour] {
-			delete(o, "detour")
+	}
+	var appearing []map[string]any
+	for _, o := range incoming {
+		if !presentBefore[tagString(o)] {
+			appearing = append(appearing, o)
 		}
 	}
 
-	// Pick the replacement for route references that pointed at removed tags
-	replacement := ""
-	if len(newOutbounds) > 0 {
-		replacement, _ = newOutbounds[0]["tag"].(string)
-	}
-	if replacement == "" {
-		proxies := proxyTags(cfg)
-		for _, item := range outbounds {
-			if o, ok := item.(map[string]any); ok {
-				if tag, _ := o["tag"].(string); proxies[tag] {
-					replacement = tag
-					break
-				}
-			}
+	// A renamed node takes its new name everywhere first; replacing it by
+	// tag (upsertOutbounds) then keeps its position and its detour. The
+	// others are removed (their tags taken before the renaming changes the
+	// outbounds in place)
+	renames, renamed := pairRenamed(dropped, appearing)
+	removed := map[string]bool{}
+	for _, o := range dropped {
+		if tag := tagString(o); renames[tag] == "" {
+			removed[tag] = true
 		}
 	}
-	if replacement == "" {
-		for _, item := range outbounds {
-			if o, ok := item.(map[string]any); ok && o["type"] == "direct" {
-				replacement, _ = o["tag"].(string)
-				break
-			}
+	applyRenames(cfg, renames)
+	result.Renamed = renamed
+	outbounds, _ = cfg["outbounds"].([]any)
+	kept := make([]any, 0, len(outbounds))
+	for _, item := range outbounds {
+		if o, ok := item.(map[string]any); ok && removed[tagString(o)] {
+			continue
 		}
+		kept = append(kept, item)
+	}
+	cfg["outbounds"] = kept
+
+	if err := upsertOutbounds(cfg, incoming); err != nil {
+		return result, err
+	}
+	if len(removed) > 0 {
+		pruneOutboundReferences(cfg, removed, incoming)
 	}
 
-	route, _ := cfg["route"].(map[string]any)
-	if route == nil {
-		return
+	renamedTo := map[string]bool{}
+	for _, r := range renamed {
+		renamedTo[r.To] = true
 	}
-	rules, _ := route["rules"].([]any)
-	keptRules := make([]any, 0, len(rules))
-	for _, item := range rules {
-		rule, ok := item.(map[string]any)
-		if ok {
-			if out, _ := rule["outbound"].(string); removed[out] {
-				if replacement == "" {
-					continue // no outbound left to point at — drop the rule
-				}
-				rule["outbound"] = replacement
-			}
-		}
-		keptRules = append(keptRules, item)
-	}
-	if rules != nil {
-		route["rules"] = keptRules
-	}
-	if final, _ := route["final"].(string); removed[final] {
-		if replacement == "" {
-			delete(route, "final")
-		} else {
-			route["final"] = replacement
+	for _, o := range incoming {
+		if tag := tagString(o); !presentBefore[tag] && !renamedTo[tag] {
+			result.Added = append(result.Added, tag)
 		}
 	}
+	for tag := range removed {
+		result.Removed = append(result.Removed, tag)
+	}
+	sort.Strings(result.Removed)
+
+	// Nothing but new names: the running sing-box works the same (the app
+	// never addresses an outbound by tag at runtime), no restart needed
+	applyRenames(original, renames)
+	result.NeedsRestart = canonical(original) != canonical(cfg)
+	return result, nil
 }
 
 // ReadSection returns a config section as pretty-printed JSON text for

@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,13 +45,13 @@ func newSubsTestServer(t *testing.T, clip TextSource) (*Server, string, *configf
 	editor := configfile.New(configPath)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	store := subscription.NewStore(filepath.Join(dir, "subscriptions.json"))
+	importer := domain.NewImportService(sharelink.Parser{}, editor, store, vpn)
 
 	fetch := func(url string) (string, error) {
 		return "vless://u1@a.example.com:443?security=tls#sub-node-1\n" +
 			"vless://u2@b.example.com:443?security=tls#sub-node-2", nil
 	}
-	store := subscription.NewStore(filepath.Join(dir, "subscriptions.json"))
 	subs := domain.NewSubscriptionService(store, fetch, sharelink.Parser{}, editor, vpn)
 
 	server := New(settings, importer, nil, nil, subs, nil, Sources{Clipboard: clip}, LogAccess{})
@@ -164,6 +166,56 @@ func TestSubscriptionAddErrorRedacted(t *testing.T) {
 		t.Fatalf("status %d, %s", status, raw)
 	}
 	assertNoSubURL(t, "add error", raw)
+}
+
+// An import never replaces a subscription's node: a link named like one is
+// saved under another name and the answer says so, as it names the links it
+// left out — by name and reason, never the link (it carries the credentials)
+func TestImportKeepsSubscriptionNodesApart(t *testing.T) {
+	clipText := ""
+	server, base, editor, _ := newSubsTestServer(t, func() (string, error) { return clipText, nil })
+	session := login(t, server)
+	status, raw := callRaw(t, http.MethodPost, base+"/api/subscriptions/add", session, map[string]string{"url": secretSubURL})
+	if status != http.StatusOK || !strings.Contains(raw, `"skipped":[]`) || !strings.Contains(raw, `"suffixed":[]`) {
+		t.Fatalf("add: status %d, %s", status, raw)
+	}
+
+	clipText = "vless://11111111-2222-4333-8444-555555555555@192.0.2.50:443?security=tls#sub-node-1\n" +
+		"vless://@192.0.2.51:443?security=tls#no-uuid"
+	status, raw = callRaw(t, http.MethodPost, base+"/api/import", session, map[string]string{"source": "clipboard"})
+	if status != http.StatusOK {
+		t.Fatalf("import: status %d, %s", status, raw)
+	}
+	if strings.Contains(raw, "11111111-2222") || strings.Contains(raw, "192.0.2.5") {
+		t.Fatalf("the answer quotes a link: %s", raw)
+	}
+	var data struct {
+		Tags    []string             `json:"tags"`
+		Renamed []domain.TagRename   `json:"renamed"`
+		Skipped []domain.SkippedNode `json:"skipped"`
+	}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(data.Tags, []string{"sub-node-1 (2)"}) ||
+		!reflect.DeepEqual(data.Renamed, []domain.TagRename{{From: "sub-node-1", To: "sub-node-1 (2)"}}) {
+		t.Fatalf("import answer = %s", raw)
+	}
+	if len(data.Skipped) != 1 || data.Skipped[0].Name != "no-uuid" || data.Skipped[0].Reason == "" {
+		t.Fatalf("skipped = %+v", data.Skipped)
+	}
+
+	list, err := editor.ListOutbounds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tags []string
+	for _, o := range list {
+		tags = append(tags, o.Tag)
+	}
+	if !strings.Contains(strings.Join(tags, ","), "sub-node-1,sub-node-2") || !outboundTags(t, editor)["sub-node-1 (2)"] {
+		t.Fatalf("outbounds = %v", tags)
+	}
 }
 
 // TestImportDetectsSubscriptionURL checks that a clipboard import of a bare

@@ -48,7 +48,7 @@ func newTestServer(t *testing.T, clip TextSource) (*Server, string) {
 	editor := configfile.New(path)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	importer := domain.NewImportService(sharelink.Parser{}, editor, nil, vpn)
 
 	server := New(settings, importer, nil, nil, nil, nil, Sources{Clipboard: clip}, LogAccess{})
 	return server, start(t, server)
@@ -174,7 +174,7 @@ func TestVPNEndpointStartsAndStops(t *testing.T) {
 	pm := &nopProcessManager{}
 	st := &nopStorage{}
 	vpn := domain.NewVPNService(pm, st)
-	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, nil, vpn),
 		nil, nil, nil, nil, Sources{}, LogAccess{})
 	base := start(t, server)
 	session := login(t, server)
@@ -212,7 +212,7 @@ func TestConfigEndpointReportsStarting(t *testing.T) {
 	editor := configfile.New(path)
 	// Down, but the stored intent says "running"
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{state: true})
-	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, nil, vpn),
 		nil, nil, nil, nil, Sources{}, LogAccess{})
 	base := start(t, server)
 

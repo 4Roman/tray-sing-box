@@ -34,7 +34,7 @@ func newAppUpdateServer(t *testing.T, repo *fakeAppRepo) (*Server, string, chan 
 	}
 	editor := configfile.New(path)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
-	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, vpn),
+	server := New(domain.NewSettingsService(editor, vpn), domain.NewImportService(sharelink.Parser{}, editor, nil, vpn),
 		nil, nil, nil, nil, Sources{}, LogAccess{})
 
 	relaunched := make(chan struct{}, 1)

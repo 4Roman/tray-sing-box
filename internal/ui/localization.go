@@ -42,8 +42,14 @@ const (
 	SubsLineOK          = "%s — серверов: %d"
 	SubsLineAdded       = ", новых: %d"
 	SubsLineRemoved     = ", удалено: %d"
+	SubsLineRenamed     = ", переименовано: %d"
 	SubsLineError       = "%s — ошибка: %v"
+	SubsLineSuffixed    = "\n  имя уже занято, сохранены под другим: %s"
+	SubsLineSkipped     = "\n  пропущены:\n%s"
 	SubsRestartedSuffix = "\n\nVPN перезапущен"
+	// An unattended refresh (every few hours) reports each problem once
+	SubsAutoTitle = "Автообновление подписок"
+	SubsAutoMsg   = "При автоматическом обновлении подписок:\n\n%s\n\nЭто сообщение не повторится, пока проблема не изменится. Обновить вручную — «Обновить подписки» в меню или раздел «Подписки» в настройках."
 
 	DPITitle           = "Обход DPI (zapret)"
 	DPITooltip         = "Подключаться к VPN-серверу через zapret в Docker для обхода DPI"
@@ -68,12 +74,14 @@ const (
 	// Appended to the "auto-restart gave up" error; "yes" records the stop
 	VPNGiveUpQuestion = "\n\nВыключить VPN, чтобы приложение больше не пыталось его запустить (в том числе при следующем входе в Windows)?"
 
-	ImportSuccessTitle     = "Импорт выполнен"
-	ImportErrorTitle       = "Ошибка импорта"
-	ImportSuccessRestarted = "Сервер «%s» импортирован, VPN перезапущен"
-	ImportSuccessAdded     = "Сервер «%s» импортирован"
-	ImportManyRestarted    = "Импортировано серверов: %d, VPN перезапущен\n\n%s"
-	ImportManyAdded        = "Импортировано серверов: %d\n\n%s"
+	ImportSuccessTitle  = "Импорт выполнен"
+	ImportErrorTitle    = "Ошибка импорта"
+	ImportOneAdded      = "Сервер «%s» импортирован"
+	ImportManyAdded     = "Импортировано серверов: %d"
+	ImportSomeAdded     = "Импортировано серверов: %d из %d"
+	ImportRestarted     = ", VPN перезапущен"
+	ImportRenamedHeader = "Имя уже занято — сохранены под другим:"
+	ImportSkippedHeader = "Пропущены:"
 
 	QuitTitle   = "Выход"
 	QuitTooltip = "Выйти из программы"

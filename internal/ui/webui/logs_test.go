@@ -31,7 +31,7 @@ func TestLogsEndpoint(t *testing.T) {
 	editor := configfile.New(configPath)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	importer := domain.NewImportService(sharelink.Parser{}, editor, nil, vpn)
 
 	reader := logtail.New(dir)
 	server := New(settings, importer, nil, nil, nil, nil, Sources{}, LogAccess{

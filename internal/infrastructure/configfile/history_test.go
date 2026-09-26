@@ -30,7 +30,7 @@ func historyFiles(t *testing.T, configPath string) []string {
 func TestSaveArchivesPreviousVersion(t *testing.T) {
 	editor, path := newSyncEditor(t)
 
-	if err := editor.AddOutbounds([]map[string]any{{"type": "vless", "tag": "new-node", "server": "n.example.com"}}); err != nil {
+	if err := editor.AddOutbound(map[string]any{"type": "vless", "tag": "new-node", "server": "n.example.com"}); err != nil {
 		t.Fatalf("AddOutbounds: %v", err)
 	}
 
@@ -54,10 +54,10 @@ func TestListHistoryAndRestore(t *testing.T) {
 	editor, path := newSyncEditor(t)
 
 	// Two saves -> two archived versions
-	if err := editor.AddOutbounds([]map[string]any{{"type": "vless", "tag": "v1", "server": "1.example.com"}}); err != nil {
+	if err := editor.AddOutbound(map[string]any{"type": "vless", "tag": "v1", "server": "1.example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := editor.AddOutbounds([]map[string]any{{"type": "vless", "tag": "v2", "server": "2.example.com"}}); err != nil {
+	if err := editor.AddOutbound(map[string]any{"type": "vless", "tag": "v2", "server": "2.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +110,7 @@ func TestHistoryPruning(t *testing.T) {
 
 	for i := 0; i < config.ConfigHistoryKeep+5; i++ {
 		out := map[string]any{"type": "vless", "tag": "n", "server": fmt.Sprintf("s%d.example.com", i)}
-		if err := editor.AddOutbounds([]map[string]any{out}); err != nil {
+		if err := editor.AddOutbound(out); err != nil {
 			t.Fatal(err)
 		}
 	}

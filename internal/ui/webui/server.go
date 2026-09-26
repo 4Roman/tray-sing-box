@@ -833,7 +833,8 @@ func subscriptionEntry(rawURL string) map[string]any {
 }
 
 // subscriptionResponse converts a domain result into the JSON shape the page
-// renders (errors become strings)
+// renders (errors become strings). Skipped nodes are named by their name and
+// the reason, never the link.
 func subscriptionResponse(result *domain.SubscriptionResult) map[string]any {
 	updates := make([]map[string]any, 0, len(result.Updates))
 	for _, u := range result.Updates {
@@ -841,12 +842,23 @@ func subscriptionResponse(result *domain.SubscriptionResult) map[string]any {
 		entry["count"] = len(u.Tags)
 		entry["added"] = len(u.Added)
 		entry["removed"] = len(u.Removed)
+		entry["renamed"] = len(u.Renamed)
+		entry["suffixed"] = nonNil(u.Suffixed)
+		entry["skipped"] = nonNil(u.Skipped)
 		if u.Err != nil {
 			entry["error"] = u.Err.Error()
 		}
 		updates = append(updates, entry)
 	}
 	return map[string]any{"updates": updates, "restarted": result.Restarted}
+}
+
+// nonNil makes an empty list a JSON [] rather than null: the page iterates it
+func nonNil[T any](list []T) []T {
+	if list == nil {
+		return []T{}
+	}
+	return list
 }
 
 // subscriptionURL finds the saved URL behind a subscription ID. Callers hold
@@ -1032,6 +1044,8 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tags":      result.Tags,
+		"renamed":   nonNil(result.Renamed),
+		"skipped":   nonNil(result.Skipped),
 		"restarted": result.Restarted,
 	})
 }

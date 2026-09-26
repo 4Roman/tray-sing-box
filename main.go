@@ -183,10 +183,12 @@ func main() {
 	vpnService := domain.NewVPNService(processManager, storageInstance)
 	vpnService.SessionEnding = process.IsSessionEnding
 
-	// Create outbound import service (share links from clipboard / screen QR)
+	// Create outbound import service (share links from clipboard / screen QR);
+	// it never replaces a subscription's node, so it reads their list too
 	configEditor := configfile.New(layout.ConfigFile())
 	configEditor.SetValidator(singboxcheck.NewValidator(layout.Bin, layout.Data))
-	importService := domain.NewImportService(sharelink.Parser{}, configEditor, vpnService)
+	subscriptionStore := subscription.NewStore(layout.Subscriptions())
+	importService := domain.NewImportService(sharelink.Parser{}, configEditor, subscriptionStore, vpnService)
 	importSources := app.ImportSources{
 		Clipboard: clipboard.ReadText,
 		ScreenQR:  qr.ScanScreen,
@@ -201,7 +203,6 @@ func main() {
 	}, configEditor, vpnService)
 
 	// Proxy subscriptions: saved URLs refreshed on demand and on a timer
-	subscriptionStore := subscription.NewStore(layout.Subscriptions())
 	subscriptionService := domain.NewSubscriptionService(subscriptionStore, subscription.Fetch, sharelink.Parser{}, configEditor, vpnService)
 
 	// DPI bypass: zapret running in a Docker container, chained into the config

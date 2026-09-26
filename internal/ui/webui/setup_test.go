@@ -20,7 +20,7 @@ func TestFirstConfigFromThePage(t *testing.T) {
 	editor := configfile.New(path)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	importer := domain.NewImportService(sharelink.Parser{}, editor, nil, vpn)
 	server := New(settings, importer, nil, nil, nil, nil, Sources{}, LogAccess{})
 	base := start(t, server)
 	session := login(t, server)

@@ -34,7 +34,7 @@ func newDPITestServer(t *testing.T) (*Server, string) {
 	editor := configfile.New(path)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	importer := domain.NewImportService(sharelink.Parser{}, editor, nil, vpn)
 	dpi := domain.NewDPIBypassService(&stubDPIManager{}, editor, vpn)
 
 	server := New(settings, importer, nil, dpi, nil, nil, Sources{}, LogAccess{})

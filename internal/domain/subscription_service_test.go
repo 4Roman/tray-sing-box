@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeSubStore struct {
@@ -57,9 +59,12 @@ func (f *fakeSyncStore) SyncOutbounds(owned []string, outbounds []map[string]any
 		key = tags[0]
 	}
 	if r, ok := f.results[key]; ok {
+		if r.Tags == nil {
+			r.Tags = tags
+		}
 		return r, nil
 	}
-	return &SyncResult{Added: tags, Changed: true}, nil
+	return &SyncResult{Tags: tags, Added: tags, Changed: true, NeedsRestart: true}, nil
 }
 
 // fetcherFor maps URL -> body or error
@@ -76,21 +81,27 @@ func fetcherFor(bodies map[string]string, errs map[string]error) SubscriptionFet
 	}
 }
 
-// linkParser maps each line of the body to an outbound tagged with the line
+// linkParser maps each line of the body to an outbound tagged with the line;
+// a line "skip:<name>:<reason>" is a link it leaves out
 type linkParser struct{}
 
 func (linkParser) Parse(text string) ([]map[string]any, []SkippedNode, error) {
 	var outbounds []map[string]any
+	var skipped []SkippedNode
 	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
 		if line == "" {
+			continue
+		}
+		if parts := strings.SplitN(line, ":", 3); len(parts) == 3 && parts[0] == "skip" {
+			skipped = append(skipped, SkippedNode{Name: parts[1], Reason: parts[2]})
 			continue
 		}
 		outbounds = append(outbounds, map[string]any{"tag": line, "type": "vless"})
 	}
 	if len(outbounds) == 0 {
-		return nil, nil, errors.New("no links")
+		return nil, skipped, errors.New("no links")
 	}
-	return outbounds, nil, nil
+	return outbounds, skipped, nil
 }
 
 func TestIsSubscriptionURL(t *testing.T) {
@@ -233,7 +244,7 @@ func TestNoRestartWhenNothingChanged(t *testing.T) {
 
 func TestRemoveSubscription(t *testing.T) {
 	store := &fakeSubStore{subs: []Subscription{{URL: "https://p.example/sub", Tags: []string{"node-a", "node-b"}}}}
-	sync := &fakeSyncStore{results: map[string]*SyncResult{"": {Removed: []string{"node-a", "node-b"}, Changed: true}}}
+	sync := &fakeSyncStore{results: map[string]*SyncResult{"": {Removed: []string{"node-a", "node-b"}, Changed: true, NeedsRestart: true}}}
 	pm := &fakeProcessManager{running: true}
 	svc := NewSubscriptionService(store, nil, linkParser{}, sync, NewVPNService(pm, &fakeStorage{state: true}))
 
@@ -339,5 +350,166 @@ func TestSubscriptionMessagesRedactURL(t *testing.T) {
 			t.Fatal("expected an error")
 		}
 		assertRedacted("error", err.Error())
+	}
+}
+
+// The subscription owns the tags its nodes were saved under (a node whose
+// name was taken gets a suffix), and the update names the nodes left out:
+// the parser's and the ones the config check refused
+func TestRefreshRecordsSavedTagsAndSkipped(t *testing.T) {
+	const u = "https://p.example/sub"
+	store := &fakeSubStore{}
+	sync := &fakeSyncStore{results: map[string]*SyncResult{"direct": {
+		Tags:         []string{"node-b", "direct (2)"},
+		Added:        []string{"direct (2)", "node-b"},
+		Suffixed:     []TagRename{{From: "direct", To: "direct (2)"}},
+		Skipped:      []SkippedNode{{Name: "bad", Reason: "sing-box не принимает: x"}},
+		Changed:      true,
+		NeedsRestart: true,
+	}}}
+	fetch := fetcherFor(map[string]string{u: "direct\nnode-b\nbad\nskip:hy2-hop:список портов"}, nil)
+	svc := NewSubscriptionService(store, fetch, linkParser{}, sync, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	result, err := svc.Add(u)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if got := store.subs[0].Tags; !reflect.DeepEqual(got, []string{"direct (2)", "node-b"}) {
+		t.Fatalf("owned tags = %v", got)
+	}
+	update := result.Updates[0]
+	want := []SkippedNode{{Name: "hy2-hop", Reason: "список портов"}, {Name: "bad", Reason: "sing-box не принимает: x"}}
+	if !reflect.DeepEqual(update.Skipped, want) || len(update.Suffixed) != 1 || !update.NewProblem {
+		t.Fatalf("update = %+v", update)
+	}
+}
+
+// refuseAll is a config store whose check refuses every node
+type refuseAll struct{ calls int }
+
+func (r *refuseAll) SyncOutbounds(owned []string, outbounds []map[string]any) (*SyncResult, error) {
+	r.calls++
+	result := &SyncResult{}
+	for _, o := range outbounds {
+		result.Skipped = append(result.Skipped, SkippedNode{Name: o["tag"].(string), Reason: "sing-box не принимает: x"})
+	}
+	return result, nil
+}
+
+// Every node refused: an error naming them, and the servers of the last
+// refresh stay the subscription's
+func TestRefreshAllRefusedKeepsTags(t *testing.T) {
+	const u = "https://p.example/sub"
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"old-1"}}}}
+	fetch := fetcherFor(map[string]string{u: "new-1"}, nil)
+	pm := &fakeProcessManager{running: true}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &refuseAll{}, NewVPNService(pm, &fakeStorage{state: true}))
+
+	result, err := svc.UpdateAll()
+	if err != nil {
+		t.Fatalf("UpdateAll: %v", err)
+	}
+	if e := result.Updates[0].Err; e == nil || e.Error() != "ни один сервер подписки не подошёл:\n«new-1» — sing-box не принимает: x" {
+		t.Fatalf("error = %v", e)
+	}
+	if !reflect.DeepEqual(store.subs[0].Tags, []string{"old-1"}) || result.Restarted {
+		t.Fatalf("tags %v, restarted %v", store.subs[0].Tags, result.Restarted)
+	}
+	if _, err := svc.Update(u); err == nil {
+		t.Fatal("a targeted update must fail loudly")
+	}
+}
+
+// Nothing but renamed nodes: saved, not restarted
+func TestRenamesOnlyDoNotRestart(t *testing.T) {
+	const u = "https://p.example/sub"
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"DE|12GB"}}}}
+	sync := &fakeSyncStore{results: map[string]*SyncResult{"DE|11GB": {
+		Renamed: []TagRename{{From: "DE|12GB", To: "DE|11GB"}},
+		Changed: true,
+	}}}
+	pm := &fakeProcessManager{running: true}
+	svc := NewSubscriptionService(store, fetcherFor(map[string]string{u: "DE|11GB"}, nil), linkParser{}, sync, NewVPNService(pm, &fakeStorage{state: true}))
+
+	result, err := svc.UpdateAll()
+	if err != nil {
+		t.Fatalf("UpdateAll: %v", err)
+	}
+	if result.Restarted || pm.startCount() != 0 {
+		t.Fatal("VPN restarted for renamed nodes")
+	}
+	if !reflect.DeepEqual(store.subs[0].Tags, []string{"DE|11GB"}) || len(result.Updates[0].Renamed) != 1 {
+		t.Fatalf("tags %v, update %+v", store.subs[0].Tags, result.Updates[0])
+	}
+}
+
+// An unattended refresh reports a problem once: the same problem at the
+// next refresh is not new — also when the node names carry live counters —,
+// a different one is, and one that went away and came back is again
+func TestNewProblemOncePerProblem(t *testing.T) {
+	const u = "https://p.example/sub"
+	body := "node-a\nskip:info|12.4GB:тип ссылки не поддерживается"
+	fetch := func(string) (string, error) { return body, nil }
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	svc := NewSubscriptionService(store, fetch, linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	newProblem := func() bool {
+		t.Helper()
+		result, err := svc.UpdateAll()
+		if err != nil {
+			t.Fatalf("UpdateAll: %v", err)
+		}
+		return result.Updates[0].NewProblem
+	}
+
+	if !newProblem() {
+		t.Fatal("first problem not new")
+	}
+	body = "node-a\nskip:info|11.9GB:тип ссылки не поддерживается"
+	if newProblem() {
+		t.Fatal("the same problem reported again")
+	}
+	body = "node-a\nskip:x:другая причина"
+	if !newProblem() {
+		t.Fatal("a different problem not reported")
+	}
+	body = "node-a"
+	if newProblem() || store.subs[0].Problem != "" {
+		t.Fatalf("no problem, but NewProblem or a recorded one (%q)", store.subs[0].Problem)
+	}
+	body = "node-a\nskip:x:другая причина"
+	if !newProblem() {
+		t.Fatal("a problem that came back not reported")
+	}
+
+	// An error naming nodes: their live counters do not make it new
+	refusing := NewSubscriptionService(store, fetch, linkParser{}, &refuseAll{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+	body = "DE|12.4GB"
+	if r, _ := refusing.UpdateAll(); !r.Updates[0].NewProblem {
+		t.Fatal("refusal not reported")
+	}
+	body = "DE|11.9GB"
+	if r, _ := refusing.UpdateAll(); r.Updates[0].NewProblem {
+		t.Fatal("the same refusal reported again under another counter")
+	}
+}
+
+// A failed download is a problem only once the servers are getting old (at
+// logon the network is often not up yet), and it does not wipe out what an
+// earlier refresh recorded
+func TestFetchFailureReportedWhenStale(t *testing.T) {
+	const u = "https://p.example/sub"
+	store := &fakeSubStore{subs: []Subscription{{URL: u, Tags: []string{"a"}, Updated: time.Now(), Problem: "earlier"}}}
+	svc := NewSubscriptionService(store, fetcherFor(nil, map[string]error{u: errors.New("timeout")}), linkParser{}, &fakeSyncStore{}, NewVPNService(&fakeProcessManager{}, &fakeStorage{}))
+
+	result, _ := svc.UpdateAll()
+	if result.Updates[0].NewProblem || store.subs[0].Problem != "earlier" {
+		t.Fatalf("a fresh subscription's failed download: %+v, problem %q", result.Updates[0], store.subs[0].Problem)
+	}
+	store.subs[0].Updated = time.Now().Add(-48 * time.Hour)
+	if result, _ = svc.UpdateAll(); !result.Updates[0].NewProblem {
+		t.Fatal("a stale subscription's failed download not reported")
+	}
+	if result, _ = svc.UpdateAll(); result.Updates[0].NewProblem {
+		t.Fatal("the same failure reported again")
 	}
 }

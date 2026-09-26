@@ -132,7 +132,7 @@ func newUpdateTestServer(t *testing.T, repo *fakeBinaryRepo) (*Server, string) {
 	editor := configfile.New(path)
 	vpn := domain.NewVPNService(&nopProcessManager{}, &nopStorage{})
 	settings := domain.NewSettingsService(editor, vpn)
-	importer := domain.NewImportService(sharelink.Parser{}, editor, vpn)
+	importer := domain.NewImportService(sharelink.Parser{}, editor, nil, vpn)
 	var updater *domain.UpdateService
 	if repo != nil {
 		updater = domain.NewUpdateService(repo, vpn)

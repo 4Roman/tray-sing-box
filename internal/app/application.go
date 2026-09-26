@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -313,8 +312,8 @@ func (a *Application) RelaunchAfterUpdate() {
 }
 
 // subscriptionLoop refreshes the saved subscriptions shortly after start and
-// then on a fixed interval. Results are only logged: an unattended refresh
-// must not pop dialogs, and failures will repeat on the next tick anyway.
+// then on a fixed interval. Results are logged; a problem is shown once (see
+// autoRefreshSubscriptions).
 func (a *Application) subscriptionLoop() {
 	time.Sleep(config.SubscriptionStartupDelay * time.Second)
 	for {
@@ -323,6 +322,13 @@ func (a *Application) subscriptionLoop() {
 	}
 }
 
+// autoRefreshSubscriptions refreshes every subscription. A problem the user
+// has not been told about yet (SubscriptionUpdate.NewProblem: a failure, or
+// nodes left out, that differs from what the previous refresh found) gets
+// one popup; the same problem again does not — an unattended refresh must
+// not nag every few hours, but a subscription that silently stopped updating
+// (one odd node refused, the provider's link gone) would leave the user on
+// servers the provider has long rotated out.
 func (a *Application) autoRefreshSubscriptions() {
 	subs, err := a.subscriptionService.List()
 	if err != nil {
@@ -333,22 +339,28 @@ func (a *Application) autoRefreshSubscriptions() {
 		return
 	}
 
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
-
-	result, err := a.subscriptionService.UpdateAll()
-	if err != nil {
-		log.Printf("Subscription auto-refresh failed: %v", err)
-		return
-	}
-	for _, u := range result.Updates {
-		if u.Err != nil {
-			log.Printf("Subscription auto-refresh: %s: %v", domain.RedactURL(u.URL), u.Err)
+	a.runLocked(func() popup {
+		result, err := a.subscriptionService.UpdateAll()
+		if err != nil {
+			log.Printf("Subscription auto-refresh failed: %v", err)
+			return nil
 		}
-	}
-	if a.trayUI != nil {
-		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-	}
+		for _, u := range result.Updates {
+			if u.Err != nil {
+				log.Printf("Subscription auto-refresh: %s: %v", domain.RedactURL(u.URL), u.Err)
+			}
+		}
+		if a.trayUI != nil {
+			a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+		}
+		report := ui.AutoRefreshReport(result)
+		if report == "" {
+			return nil
+		}
+		// From a goroutine: the loop must not wait for the popup to be
+		// dismissed (it may sit there for hours)
+		return func() { go ui.ShowError(ui.SubsAutoTitle, report) }
+	})
 }
 
 // connectivityLoop periodically verifies traffic flows while the VPN runs
@@ -473,7 +485,7 @@ func (a *Application) handleImport(source TextSource) {
 				return errorPopup(ui.SubsErrorTitle, err)
 			}
 			a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-			return infoPopup(ui.SubsAddedTitle, subscriptionMessage(result))
+			return infoPopup(ui.SubsAddedTitle, ui.SubscriptionMessage(result))
 		}
 
 		result, err := a.importService.ImportFromText(text)
@@ -483,7 +495,7 @@ func (a *Application) handleImport(source TextSource) {
 		}
 
 		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-		return infoPopup(ui.ImportSuccessTitle, importMessage(result))
+		return infoPopup(ui.ImportSuccessTitle, ui.ImportMessage(result))
 	})
 }
 
@@ -512,21 +524,6 @@ func (a *Application) runLocked(op func() popup) {
 	}
 }
 
-// importMessage formats the popup text for a finished import
-func importMessage(result *domain.ImportResult) string {
-	if len(result.Tags) == 1 {
-		if result.Restarted {
-			return fmt.Sprintf(ui.ImportSuccessRestarted, result.Tags[0])
-		}
-		return fmt.Sprintf(ui.ImportSuccessAdded, result.Tags[0])
-	}
-	list := strings.Join(result.Tags, "\n")
-	if result.Restarted {
-		return fmt.Sprintf(ui.ImportManyRestarted, len(result.Tags), list)
-	}
-	return fmt.Sprintf(ui.ImportManyAdded, len(result.Tags), list)
-}
-
 // handleUpdateSubscriptions refreshes all saved subscriptions on demand.
 // Runs outside the event loop: downloads take a while and the message box
 // blocks until dismissed.
@@ -548,34 +545,8 @@ func (a *Application) handleUpdateSubscriptions() {
 		}
 
 		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
-		return infoPopup(ui.SubsUpdateDoneTitle, subscriptionMessage(result))
+		return infoPopup(ui.SubsUpdateDoneTitle, ui.SubscriptionMessage(result))
 	})
-}
-
-// subscriptionMessage formats the popup text for finished subscription work.
-// Subscriptions are named by their redacted URL: the full one carries the
-// provider's access token.
-func subscriptionMessage(result *domain.SubscriptionResult) string {
-	var lines []string
-	for _, u := range result.Updates {
-		if u.Err != nil {
-			lines = append(lines, fmt.Sprintf(ui.SubsLineError, domain.RedactURL(u.URL), u.Err))
-			continue
-		}
-		line := fmt.Sprintf(ui.SubsLineOK, domain.RedactURL(u.URL), len(u.Tags))
-		if len(u.Added) > 0 {
-			line += fmt.Sprintf(ui.SubsLineAdded, len(u.Added))
-		}
-		if len(u.Removed) > 0 {
-			line += fmt.Sprintf(ui.SubsLineRemoved, len(u.Removed))
-		}
-		lines = append(lines, line)
-	}
-	message := strings.Join(lines, "\n")
-	if result.Restarted {
-		message += ui.SubsRestartedSuffix
-	}
-	return message
 }
 
 // handleUpdate downloads and installs the latest sing-box release.

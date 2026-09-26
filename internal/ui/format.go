@@ -1,8 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"tray-sing-box/internal/domain"
 )
 
 // ShowVersion writes a version the same way everywhere: the build stamp
@@ -48,4 +51,104 @@ func PlainNotes(md string) string {
 		text = strings.TrimSpace(string([]rune(text)[:notesLimit])) + "…"
 	}
 	return text
+}
+
+// skippedLimit bounds the lists of skipped nodes in a popup: a message box
+// grows with its text and has no scroll bar (the settings page lists all)
+const skippedLimit = 10
+
+// ImportMessage is the popup text for a finished import: the servers
+// imported, the ones saved under another name (theirs was taken), and the
+// links left out with the reason
+func ImportMessage(result *domain.ImportResult) string {
+	total := len(result.Tags) + len(result.Skipped)
+	var message string
+	switch {
+	case len(result.Tags) == 1 && total == 1:
+		message = fmt.Sprintf(ImportOneAdded, result.Tags[0])
+	case total == len(result.Tags):
+		message = fmt.Sprintf(ImportManyAdded, len(result.Tags))
+	default:
+		message = fmt.Sprintf(ImportSomeAdded, len(result.Tags), total)
+	}
+	if result.Restarted {
+		message += ImportRestarted
+	}
+	if total > 1 {
+		message += "\n\n" + strings.Join(result.Tags, "\n")
+	}
+	if len(result.Renamed) > 0 {
+		message += "\n\n" + ImportRenamedHeader + "\n" + renameList(result.Renamed, "\n")
+	}
+	if len(result.Skipped) > 0 {
+		message += "\n\n" + ImportSkippedHeader + "\n" + domain.DescribeSkipped(result.Skipped, skippedLimit)
+	}
+	return message
+}
+
+// renameList shows renamed outbounds as "«old» → «new»"
+func renameList(renames []domain.TagRename, sep string) string {
+	items := make([]string, len(renames))
+	for i, r := range renames {
+		items[i] = fmt.Sprintf("«%s» → «%s»", r.From, r.To)
+	}
+	return strings.Join(items, sep)
+}
+
+// SubscriptionMessage is the popup text for finished subscription work.
+// Subscriptions are named by their redacted URL: the full one carries the
+// provider's access token.
+func SubscriptionMessage(result *domain.SubscriptionResult) string {
+	var lines []string
+	for _, u := range result.Updates {
+		lines = append(lines, subscriptionLine(u))
+	}
+	message := strings.Join(lines, "\n")
+	if result.Restarted {
+		message += SubsRestartedSuffix
+	}
+	return message
+}
+
+// AutoRefreshReport is the popup text for the problems of an unattended
+// refresh the user has not been told about yet, "" when there are none
+func AutoRefreshReport(result *domain.SubscriptionResult) string {
+	var blocks []string
+	for _, u := range result.Updates {
+		if u.NewProblem {
+			blocks = append(blocks, subscriptionLine(u))
+		}
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(SubsAutoMsg, strings.Join(blocks, "\n"))
+}
+
+// subscriptionLine describes the outcome for one subscription: the counts,
+// the nodes saved under another name, the nodes left out and why
+func subscriptionLine(u domain.SubscriptionUpdate) string {
+	if u.Err != nil {
+		// The error of a subscription with no usable node lists them itself,
+		// a line each: indented under the subscription
+		return fmt.Sprintf(SubsLineError, domain.RedactURL(u.URL), strings.ReplaceAll(u.Err.Error(), "\n", "\n  "))
+	}
+	line := fmt.Sprintf(SubsLineOK, domain.RedactURL(u.URL), len(u.Tags))
+	if len(u.Added) > 0 {
+		line += fmt.Sprintf(SubsLineAdded, len(u.Added))
+	}
+	if len(u.Removed) > 0 {
+		line += fmt.Sprintf(SubsLineRemoved, len(u.Removed))
+	}
+	if len(u.Renamed) > 0 {
+		line += fmt.Sprintf(SubsLineRenamed, len(u.Renamed))
+	}
+	if len(u.Suffixed) > 0 {
+		line += fmt.Sprintf(SubsLineSuffixed, renameList(u.Suffixed, ", "))
+	}
+	if len(u.Skipped) > 0 {
+		skipped := domain.DescribeSkipped(u.Skipped, skippedLimit)
+		line += fmt.Sprintf(SubsLineSkipped, "  "+strings.ReplaceAll(skipped, "\n", "\n  "))
+	}
+	return line
 }
