@@ -111,7 +111,19 @@ func parseShadowsocks(link string) (Outbound, error) {
 
 	// queryValues, not u.Query(): net/url drops a pair with an unescaped ';',
 	// and the plugin would silently vanish
-	if plugin := queryValues(u.RawQuery).Get("plugin"); strings.TrimSpace(plugin) != "" {
+	q := queryValues(u.RawQuery)
+	// 3x-ui puts the stream's finalmask on ss:// links too (fm=). A TCP mask
+	// makes the node useless without it: refused, as for the other links. A
+	// UDP one breaks only what the node carries over UDP, so that stays off
+	// (network "tcp": sing-box then sends no UDP through the node) and the
+	// rest works as meant
+	if err := finalMask(q.Get("fm"), false); err != nil {
+		return nil, err
+	}
+	if finalMask(q.Get("fm"), true) != nil {
+		outbound["network"] = "tcp"
+	}
+	if plugin := q.Get("plugin"); strings.TrimSpace(plugin) != "" {
 		parts, err := splitPluginString(plugin)
 		if err != nil {
 			return nil, err

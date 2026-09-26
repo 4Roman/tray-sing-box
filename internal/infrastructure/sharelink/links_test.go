@@ -155,6 +155,15 @@ var acceptedLinks = []linkCase{
 	{"vmess finalmask with udp masks",
 		vmessJSON(`{"ps":"vm-fm-udp","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","path":"/ws","tls":"tls","fm":{"udp":[{"type":"salamander"}]}}`),
 		`{"transport":{"type":"ws"}}`},
+	// Shadowsocks carries UDP itself: a udp mask leaves UDP off, TCP works
+	{"shadowsocks finalmask with udp masks",
+		"ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?fm=" +
+			url.QueryEscape(`{"udp":[{"type":"salamander","settings":{"password":"x"}}]}`) + "#ss-fm-udp",
+		`{"type":"shadowsocks","network":"tcp"}`},
+	{"shadowsocks finalmask with only fragment",
+		"ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?fm=" +
+			url.QueryEscape(`{"tcp":[{"type":"fragment"}]}`) + "#ss-fm-fragment",
+		`{"type":"shadowsocks","network":null}`},
 
 	// sing-box's own QUIC transport (s-ui exports it as type=quic): TLS
 	// without uTLS
@@ -353,6 +362,8 @@ var refusedLinks = []refusalCase{
 		url.QueryEscape(`{"tcp":[{"type":"fragment"},{"type":"sudoku","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-sudoku", "маскировка finalmask «sudoku»"},
 	{"fm-tcp-upper", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=" +
 		url.QueryEscape(`{"TCP":[{"type":"xmc","settings":{"password":"`+testSecret+`"}}]}`) + "#fm-tcp-upper", "маскировка finalmask «xmc»"},
+	{"ss-fm-sudoku", "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpwdw@192.0.2.40:8388?fm=" +
+		url.QueryEscape(`{"tcp":[{"type":"sudoku","settings":{"password":"`+testSecret+`"}}]}`) + "#ss-fm-sudoku", "маскировка finalmask «sudoku»"},
 	{"fm-tcp-object", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=" +
 		url.QueryEscape(`{"tcp":{"type":"sudoku","settings":{"password":"`+testSecret+`"}}}`) + "#fm-tcp-object", "fm (finalmask) в ссылке повреждён"},
 	// sing-box's QUIC transport runs over UDP: there the udp layer counts
