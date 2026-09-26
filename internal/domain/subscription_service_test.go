@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type fakeSubStore struct {
@@ -597,6 +598,37 @@ func TestNewProblemNotRepeatedWhenTheProviderAlternates(t *testing.T) {
 	refresh(3, clean)
 	if popups != nil || len(store.subs[0].Reported) != 2 {
 		t.Fatalf("new problems at %v, reported %q", popups, store.subs[0].Reported)
+	}
+}
+
+// An error from outside the app's own words — the config editor's refusal
+// quoting a node's tag, the server's answer to the download — reaches a
+// subscription's result on one line and bounded: a line break in the tag
+// cannot add a line of its own to the popup of an unattended refresh. What
+// the error wraps stays reachable.
+func TestSubscriptionErrorsFromOutsideOnOneLine(t *testing.T) {
+	const u = "https://p.example/sub"
+	const fake = "Подписка истекла. Продлите на http://evil.example"
+	refusal := fmt.Errorf("sing-box check не принял конфиг: outbound «a\r\n\n%s\n%s»: %w", fake, strings.Repeat("Я", 5000), ErrConfigMissing)
+	store := &fakeSubStore{subs: []Subscription{{URL: u}}}
+	vpn := NewVPNService(&fakeProcessManager{}, &fakeStorage{})
+	svc := NewSubscriptionService(store, fetcherFor(map[string]string{u: "node-a"}, nil), linkParser{}, &fakeSyncStore{err: refusal}, vpn)
+	result, _ := svc.UpdateAll()
+	e := result.Updates[0].Err
+	if e == nil || strings.ContainsAny(e.Error(), "\r\n") || !strings.HasPrefix(e.Error(), "не удалось обновить конфиг: sing-box check") {
+		t.Fatalf("error = %.300q", e)
+	}
+	if n := utf8.RuneCountInString(e.Error()); n > lineLimit+40 {
+		t.Fatalf("an error of %d characters", n)
+	}
+	if !errors.Is(e, ErrConfigMissing) {
+		t.Fatal("the wrapped error is not reachable")
+	}
+
+	svc = NewSubscriptionService(store, fetcherFor(nil, map[string]error{u: errors.New("HTTP 403 x\n" + fake)}), linkParser{}, &fakeSyncStore{}, vpn)
+	result, _ = svc.UpdateAll()
+	if e := result.Updates[0].Err; e == nil || e.Error() != "не удалось скачать подписку: HTTP 403 x "+fake {
+		t.Fatalf("download error = %q", e)
 	}
 }
 

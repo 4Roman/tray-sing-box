@@ -163,6 +163,16 @@ const (
 	reasonLimit = 300
 )
 
+// lineLimit and linesLimit bound an error in a message (DisplayLines): a
+// line of it at most lineLimit characters — more than a DescribeSkipped
+// line, a name and its reason, which stays whole — and at most linesLimit
+// lines, as many as the error of a subscription none of whose nodes could
+// be used has (its first line, skippedLimit nodes, "…и ещё N").
+const (
+	lineLimit  = 500
+	linesLimit = skippedLimit + 2
+)
+
 // DescribeSkipped lists skipped nodes one per line, "«name» — reason", at
 // most limit of them (0: all) and then how many more there are. The name and
 // the reason are put on one line each (see DisplayName).
@@ -186,6 +196,28 @@ func DescribeSkipped(skipped []SkippedNode, limit int) string {
 // it is; the settings page shows it whole.
 func DisplayName(name string) string {
 	return clipLine(name, nameLimit)
+}
+
+// DisplayLines is how an error's text is written into a message: each line
+// on its own (see clipLine) and at most lineLimit characters, at most
+// linesLimit lines and then how many more there were. An error can quote
+// the provider's words at any length — a node's tag in a config refusal,
+// sing-box's answer about it, the server's status line — and a message box
+// grows with its text and has no scroll bar.
+func DisplayLines(text string) string {
+	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(text), "\r\n", "\n"), "\n")
+	more := 0
+	if len(lines) > linesLimit {
+		more = len(lines) - linesLimit
+		lines = lines[:linesLimit]
+	}
+	for i, line := range lines {
+		lines[i] = clipLine(line, lineLimit)
+	}
+	if more > 0 {
+		lines = append(lines, fmt.Sprintf("…и ещё строк: %d", more))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // clipLine puts text on one line — control characters (line breaks, tabs)

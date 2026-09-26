@@ -350,7 +350,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 
 	body, err := s.fetch(sub.URL)
 	if err != nil {
-		update.Err = fmt.Errorf("не удалось скачать подписку: %w", err)
+		update.Err = fmt.Errorf("не удалось скачать подписку: %w", &oneLineError{err})
 		// Often a moment without network (right after logon): a problem
 		// only once the servers are getting old
 		if stale := sub.Updated.IsZero() || time.Since(sub.Updated) > subscriptionStaleAfter; stale {
@@ -371,7 +371,7 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 
 	sync, err := s.config.SyncOutbounds(sub.Tags, outbounds)
 	if err != nil {
-		update.Err = fmt.Errorf("не удалось обновить конфиг: %w", err)
+		update.Err = fmt.Errorf("не удалось обновить конфиг: %w", &oneLineError{err})
 		noteProblem(sub, &update)
 		return update
 	}
@@ -407,6 +407,19 @@ func (s *SubscriptionService) refreshOne(sub *Subscription) SubscriptionUpdate {
 		len(update.Skipped), sync.Changed, sync.NeedsRestart)
 	return update
 }
+
+// oneLineError is an error from outside the app's own words — the download,
+// the config editor — put on one line of at most lineLimit characters (see
+// clipLine). Its text can quote the provider's: a node's tag in a config
+// refusal (sing-box check's answer, a detour to a node that is not there),
+// the server's status line; and a line break in a tag would show in a
+// message as a line of the app's own text — in the popup of an unattended
+// refresh too. These errors are one line by design, nothing is lost; the
+// error itself stays reachable (errors.Is: ErrConfigMissing).
+type oneLineError struct{ err error }
+
+func (e *oneLineError) Error() string { return clipLine(e.err.Error(), lineLimit) }
+func (e *oneLineError) Unwrap() error { return e.err }
 
 // subscriptionStaleAfter: a subscription that has not been downloaded for
 // this long is reported by the unattended refresh (a failed download of a

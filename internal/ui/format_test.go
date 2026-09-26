@@ -226,3 +226,30 @@ func TestPopupNamesOnOneLine(t *testing.T) {
 		t.Fatalf("a %d-character message for one long name", n)
 	}
 }
+
+// The error of a subscription can quote the provider's words at any length
+// (a node's tag in a config refusal, the server's status line): in the
+// popups — the unattended one too — it is bounded line by line and in
+// lines, and stays indented under its subscription
+func TestSubscriptionErrorIsBounded(t *testing.T) {
+	long := "не удалось обновить конфиг: outbound «" + strings.Repeat("Я", 5000) + "» работает через «b»"
+	many := "sing-box check не принял конфиг:" + strings.Repeat("\nFATAL x", 40)
+	result := &domain.SubscriptionResult{Updates: []domain.SubscriptionUpdate{
+		{URL: "https://p.example/sub", Err: errors.New(long), NewProblem: true},
+		{URL: "https://q.example/sub", Err: errors.New(many), NewProblem: true},
+	}}
+	for _, message := range []string{SubscriptionMessage(result), AutoRefreshReport(result)} {
+		lines := strings.Split(message, "\n")
+		if len(lines) > 30 {
+			t.Fatalf("%d lines:\n%.2000s", len(lines), message)
+		}
+		for _, line := range lines {
+			if n := utf8.RuneCountInString(line); n > 600 {
+				t.Fatalf("a line of %d characters: %.80q", n, line)
+			}
+		}
+		if !strings.Contains(message, "\n  …и ещё строк: ") {
+			t.Fatalf("the lines left out are not counted:\n%.2000s", message)
+		}
+	}
+}

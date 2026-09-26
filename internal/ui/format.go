@@ -162,8 +162,12 @@ func AutoRefreshReport(result *domain.SubscriptionResult) string {
 func subscriptionLine(u domain.SubscriptionUpdate) string {
 	if u.Err != nil {
 		// The error of a subscription with no usable node lists them itself,
-		// a line each: indented under the subscription
-		return fmt.Sprintf(SubsLineError, domain.RedactURL(u.URL), strings.ReplaceAll(u.Err.Error(), "\n", "\n  "))
+		// a line each: indented under the subscription. Any error can quote
+		// the provider's words at any length (a node's tag in a config
+		// refusal, the server's status line), and this line reaches the
+		// popup of an unattended refresh: bounded line by line and in lines.
+		text := domain.DisplayLines(u.Err.Error())
+		return fmt.Sprintf(SubsLineError, domain.RedactURL(u.URL), strings.ReplaceAll(text, "\n", "\n  "))
 	}
 	line := fmt.Sprintf(SubsLineOK, domain.RedactURL(u.URL), len(u.Tags))
 	if len(u.Added) > 0 {

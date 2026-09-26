@@ -3,6 +3,7 @@ package domain
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"strings"
@@ -279,5 +280,37 @@ func TestDescribeSkippedOneLineEach(t *testing.T) {
 	}
 	if got := DisplayName("DE | 12GB"); got != "DE | 12GB" {
 		t.Fatalf("an ordinary name changed: %q", got)
+	}
+}
+
+// An error written into a message is bounded line by line and in lines;
+// the app's own errors — the list of a subscription with no usable node at
+// its longest, a setup hint after an empty line — pass unchanged
+func TestDisplayLines(t *testing.T) {
+	var skipped []SkippedNode
+	for i := 0; i < skippedLimit+5; i++ {
+		skipped = append(skipped, SkippedNode{Name: strings.Repeat("Я", 5000), Reason: strings.Repeat("r", 5000)})
+	}
+	whole := noneUsable("ни один сервер подписки не подошёл", skipped, nil).Error()
+	if got := DisplayLines(whole); got != whole {
+		t.Fatalf("the app's own error changed:\n%.300q\nwant\n%.300q", got, whole)
+	}
+	hint := withSetupHint(fmt.Errorf("не удалось обновить конфиг: %w", ErrConfigMissing)).Error()
+	if got := DisplayLines(hint); got != hint {
+		t.Fatalf("a setup hint changed: %q", got)
+	}
+
+	rightToLeftOverride := string(rune(0x202e))
+	text := "не удалось обновить конфиг: outbound «" + strings.Repeat("Я", 5000) + "»\r\n" +
+		"x\tb" + rightToLeftOverride + string(rune(0x2028)) + "c\n" + strings.Repeat("line\n", 40)
+	lines := strings.Split(DisplayLines(text), "\n")
+	if len(lines) != linesLimit+1 || lines[linesLimit] != "…и ещё строк: 30" {
+		t.Fatalf("%d lines, the last %q", len(lines), lines[len(lines)-1])
+	}
+	if n := utf8.RuneCountInString(lines[0]); n != lineLimit+1 || !strings.HasSuffix(lines[0], "Я…") {
+		t.Fatalf("a long line of %d characters: %.60q", n, lines[0])
+	}
+	if lines[1] != "x b c" {
+		t.Fatalf("line 2 = %q", lines[1])
 	}
 }
