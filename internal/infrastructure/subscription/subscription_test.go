@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -52,6 +53,94 @@ func TestStoreSaveNil(t *testing.T) {
 	subs, err := store.Load()
 	if err != nil || len(subs) != 0 {
 		t.Fatalf("Load after Save(nil): %v, %+v", err, subs)
+	}
+}
+
+// Save replaces the file with a complete new one instead of rewriting it in
+// place: an interrupted save leaves the previous list, never an empty or a
+// partial file (every subscription operation fails on an unreadable one)
+func TestStoreSaveReplacesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "subscriptions.json")
+	store := NewStore(path)
+	if err := store.Save([]domain.Subscription{{URL: "https://p.example/a"}}); err != nil {
+		t.Fatal(err)
+	}
+	// A second name of the file as it is now: a rewrite in place changes
+	// what it shows, a replacement does not
+	previous := filepath.Join(t.TempDir(), "previous.json")
+	if err := os.Link(path, previous); err != nil {
+		t.Skipf("no hard links here: %v", err)
+	}
+	before, err := os.ReadFile(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.Subscription{{URL: "https://p.example/b", Tags: []string{"b"}}}
+	if err := store.Save(want); err != nil {
+		t.Fatal(err)
+	}
+	if after, err := os.ReadFile(previous); err != nil || string(after) != string(before) {
+		t.Fatalf("the list was rewritten in place: %s (%v)", after, err)
+	}
+	if got, err := store.Load(); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+	assertOnlyFile(t, dir, "subscriptions.json")
+}
+
+// A rename that fails for a moment (a scanner holding the new file) is
+// retried; one that keeps failing leaves the previous list and no temporary
+// file behind
+func TestStoreSaveRetriesTheRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "subscriptions.json")
+	store := NewStore(path)
+	old := []domain.Subscription{{URL: "https://p.example/a"}}
+	if err := store.Save(old); err != nil {
+		t.Fatal(err)
+	}
+
+	failures := 2
+	rename = func(from, to string) error {
+		if failures > 0 {
+			failures--
+			return errors.New("sharing violation")
+		}
+		return os.Rename(from, to)
+	}
+	defer func() { rename = os.Rename }()
+	want := []domain.Subscription{{URL: "https://p.example/b"}}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save with a rename failing twice: %v", err)
+	}
+	if got, _ := store.Load(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Load = %+v", got)
+	}
+
+	failures = renameRetries
+	if err := store.Save(old); err == nil {
+		t.Fatal("Save succeeded although the rename never did")
+	}
+	if got, _ := store.Load(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the previous list is lost: %+v", got)
+	}
+	assertOnlyFile(t, dir, "subscriptions.json")
+}
+
+// assertOnlyFile fails when dir holds anything but the named file
+func assertOnlyFile(t *testing.T, dir, name string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != name {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("directory holds %v, want only %s", names, name)
 	}
 }
 

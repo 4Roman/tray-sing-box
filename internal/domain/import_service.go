@@ -91,10 +91,7 @@ func (s *ImportService) ImportFromText(text string) (*ImportResult, error) {
 		return nil, noneUsable("ни один сервер не импортирован", skipped, err)
 	}
 
-	reserved, err := s.subscriptionTags()
-	if err != nil {
-		return nil, err
-	}
+	reserved := s.subscriptionTags()
 	log.Printf("Importing %d outbound(s)", len(outbounds))
 
 	added, err := s.editor.AddOutbounds(outbounds, reserved)
@@ -130,20 +127,26 @@ func (s *ImportService) ImportFromText(text string) (*ImportResult, error) {
 	return result, nil
 }
 
-// subscriptionTags lists the outbounds the subscriptions own
-func (s *ImportService) subscriptionTags() ([]string, error) {
+// subscriptionTags lists the outbounds the subscriptions own. An unreadable
+// list does not stop the import: every subscription operation fails on it
+// anyway, and the worst an import can do without it is replace a
+// subscription's node, which the next refresh of that subscription puts
+// back. Refusing would block every import until the file is repaired by
+// hand (nothing in the app rewrites a list it cannot read).
+func (s *ImportService) subscriptionTags() []string {
 	if s.subs == nil {
-		return nil, nil
+		return nil
 	}
 	subs, err := s.subs.Load()
 	if err != nil {
-		return nil, fmt.Errorf("не удалось прочитать список подписок: %w", err)
+		log.Printf("Import: the subscription list is unreadable, its nodes are not kept apart: %v", err)
+		return nil
 	}
 	var tags []string
 	for _, sub := range subs {
 		tags = append(tags, sub.Tags...)
 	}
-	return tags, nil
+	return tags
 }
 
 // skippedLimit bounds the node list in an error: it lands in a message box,

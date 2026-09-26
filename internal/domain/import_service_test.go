@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"reflect"
 	"strings"
 	"testing"
@@ -161,9 +163,23 @@ func TestImportReservesSubscriptionNodes(t *testing.T) {
 		t.Fatalf("reserved = %v", editor.reserved)
 	}
 
-	store.loadErr = errors.New("broken file")
-	if _, err := imp.ImportFromText("…"); err == nil {
-		t.Fatal("imported without knowing which nodes are the subscriptions'")
+	// An unreadable list (subscriptions.json damaged) does not block an
+	// import: the worst it can do is replace a subscription's node, which
+	// the next refresh puts back
+	var logs bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prev)
+	store.loadErr = errors.New("unexpected end of JSON input")
+	result, err := imp.ImportFromText("…")
+	if err != nil || !reflect.DeepEqual(result.Tags, []string{"x"}) {
+		t.Fatalf("import with an unreadable subscription list: %+v, %v", result, err)
+	}
+	if editor.reserved != nil {
+		t.Fatalf("reserved = %v", editor.reserved)
+	}
+	if !strings.Contains(logs.String(), "the subscription list is unreadable") {
+		t.Fatalf("not logged: %s", logs.String())
 	}
 }
 
