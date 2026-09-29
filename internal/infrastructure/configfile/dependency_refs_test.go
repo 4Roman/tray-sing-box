@@ -337,3 +337,56 @@ func TestSyncFollowsRuleSetDownloadDetours(t *testing.T) {
 		}
 	})
 }
+
+const syncSharedClientConfig = `{
+  "Http_Clients": [{"tag": "shared", "Detour": "sub-a"}],
+  "outbounds": [
+    {"type": "selector", "tag": "proxy", "outbounds": ["sub-a", "sub-b", "direct"]},
+    {"type": "vless", "tag": "sub-a", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "vless", "tag": "sub-b", "server": "192.0.2.11", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ],
+  "route": {
+    "rule_set": [
+      {"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "http_client": "shared"},
+      {"type": "remote", "tag": "cn", "format": "binary", "url": "https://rules.example.com/cn.srs", "http_client": {"detour": "sub-a"}}
+    ],
+    "default_http_client": "shared",
+    "final": "proxy"
+  }
+}`
+
+// The same for a shared HTTP client (http_clients) dialing through such a
+// node; with no server left the detours go — sing-box refuses one to a
+// direct outbound — and the clients dial directly
+func TestSyncFollowsSharedHTTPClientDetour(t *testing.T) {
+	detours := func(t *testing.T, path string) (string, string) {
+		t.Helper()
+		cfg := load(t, path)
+		shared, _ := cfg["Http_Clients"].([]any)[0].(map[string]any)["Detour"].(string)
+		own, _ := cfg["route"].(map[string]any)["rule_set"].([]any)[1].(map[string]any)["http_client"].(map[string]any)["detour"].(string)
+		return shared, own
+	}
+	for name, tc := range map[string]struct {
+		incoming []map[string]any
+		want     string
+	}{
+		"removed":        {[]map[string]any{vlessNode("sub-b", "192.0.2.11")}, "sub-b"},
+		"renamed":        {[]map[string]any{vlessNode("sub-a | 9GB", "192.0.2.10"), vlessNode("sub-b", "192.0.2.11")}, "sub-a | 9GB"},
+		"no server left": {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfig(t, syncSharedClientConfig)
+			result, err := New(path).SyncOutbounds([]string{"sub-a", "sub-b"}, tc.incoming)
+			if err != nil {
+				t.Fatalf("SyncOutbounds: %v", err)
+			}
+			if !result.Changed {
+				t.Fatalf("result = %+v", result)
+			}
+			if shared, own := detours(t, path); shared != tc.want || own != tc.want {
+				t.Fatalf("detours = %q, %q, want %q", shared, own, tc.want)
+			}
+		})
+	}
+}

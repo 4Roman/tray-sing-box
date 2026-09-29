@@ -141,6 +141,7 @@ func TestCreateConfigRefusesWhatTheGuardRefuses(t *testing.T) {
 		"any _directory key":   `{"inbounds":[{"type":"tun","tag":"t","cache_directory":"C:\\x"}]}`,
 		"hosts server file":    `{"dns":{"servers":[{"type":"hosts","tag":"h","path":["C:\\Windows\\hosts2"]}]}}`,
 		"cache file elsewhere": `{"experimental":{"cache_file":{"enabled":true,"path":"C:\\x.db"}}}`,
+		"HTTP client's file":   `{"http_clients":[{"tag":"c","tls":{"enabled":true,"certificate_path":"C:\\x.pem"}}]}`,
 	}
 	for name, cfg := range refused {
 		dir := t.TempDir()
@@ -174,6 +175,9 @@ func TestCreateConfigRefusesWhatTheGuardRefuses(t *testing.T) {
 		"process path rule":   `{"route":{"rules":[{"process_path":["C:\\Program Files\\x.exe"],"outbound":"direct"}]}}`,
 		"wireguard endpoint":  `{"endpoints":[{"type":"wireguard","tag":"wg","address":["10.0.0.2/32"],"private_key":"x","peers":[{"address":"1.2.3.4","port":51820,"public_key":"y","allowed_ips":["0.0.0.0/0"]}]}]}`,
 		"ntp without writing": `{"ntp":{"enabled":true,"server":"time.example","write_to_system":false}}`,
+		"shared HTTP client": `{"outbounds":[{"type":"vless","tag":"p1","server":"a.example.com"},{"type":"direct","tag":"direct"}],
+			"http_clients":[{"tag":"c","detour":"p1","version":2,"headers":{"User-Agent":"x"},"tls":{"enabled":true,"server_name":"x"}}],
+			"route":{"rule_set":[{"type":"remote","tag":"r","url":"https://x/r.srs","http_client":"c"}],"default_http_client":"c"}}`,
 		"typical client": `{
 			"log": {"level": "info", "timestamp": true},
 			"dns": {"servers": [{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "p1"}, {"type": "local", "tag": "local"}], "final": "remote"},

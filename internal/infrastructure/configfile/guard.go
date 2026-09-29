@@ -31,10 +31,17 @@ import (
 // never complete.
 
 // allowedSections are the top-level sections a client config consists of
-// (services — ssm-api, derp, resolved, ccm — are servers or file features)
+// (services — ssm-api, derp, resolved, ccm — are servers or file features).
+// http_clients are the shared HTTP clients remote rule sets download
+// through (sing-box 1.14 deprecates download_detour for them): the options
+// a rule set's own http_client already holds inside route — dialer, TLS,
+// HTTP version, headers — and walked for file keys the same way. Left out,
+// a section the administrator wrote could not change through the app at
+// all, and a subscription refresh could not repoint a detour there.
 var allowedSections = map[string]bool{
 	"log": true, "dns": true, "ntp": true, "certificate": true, "inbounds": true,
 	"outbounds": true, "endpoints": true, "route": true, "experimental": true,
+	"http_clients": true,
 }
 
 // allowedOutboundTypes are the outbound types the app itself produces or

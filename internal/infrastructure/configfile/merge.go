@@ -291,7 +291,7 @@ type refKind int
 
 const (
 	refChain  refKind = iota // an outbound's detour: it dials through that outbound
-	refDetour                // the detour of an endpoint, a DNS server, NTP or a rule set download
+	refDetour                // the detour of an endpoint, a DNS server, NTP, a rule set download or an HTTP client
 	refRule                  // the outbound a route rule sends its traffic to
 	refNested                // an outbound inside a logical rule's sub-rule
 	refFinal                 // route.final
@@ -305,12 +305,10 @@ const (
 // reads as it ({"Route": {"Final": ...}}, {"Detour": ...}): the dependency
 // check reads them so (dependency.go), and a reference the merge missed
 // would have it refuse the merge's own result — the download detours of a
-// rule set (download_detour, the detour of its own http_client) included.
-// Not visited: a route rule's preferred_by (sing-box takes only an endpoint
-// there — wireguard, tailscale — and no import or subscription brings one)
-// and the detour of a shared HTTP client (http_clients: a section the guard
-// leaves to the administrator, guard.go — changed, the guard would refuse
-// the merge; unchanged, the dependency check names the detour).
+// rule set (download_detour, the detour of its own http_client) and of a
+// shared HTTP client (http_clients) included. A route rule's preferred_by is
+// not visited: sing-box takes only an endpoint there (wireguard, tailscale),
+// and no import or subscription brings one.
 func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bool)) {
 	field := func(m map[string]any, name string, kind refKind) {
 		for key, value := range m {
@@ -328,6 +326,7 @@ func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bo
 
 	each(cfg, "outbounds", func(o map[string]any) { field(o, "detour", refChain) })
 	each(cfg, "endpoints", func(o map[string]any) { field(o, "detour", refDetour) })
+	each(cfg, "http_clients", func(c map[string]any) { field(c, "detour", refDetour) })
 	for _, ntp := range objects(cfg, "ntp") {
 		field(ntp, "detour", refDetour)
 	}
@@ -418,10 +417,11 @@ func visitMatch(rule map[string]any, fn func(refKind, string) (string, bool)) {
 // members only and does not start without it, which sing-box check does not
 // notice — otherwise dropped: the first member is the default then), the
 // detour of outbounds (they dial directly), and route rules/final, the
-// detour of DNS servers, NTP, endpoints and rule set downloads (repointed to
-// the replacement: the first new outbound, else any surviving proxy, else a
-// direct outbound; a detour is not pointed at a direct outbound — sing-box
-// refuses that — and a rule with no usable replacement is dropped).
+// detour of DNS servers, NTP, endpoints, rule set downloads and HTTP clients
+// (repointed to the replacement: the first new outbound, else any surviving
+// proxy, else a direct outbound; a detour is not pointed at a direct
+// outbound — sing-box refuses that — and a rule with no usable replacement
+// is dropped).
 //
 // The replacement is never an outbound another one dials through (its
 // detour; relayTags — a refused node's too): that is a relay, often one that works only so — a ShadowTLS
