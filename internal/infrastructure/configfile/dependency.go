@@ -15,9 +15,10 @@ import (
 // check builds the outbounds without starting them and passes such a config;
 // the VPN restarted into it then does not come up, at every retry. The same
 // holds for the references from outside the outbounds that sing-box
-// resolves when it starts (referenceProblems). Outbounds and endpoints share
-// one namespace, and keys are matched the way sing-box matches them
-// (foldKey): to sing-box {"Detour": "x"} is a detour.
+// resolves when it starts — to an outbound, a rule set or a shared HTTP
+// client (referenceProblems). Outbounds and endpoints share one namespace,
+// and keys are matched the way sing-box matches them (foldKey): to sing-box
+// {"Detour": "x"} is a detour.
 
 // dependencyProblem is one reason sing-box would not start
 type dependencyProblem struct {
@@ -25,14 +26,20 @@ type dependencyProblem struct {
 	tags    []string // the outbounds that cannot start because of it; none for a reference from elsewhere (origin)
 	missing string   // the tag named but absent; "" for a ring
 	group   bool     // missing is a group member, not a detour
-	origin  string   // what names missing when that is no outbound: route.final, the detour of a DNS server or of NTP
+	origin  string   // what names missing when that is no outbound: route.final, a DNS server's detour, a route rule's rule_set, …
+	kind    string   // what missing should be when not an outbound: "rule-set", "http_client"
+	checked bool     // sing-box check refuses it as well; named here for a clearer message
 }
 
 // String describes the problem for the user, naming the outbounds by tag
 func (p dependencyProblem) String() string {
 	switch {
 	case p.origin != "":
-		return fmt.Sprintf("%s указывает на «%s», а такого outbound нет", p.origin, p.missing)
+		kind := p.kind
+		if kind == "" {
+			kind = "outbound"
+		}
+		return fmt.Sprintf("%s указывает на «%s», а такого %s нет", p.origin, p.missing, kind)
 	case p.missing != "" && p.group:
 		return fmt.Sprintf("в группе «%s» есть «%s», а такого outbound нет", p.tags[0], p.missing)
 	case p.missing != "":
@@ -79,14 +86,21 @@ type dependencyError struct {
 func (e *dependencyError) Error() string {
 	const limit = 3
 	var parts []string
+	unnoticed := false
 	for i, p := range e.problems {
-		if i == limit {
-			parts = append(parts, fmt.Sprintf("и ещё %d", len(e.problems)-limit))
-			break
+		unnoticed = unnoticed || !p.checked
+		if i < limit {
+			parts = append(parts, p.String())
 		}
-		parts = append(parts, p.String())
 	}
-	return strings.Join(parts, "; ") + " — с таким конфигом sing-box не запустится (sing-box check этого не замечает)"
+	if len(e.problems) > limit {
+		parts = append(parts, fmt.Sprintf("и ещё %d", len(e.problems)-limit))
+	}
+	suffix := " — с таким конфигом sing-box не запустится"
+	if unnoticed {
+		suffix += " (sing-box check этого не замечает)"
+	}
+	return strings.Join(parts, "; ") + suffix
 }
 
 // checkDependencies refuses a config with a dependency problem the previous
@@ -174,53 +188,133 @@ func dependencyProblems(cfg map[string]any) []dependencyProblem {
 }
 
 // referenceProblems lists the references from outside the outbounds that
-// sing-box resolves when it starts, naming a tag no outbound or endpoint
-// has: route.final ("default outbound not found"), the detour of a DNS server
-// and of the NTP client when it is enabled ("outbound detour not found").
-// sing-box check passes all of them, and they are easy to make: renaming or
-// deleting the outbound they name on the settings page, where the DNS
-// section cannot be edited. A route rule naming a missing outbound is not
-// one: it fails only the connections it matches, sing-box starts.
+// sing-box resolves when it starts, naming a tag the config does not have.
+//
+// An outbound or endpoint: route.final ("default outbound not found"), the
+// detour of a DNS server and of the NTP client when it is enabled ("outbound
+// detour not found"), a route rule's preferred_by ("outbound not found",
+// when the rules start, the last thing the router starts), the download
+// detour of a rule set (its download_detour, the detour of its own
+// http_client) and the detour of a shared HTTP client (http_clients) — the
+// first download of a rule set fails the start when there is no cached copy
+// ("initial rule-set"). Whether a copy is cached is only known then, and a
+// shared client may serve every rule set as the default one, so its detour
+// counts whether or not a rule set names it.
+//
+// A rule set: a route rule's rule_set, also in the rules of a logical rule
+// ("rule-set not found", when the rules start); a DNS rule's is refused by
+// sing-box check already and named here only for a clearer message. A
+// shared HTTP client: a rule set's http_client given by tag and
+// route.default_http_client ("http_client not found").
+//
+// sing-box check passes all of these but the DNS rule's, and they are easy
+// to make: renaming or deleting on the settings page what they name, where
+// the DNS section cannot be edited. A route rule sending traffic to a
+// missing outbound is not one: it fails only the connections it matches,
+// sing-box starts. The key of each is the kind of reference, its owner when
+// it has a tag and the tag missing, never a position: a problem the previous
+// config had stays the same problem when the rules are reordered.
 func referenceProblems(cfg map[string]any) []dependencyProblem {
-	present := map[string]bool{}
+	outbounds := map[string]bool{}
 	for _, n := range dependencyNodes(cfg) {
-		present[n.tag] = true
+		outbounds[n.tag] = true
 	}
+	ruleSets := map[string]bool{}
+	for _, route := range objects(cfg, "route") {
+		each(route, "rule_set", func(rs map[string]any) {
+			for _, tag := range ruleSetTags(rs) {
+				ruleSets[tag] = true
+			}
+		})
+	}
+	clients := map[string]bool{}
+	each(cfg, "http_clients", func(c map[string]any) {
+		if tag := foldedString(c, "tag"); tag != "" {
+			clients[tag] = true
+		}
+	})
+
 	var problems []dependencyProblem
 	seen := map[string]bool{}
-	check := func(key, origin string, value any) {
-		tag, _ := value.(string)
-		key += "\x00" + tag
-		if tag == "" || present[tag] || seen[key] {
-			return
+	// check records each of the tags that present lacks, as the problem p
+	// (its key completed with the tag)
+	check := func(present map[string]bool, p dependencyProblem, tags []string) {
+		for _, tag := range tags {
+			key := p.key + "\x00" + tag
+			if tag == "" || present[tag] || seen[key] {
+				continue
+			}
+			seen[key] = true
+			found := p
+			found.key, found.missing = key, tag
+			problems = append(problems, found)
 		}
-		seen[key] = true
-		problems = append(problems, dependencyProblem{key: key, missing: tag, origin: origin})
 	}
 
 	for _, route := range objects(cfg, "route") {
 		for _, final := range fieldValues(route, "final") {
-			check("final", "route.final", final)
+			check(outbounds, dependencyProblem{key: "final", origin: "route.final"}, stringTag(final))
 		}
-	}
-	for _, dns := range objects(cfg, "dns") {
-		for _, value := range fieldValues(dns, "servers") {
-			servers, _ := value.([]any)
-			for _, item := range servers {
-				server, ok := item.(map[string]any)
-				if !ok {
-					continue
-				}
-				tag := foldedString(server, "tag")
-				origin := "detour DNS-сервера"
-				if tag != "" {
-					origin += " «" + tag + "»"
-				}
-				for _, detour := range fieldValues(server, "detour") {
-					check("dns\x00"+tag, origin, detour)
+		eachRule(route, func(rule map[string]any) {
+			for _, v := range fieldValues(rule, "rule_set") {
+				check(ruleSets, dependencyProblem{key: "rule rule_set", origin: "rule_set правила маршрутизации", kind: "rule-set"}, tagList(v))
+			}
+			for _, v := range fieldValues(rule, "preferred_by") {
+				check(outbounds, dependencyProblem{key: "rule preferred_by", origin: "preferred_by правила маршрутизации"}, tagList(v))
+			}
+		})
+		each(route, "rule_set", func(rs map[string]any) {
+			tags := ruleSetTags(rs)
+			id := strings.Join(tags, "\x00")
+			owner := "rule-set"
+			if len(tags) > 0 {
+				owner += " " + quoteTags(tags)
+			}
+			for _, v := range fieldValues(rs, "download_detour") {
+				check(outbounds, dependencyProblem{key: "rule-set download_detour\x00" + id, origin: "download_detour " + owner}, stringTag(v))
+			}
+			// A tag names a shared client, an object is the rule set's own
+			for _, v := range fieldValues(rs, "http_client") {
+				switch client := v.(type) {
+				case string:
+					check(clients, dependencyProblem{key: "rule-set http_client\x00" + id, origin: "http_client " + owner, kind: "http_client"}, stringTag(client))
+				case map[string]any:
+					for _, detour := range fieldValues(client, "detour") {
+						check(outbounds, dependencyProblem{key: "rule-set http_client.detour\x00" + id, origin: "http_client.detour " + owner}, stringTag(detour))
+					}
 				}
 			}
+		})
+		for _, v := range fieldValues(route, "default_http_client") {
+			check(clients, dependencyProblem{key: "default_http_client", origin: "route.default_http_client", kind: "http_client"}, stringTag(v))
 		}
+	}
+	each(cfg, "http_clients", func(c map[string]any) {
+		tag := foldedString(c, "tag")
+		origin := "detour http_client"
+		if tag != "" {
+			origin += " «" + tag + "»"
+		}
+		for _, detour := range fieldValues(c, "detour") {
+			check(outbounds, dependencyProblem{key: "http_client detour\x00" + tag, origin: origin}, stringTag(detour))
+		}
+	})
+	for _, dns := range objects(cfg, "dns") {
+		each(dns, "servers", func(server map[string]any) {
+			tag := foldedString(server, "tag")
+			origin := "detour DNS-сервера"
+			if tag != "" {
+				origin += " «" + tag + "»"
+			}
+			for _, detour := range fieldValues(server, "detour") {
+				check(outbounds, dependencyProblem{key: "dns\x00" + tag, origin: origin}, stringTag(detour))
+			}
+		})
+		eachRule(dns, func(rule map[string]any) {
+			for _, v := range fieldValues(rule, "rule_set") {
+				check(ruleSets, dependencyProblem{key: "dns rule rule_set", origin: "rule_set правила DNS", kind: "rule-set", checked: true}, tagList(v))
+			}
+		})
 	}
 	// A disabled NTP client is not created, and its detour never looked up
 	for _, ntp := range objects(cfg, "ntp") {
@@ -228,10 +322,47 @@ func referenceProblems(cfg map[string]any) []dependencyProblem {
 			continue
 		}
 		for _, detour := range fieldValues(ntp, "detour") {
-			check("ntp", "ntp.detour", detour)
+			check(outbounds, dependencyProblem{key: "ntp", origin: "ntp.detour"}, stringTag(detour))
 		}
 	}
 	return problems
+}
+
+// ruleSetTags are the tags of a rule set: in sing-box 1.14 one entry may
+// define several (a list; its URL or path takes each in turn)
+func ruleSetTags(rs map[string]any) []string {
+	var tags []string
+	for _, v := range fieldValues(rs, "tag") {
+		tags = append(tags, tagList(v)...)
+	}
+	return tags
+}
+
+// stringTag is the tag a field holding one names (none when it holds
+// anything else: sing-box check refuses that)
+func stringTag(v any) []string {
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	return nil
+}
+
+// tagList is the tags a field sing-box reads as a tag or a list of them
+// names (badoption.Listable: rule_set, preferred_by, a rule set's tag)
+func tagList(v any) []string {
+	switch v := v.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		var tags []string
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				tags = append(tags, s)
+			}
+		}
+		return tags
+	}
+	return nil
 }
 
 // objects returns the objects at every key of m that folds to name
@@ -243,6 +374,33 @@ func objects(m map[string]any, name string) []map[string]any {
 		}
 	}
 	return found
+}
+
+// each visits the objects of the lists m holds at every key that folds to
+// name
+func each(m map[string]any, name string, visit func(map[string]any)) {
+	for _, v := range fieldValues(m, name) {
+		list, _ := v.([]any)
+		for _, item := range list {
+			if o, ok := item.(map[string]any); ok {
+				visit(o)
+			}
+		}
+	}
+}
+
+// eachRule visits the rules of a route or DNS section and the rules of the
+// logical ones among them, at any depth: sing-box starts a logical rule's
+// rules with it
+func eachRule(section map[string]any, visit func(rule map[string]any)) {
+	var walk func(m map[string]any)
+	walk = func(m map[string]any) {
+		each(m, "rules", func(rule map[string]any) {
+			visit(rule)
+			walk(rule)
+		})
+	}
+	walk(section)
 }
 
 // enabled: an "enabled" key of the object, in any spelling, is true (with two

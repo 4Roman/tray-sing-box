@@ -304,7 +304,13 @@ const (
 // and the section and list it is in, is found in every spelling sing-box
 // reads as it ({"Route": {"Final": ...}}, {"Detour": ...}): the dependency
 // check reads them so (dependency.go), and a reference the merge missed
-// would have it refuse the merge's own result.
+// would have it refuse the merge's own result — the download detours of a
+// rule set (download_detour, the detour of its own http_client) included.
+// Not visited: a route rule's preferred_by (sing-box takes only an endpoint
+// there — wireguard, tailscale — and no import or subscription brings one)
+// and the detour of a shared HTTP client (http_clients: a section the guard
+// leaves to the administrator, guard.go — changed, the guard would refuse
+// the merge; unchanged, the dependency check names the detour).
 func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bool)) {
 	field := func(m map[string]any, name string, kind refKind) {
 		for key, value := range m {
@@ -316,17 +322,6 @@ func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bo
 				m[key] = to
 			} else {
 				delete(m, key)
-			}
-		}
-	}
-	// each visits the objects of the lists m holds under name
-	each := func(m map[string]any, name string, visit func(map[string]any)) {
-		for _, v := range fieldValues(m, name) {
-			list, _ := v.([]any)
-			for _, item := range list {
-				if o, ok := item.(map[string]any); ok {
-					visit(o)
-				}
 			}
 		}
 	}
@@ -347,7 +342,13 @@ func visitRefs(cfg map[string]any, fn func(kind refKind, tag string) (string, bo
 			}
 		}
 		field(route, "final", refFinal)
-		each(route, "rule_set", func(rs map[string]any) { field(rs, "download_detour", refDetour) })
+		each(route, "rule_set", func(rs map[string]any) {
+			field(rs, "download_detour", refDetour)
+			// An http_client given by tag names a shared one (http_clients)
+			for _, client := range objects(rs, "http_client") {
+				field(client, "detour", refDetour)
+			}
+		})
 	}
 }
 

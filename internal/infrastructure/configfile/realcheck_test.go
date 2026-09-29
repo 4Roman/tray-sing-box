@@ -285,3 +285,51 @@ func TestRealCheckMissesStartupReferences(t *testing.T) {
 		})
 	}
 }
+
+// sing-box check passes a route rule naming a missing rule set or outbound
+// (preferred_by), a rule set downloading through a missing outbound or a
+// missing shared HTTP client, a missing default HTTP client and a shared one
+// with a missing detour — sing-box then does not start. The dependency check
+// refuses each; a DNS rule's missing rule set check refuses itself.
+func TestRealCheckMissesRuleAndClientReferences(t *testing.T) {
+	validate := realValidator(t)
+	const direct = `"outbounds": [{"type": "direct", "tag": "direct"}, {"type": "block", "tag": "block"}]`
+	const remote = `"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs"`
+	for name, tc := range map[string]struct{ config, want string }{
+		"rule set": {`{` + direct + `, "route": {"rules": [{"rule_set": "gone", "action": "reject"}]}}`,
+			"rule_set правила маршрутизации указывает на «gone», а такого rule-set нет"},
+		"rule set of a logical rule": {`{` + direct + `, "route": {"rules": [{"type": "logical", "mode": "and", "rules": [{"rule_set": ["gone"]}, {"network": "udp"}], "action": "reject"}]}}`,
+			"rule_set правила маршрутизации указывает на «gone», а такого rule-set нет"},
+		"preferred_by": {`{` + direct + `, "route": {"rules": [{"preferred_by": "gone", "outbound": "direct"}]}}`,
+			"preferred_by правила маршрутизации указывает на «gone», а такого outbound нет"},
+		"download detour": {`{` + direct + `, "route": {"rule_set": [{` + remote + `, "download_detour": "gone"}]}}`,
+			"download_detour rule-set «ads» указывает на «gone», а такого outbound нет"},
+		"the rule set's own HTTP client": {`{` + direct + `, "route": {"rule_set": [{` + remote + `, "http_client": {"detour": "gone"}}]}}`,
+			"http_client.detour rule-set «ads» указывает на «gone», а такого outbound нет"},
+		"a shared HTTP client by tag": {`{` + direct + `, "route": {"rule_set": [{` + remote + `, "http_client": "gone"}]}}`,
+			"http_client rule-set «ads» указывает на «gone», а такого http_client нет"},
+		"default HTTP client": {`{` + direct + `, "http_clients": [{"tag": "shared"}], "route": {"default_http_client": "gone"}}`,
+			"route.default_http_client указывает на «gone», а такого http_client нет"},
+		"shared HTTP client's detour": {`{` + direct + `, "http_clients": [{"tag": "shared", "detour": "gone"}], "route": {"rule_set": [{` + remote + `, "http_client": "shared"}]}}`,
+			"detour http_client «shared» указывает на «gone», а такого outbound нет"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validate([]byte(tc.config)); err != nil {
+				t.Fatalf("sing-box check refuses it now (%v): the refusal's «sing-box check этого не замечает» is out of date", err)
+			}
+			cfg, err := decodeConfig([]byte(tc.config))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = checkDependencies(nil, cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "sing-box check этого не замечает") {
+				t.Fatalf("checkDependencies: %v", err)
+			}
+		})
+	}
+
+	dns := `{` + direct + `, "dns": {"servers": [{"type": "local", "tag": "local"}], "rules": [{"rule_set": "gone", "server": "local"}]}}`
+	if err := validate([]byte(dns)); err == nil || !strings.Contains(err.Error(), "rule-set not found: gone") {
+		t.Fatalf("sing-box check of a DNS rule naming a missing rule set: %v — the problem is no longer marked checked correctly", err)
+	}
+}
