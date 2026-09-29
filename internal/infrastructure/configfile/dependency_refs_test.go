@@ -101,8 +101,35 @@ func TestStartReferenceProblems(t *testing.T) {
 		},
 		"default HTTP client present": {`{` + outbounds + `, "HTTP_Clients": [{"Tag": "shared"}], "route": {"default_http_client": "shared"}}`, nil},
 		"shared HTTP client's detour": {
-			`{` + outbounds + `, "Http_Clients": [{"tag": "shared", "Detour": "gone"}, {"tag": "fine", "detour": "A"}]}`,
+			`{` + outbounds + `, "Http_Clients": [{"tag": "fine", "detour": "A"}, {"tag": "shared", "Detour": "gone"}],
+			  "route": {"rule_set": [{"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "Http_Client": "shared"}]}}`,
 			[]string{"detour http_client «shared» указывает на «gone», а такого outbound нет"},
+		},
+		// A rule set with neither an http_client nor a download_detour
+		// downloads through the default client: the first one, or the one
+		// route.default_http_client names
+		"default HTTP client's detour": {
+			`{` + outbounds + `, "http_clients": [{"tag": "first", "detour": "gone"}, {"tag": "second", "detour": "gone too"}],
+			  "route": {"rule_set": [{"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "http_client": ""}]}}`,
+			[]string{"detour http_client «first» указывает на «gone», а такого outbound нет"},
+		},
+		"named default HTTP client's detour": {
+			`{` + outbounds + `, "http_clients": [{"tag": "first", "detour": "gone"}, {"tag": "second", "detour": "gone too"}],
+			  "route": {"rule_set": [` + ads + `], "Default_HTTP_Client": "second"}}`,
+			[]string{"detour http_client «second» указывает на «gone too», а такого outbound нет"},
+		},
+		// sing-box looks a client's detour up at its first dial: a client no
+		// rule set downloads through — none names it, none falls back to the
+		// default one (it has a client or a download detour of its own, or
+		// downloads nothing) — cannot fail the start
+		"HTTP clients no rule set downloads through": {
+			`{` + outbounds + `, "http_clients": [{"tag": "main", "detour": "gone"}, {"tag": "spare", "detour": "gone"}],
+			  "route": {"rule_set": [
+			    {"type": "remote", "tag": "own", "format": "binary", "url": "https://rules.example.com/own.srs", "http_client": {}},
+			    {"type": "remote", "tag": "legacy", "format": "binary", "url": "https://rules.example.com/legacy.srs", "download_detour": "A"},
+			    {"type": "local", "tag": "file", "format": "binary", "path": "file.srs"},
+			    {"tag": "inline", "rules": [{"domain_suffix": [".example.org"]}]}]}}`,
+			nil,
 		},
 		"DNS rule": {
 			`{` + outbounds + `, "dns": {"servers": [{"type": "local", "tag": "local"}], "rules": [{"type": "logical", "mode": "and", "rules": [{"Rule_Set": "gone"}, {"network": "udp"}], "server": "local"}]}}`,
@@ -195,6 +222,29 @@ func TestStartReferenceProblemsRefused(t *testing.T) {
 	}
 }
 
+// A shared HTTP client no rule set downloads through does not stand in the
+// way of deleting the outbound it dials through on the settings page (the
+// page cannot edit http_clients; sing-box starts without it). A rule set
+// made to download through that client afterwards is refused.
+func TestUnusedHTTPClientDetourAllowed(t *testing.T) {
+	path := writeConfig(t, `{
+  "http_clients": [{"tag": "main"}, {"tag": "spare", "detour": "old"}],
+  "outbounds": [
+    {"type": "vless", "tag": "old", "server": "192.0.2.10", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555"},
+    {"type": "direct", "tag": "direct"}
+  ],
+  "route": {"rule_set": [{"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs"}], "final": "direct"}
+}`)
+	if err := New(path).WriteSection("outbounds", []byte(`[{"type": "direct", "tag": "direct"}]`)); err != nil {
+		t.Fatalf("an outbound only an unused HTTP client dials through, deleted: %v", err)
+	}
+	err := New(path).WriteSection("route", []byte(`{"rule_set": [{"type": "remote", "tag": "ads", "format": "binary",
+	  "url": "https://rules.example.com/ads.srs", "http_client": "spare"}], "final": "direct"}`))
+	if err == nil || !strings.Contains(err.Error(), "detour http_client «spare» указывает на «old», а такого outbound нет") {
+		t.Fatalf("a rule set made to download through that client: %v", err)
+	}
+}
+
 // A problem the previous config had stays allowed wherever it moves — the
 // rules reordered, a rule moved into a logical one — and does not block
 // other saves; a new one in the same save is refused, alone
@@ -214,7 +264,8 @@ func TestStartReferenceProblemsKept(t *testing.T) {
     ],
     "rule_set": [
       {"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "download_detour": "gone"},
-      {"type": "remote", "tag": "cn", "format": "binary", "url": "https://rules.example.com/cn.srs", "http_client": {"detour": "gone"}}
+      {"type": "remote", "tag": "cn", "format": "binary", "url": "https://rules.example.com/cn.srs", "http_client": {"detour": "gone"}},
+      {"type": "remote", "tag": "fb", "format": "binary", "url": "https://rules.example.com/fb.srs", "http_client": "shared"}
     ],
     "default_http_client": "missing-client",
     "final": "proxy"
@@ -232,6 +283,7 @@ func TestStartReferenceProblemsKept(t *testing.T) {
       {"type": "logical", "mode": "and", "rules": [{"rule_set": ["missing-set"]}, {"network": "tcp"}], "action": "reject"}
     ],
     "rule_set": [
+      {"type": "remote", "tag": "fb", "format": "binary", "url": "https://rules.example.com/fb.srs", "http_client": "shared"},
       {"type": "remote", "tag": "cn", "format": "binary", "url": "https://rules.example.com/cn.srs", "http_client": {"detour": "gone"}},
       {"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "download_detour": "gone"}
     ],

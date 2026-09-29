@@ -195,11 +195,12 @@ func dependencyProblems(cfg map[string]any) []dependencyProblem {
 // detour not found"), a route rule's preferred_by ("outbound not found",
 // when the rules start, the last thing the router starts), the download
 // detour of a rule set (its download_detour, the detour of its own
-// http_client) and the detour of a shared HTTP client (http_clients) — the
-// first download of a rule set fails the start when there is no cached copy
-// ("initial rule-set"). Whether a copy is cached is only known then, and a
-// shared client may serve every rule set as the default one, so its detour
-// counts whether or not a rule set names it.
+// http_client) and the detour of a shared HTTP client (http_clients) a rule
+// set downloads through (downloadClients) — the first download of a rule
+// set fails the start when there is no cached copy ("initial rule-set").
+// Whether a copy is cached is only known then, so such a detour counts
+// either way. The detour of a shared client no rule set downloads through
+// does not: sing-box looks a detour up at the first dial through it.
 //
 // A rule set: a route rule's rule_set, also in the rules of a logical rule
 // ("rule-set not found", when the rules start); a DNS rule's is refused by
@@ -289,14 +290,14 @@ func referenceProblems(cfg map[string]any) []dependencyProblem {
 			check(clients, dependencyProblem{key: "default_http_client", origin: "route.default_http_client", kind: "http_client"}, stringTag(v))
 		}
 	}
+	downloading := downloadClients(cfg)
 	each(cfg, "http_clients", func(c map[string]any) {
 		tag := foldedString(c, "tag")
-		origin := "detour http_client"
-		if tag != "" {
-			origin += " «" + tag + "»"
+		if !downloading[tag] {
+			return
 		}
 		for _, detour := range fieldValues(c, "detour") {
-			check(outbounds, dependencyProblem{key: "http_client detour\x00" + tag, origin: origin}, stringTag(detour))
+			check(outbounds, dependencyProblem{key: "http_client detour\x00" + tag, origin: "detour http_client «" + tag + "»"}, stringTag(detour))
 		}
 	})
 	for _, dns := range objects(cfg, "dns") {
@@ -326,6 +327,81 @@ func referenceProblems(cfg map[string]any) []dependencyProblem {
 		}
 	}
 	return problems
+}
+
+// downloadClients are the tags of the shared HTTP clients (http_clients) a
+// rule set downloads through when sing-box starts (rule_set_remote.go,
+// resolveTransport): the one its http_client names by tag, and the default
+// one (defaultClients) for a remote rule set with neither an http_client of
+// its own — an object, even an empty one — nor a download_detour. Another
+// shared client serves only what names it outside the rule sets — a
+// hysteria2 realm, which no import brings, or what the guard keeps out
+// (services) — and is not checked here
+func downloadClients(cfg map[string]any) map[string]bool {
+	used := map[string]bool{}
+	fallback := false
+	for _, route := range objects(cfg, "route") {
+		each(route, "rule_set", func(rs map[string]any) {
+			own := false
+			for _, v := range fieldValues(rs, "http_client") {
+				switch client := v.(type) {
+				case string:
+					if client != "" {
+						used[client], own = true, true
+					}
+				case map[string]any:
+					own = true
+				}
+			}
+			for _, v := range fieldValues(rs, "download_detour") {
+				if s, _ := v.(string); s != "" {
+					own = true
+				}
+			}
+			// Only a remote rule set downloads; its type is a value, not folded
+			if !own && foldedString(rs, "type") == "remote" {
+				fallback = true
+			}
+		})
+	}
+	if fallback {
+		for _, tag := range defaultClients(cfg) {
+			used[tag] = true
+		}
+	}
+	return used
+}
+
+// defaultClients is the default shared HTTP client (httpclient.NewManager):
+// the one route.default_http_client names, otherwise the first of
+// http_clients. More than one only when a key comes in two spellings:
+// sing-box takes the later one, the order of keys is not kept here, and a
+// detour refused by mistake costs less than a broken start let through.
+func defaultClients(cfg map[string]any) []string {
+	var tags []string
+	empty := false
+	for _, route := range objects(cfg, "route") {
+		for _, v := range fieldValues(route, "default_http_client") {
+			if s, _ := v.(string); s != "" {
+				tags = append(tags, s)
+			} else {
+				empty = true
+			}
+		}
+	}
+	if len(tags) > 0 && !empty {
+		return tags
+	}
+	for _, v := range fieldValues(cfg, "http_clients") {
+		if list, _ := v.([]any); len(list) > 0 {
+			if c, ok := list[0].(map[string]any); ok {
+				if tag := foldedString(c, "tag"); tag != "" {
+					tags = append(tags, tag)
+				}
+			}
+		}
+	}
+	return tags
 }
 
 // ruleSetTags are the tags of a rule set: in sing-box 1.14 one entry may
