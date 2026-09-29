@@ -112,6 +112,7 @@ type fakeBinaryRepo struct {
 	current, latest string
 	installed       bool
 	downloadErr     error
+	stagedCheckErr  error // the new version refuses the config
 }
 
 func (f *fakeBinaryRepo) CurrentVersion() (string, error) { return f.current, nil }
@@ -121,7 +122,15 @@ func (f *fakeBinaryRepo) LatestRelease() (domain.ReleaseInfo, error) {
 func (f *fakeBinaryRepo) Download(domain.ReleaseInfo) (string, error) {
 	return "staged", f.downloadErr
 }
+func (f *fakeBinaryRepo) CheckConfig(binary string) error {
+	if binary == "" {
+		return nil
+	}
+	return f.stagedCheckErr
+}
+func (f *fakeBinaryRepo) Discard(string) error { return nil }
 func (f *fakeBinaryRepo) Install(string) error { f.installed = true; return nil }
+func (f *fakeBinaryRepo) Rollback() error      { return nil }
 
 func newUpdateTestServer(t *testing.T, repo *fakeBinaryRepo) (*Server, string) {
 	t.Helper()
@@ -168,6 +177,18 @@ func TestUpdateEndpoint(t *testing.T) {
 	status, data = call(t, "POST", base+"/api/update", session, map[string]string{})
 	if status == http.StatusOK || !strings.Contains(data["error"].(string), "checksum mismatch") || repo.installed {
 		t.Fatalf("failed download: status %d: %v (installed %v)", status, data, repo.installed)
+	}
+
+	// A new version that refuses the config: the page gets sing-box's reason
+	// and that the installed version stays
+	repo.downloadErr = nil
+	repo.stagedCheckErr = errors.New("inbounds[0].sniff: unknown field")
+	status, data = call(t, "POST", base+"/api/update", session, map[string]string{})
+	if status == http.StatusOK || repo.installed {
+		t.Fatalf("refused update: status %d: %v (installed %v)", status, data, repo.installed)
+	}
+	if msg, _ := data["error"].(string); !strings.Contains(msg, "unknown field") || !strings.Contains(msg, "продолжает работать установленная версия 1.12.0") {
+		t.Fatalf("refused update: %q", msg)
 	}
 }
 

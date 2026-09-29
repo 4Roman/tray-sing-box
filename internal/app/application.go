@@ -585,14 +585,24 @@ func subscriptionOutcome(result *domain.SubscriptionResult, err error) (text str
 func (a *Application) handleUpdate() {
 	a.runLocked(func() popup {
 		result, err := a.updateService.Update()
+		// Also after a failure: a rollback may have left the VPN down
+		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
 		if err != nil {
 			log.Printf("Update failed: %v", err)
-			return errorPopup(ui.UpdateErrorTitle, err)
+			return errorPopup(updateErrorTitle(result), err)
 		}
-
-		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
 		return infoPopup(ui.UpdateDoneTitle, updateMessage(result))
 	})
+}
+
+// updateErrorTitle heads the popup of a failed update: a new version that
+// refuses the config or does not start is an update called off — the
+// message says what runs now
+func updateErrorTitle(result *domain.UpdateResult) string {
+	if result != nil && (result.ConfigRejected || result.RolledBack) {
+		return ui.UpdateCancelledTitle
+	}
+	return ui.UpdateErrorTitle
 }
 
 // updateMessage formats the popup text for a finished update check

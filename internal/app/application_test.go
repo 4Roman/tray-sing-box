@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"tray-sing-box/internal/domain"
+	"tray-sing-box/internal/ui"
 )
 
 // A refresh after which only the VPN restart failed has recorded its new
@@ -48,6 +49,25 @@ func TestSubscriptionPopupsAfterAFailedRestart(t *testing.T) {
 	// Done: the result, not an error
 	if text, failed := subscriptionOutcome(result, nil); failed || !strings.Contains(text, "«bad»") {
 		t.Fatalf("tray popup = %q (error: %v)", text, failed)
+	}
+}
+
+// A new sing-box that refuses the config or does not start leaves the old
+// one in place: the popup is headed as an update called off, not a failure
+// of unknown consequence
+func TestUpdateErrorTitle(t *testing.T) {
+	for _, tc := range []struct {
+		result *domain.UpdateResult
+		want   string
+	}{
+		{nil, ui.UpdateErrorTitle},
+		{&domain.UpdateResult{Updated: true}, ui.UpdateErrorTitle},
+		{&domain.UpdateResult{ConfigRejected: true}, ui.UpdateCancelledTitle},
+		{&domain.UpdateResult{RolledBack: true}, ui.UpdateCancelledTitle},
+	} {
+		if got := updateErrorTitle(tc.result); got != tc.want {
+			t.Errorf("updateErrorTitle(%+v) = %q, want %q", tc.result, got, tc.want)
+		}
 	}
 }
 

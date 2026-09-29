@@ -19,14 +19,15 @@ const (
 	SettingsTitle   = "Настройки"
 	SettingsTooltip = "Открыть настройки sing-box в браузере"
 
-	UpdateTitle        = "Обновить sing-box"
-	UpdateTooltip      = "Скачать последний релиз sing-box с GitHub"
-	UpdateDoneTitle    = "Обновление sing-box"
-	UpdateErrorTitle   = "Ошибка обновления"
-	UpdateUpToDate     = "Обновление не требуется: установлена версия %s, последний релиз %s"
-	UpdateInstalled    = "sing-box обновлён: %s → %s"
-	UpdateFreshInstall = "Установлен sing-box %s"
-	UpdateRestarted    = ", VPN перезапущен"
+	UpdateTitle          = "Обновить sing-box"
+	UpdateTooltip        = "Скачать последний релиз sing-box с GitHub"
+	UpdateDoneTitle      = "Обновление sing-box"
+	UpdateErrorTitle     = "Ошибка обновления"
+	UpdateCancelledTitle = "Обновление sing-box отменено" // the new version refuses the config or does not start
+	UpdateUpToDate       = "Обновление не требуется: установлена версия %s, последний релиз %s"
+	UpdateInstalled      = "sing-box обновлён: %s → %s"
+	UpdateFreshInstall   = "Установлен sing-box %s"
+	UpdateRestarted      = ", VPN перезапущен"
 
 	ImportClipboardTitle   = "Импорт из буфера обмена"
 	ImportClipboardTooltip = "Импортировать сервер из ссылки в буфере обмена"

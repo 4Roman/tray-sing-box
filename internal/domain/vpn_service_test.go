@@ -15,14 +15,21 @@ type fakeProcessManager struct {
 	startErr error
 	stopErr  error
 	starts   int // Start calls, successful or not
+	// When set, decides every Start instead of startErr (e.g. by the binary
+	// a fake repository has installed)
+	startHook func() error
 }
 
 func (f *fakeProcessManager) Start() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts++
-	if f.startErr != nil {
-		return f.startErr
+	err := f.startErr
+	if f.startHook != nil {
+		err = f.startHook()
+	}
+	if err != nil {
+		return err
 	}
 	f.running = true
 	return nil

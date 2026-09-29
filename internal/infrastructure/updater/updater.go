@@ -7,8 +7,10 @@ package updater
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,12 +30,26 @@ const defaultAPIURL = "https://api.github.com/repos/SagerNet/sing-box/releases/l
 // versionLine matches the first line of `sing-box version` output
 var versionLine = regexp.MustCompile(`sing-box version (\S+)`)
 
+// ansiEscapes matches terminal color codes in sing-box output
+var ansiEscapes = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
 // Updater implements domain.BinaryRepository against GitHub releases
 type Updater struct {
 	exeDir  string
-	dataDir string // TEMP of the `sing-box version` runs (SingBoxEnv)
+	dataDir string // config.json; TEMP of the sing-box runs (SingBoxEnv)
 	apiURL  string
 	client  *http.Client
+
+	// What the last successful Install replaced, for Rollback. No lock:
+	// updates are serialized by the app's opMu
+	last *installRecord
+}
+
+// installRecord is what an Install changed in Bin
+type installRecord struct {
+	hadPrevious  bool     // sing-box.exe was replaced (kept as .old), not installed fresh
+	replacedDLLs []string // libraries that replaced one kept as .old
+	addedDLLs    []string // libraries that were not there before
 }
 
 // New creates an updater for the sing-box binary located in binDir (the
@@ -72,6 +88,62 @@ func binaryVersion(path, dataDir string) (string, error) {
 		return "", fmt.Errorf("unexpected version output: %q", strings.TrimSpace(string(output)))
 	}
 	return string(match[1]), nil
+}
+
+// CheckConfig runs `sing-box check` on the current config.json with binary:
+// a download staged by Download, or the installed sing-box.exe when binary
+// is "". Without a config.json there is nothing to check ("Скачать sing-box"
+// on a fresh install); without the binary the answer wraps
+// domain.ErrSingBoxMissing. A refusal is what sing-box printed.
+func (u *Updater) CheckConfig(binary string) error {
+	if binary == "" {
+		binary = filepath.Join(u.exeDir, config.SingBoxExe)
+	}
+	configPath := filepath.Join(u.dataDir, config.SingBoxConfig)
+	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if _, err := os.Stat(binary); err != nil {
+		return fmt.Errorf("%w at: %s", domain.ErrSingBoxMissing, binary)
+	}
+
+	// Run as the VPN runs: the binary's own folder on PATH (a staged exe
+	// finds the release's libraries next to it) and the data dir as the
+	// working directory (relative paths in the config resolve there).
+	// HelperOutput: not the VPN process, see process.HelperOutput
+	cmd := process.NewHiddenCommand(binary, "check", "-c", configPath)
+	cmd.Env = process.SingBoxEnv(filepath.Dir(binary), u.dataDir)
+	cmd.Dir = u.dataDir
+	output, err := process.HelperOutput(cmd)
+	if err != nil {
+		message := strings.TrimSpace(ansiEscapes.ReplaceAllString(string(output), ""))
+		if message == "" {
+			message = err.Error()
+		}
+		return errors.New(message)
+	}
+	return nil
+}
+
+// Discard removes a download that will not be installed: the staging
+// directory Download created, nothing else
+func (u *Updater) Discard(stagedPath string) error {
+	dir, ok := u.stagingDir(stagedPath)
+	if !ok {
+		return fmt.Errorf("not a staged download: %s", stagedPath)
+	}
+	return os.RemoveAll(dir)
+}
+
+// stagingDir is the directory of a staged download when it is one of
+// Download's staging directories in Bin
+func (u *Updater) stagingDir(stagedPath string) (string, bool) {
+	dir := filepath.Dir(stagedPath)
+	if !strings.HasPrefix(filepath.Base(dir), stagingPrefix) ||
+		!strings.EqualFold(filepath.Dir(dir), filepath.Clean(u.exeDir)) {
+		return "", false
+	}
+	return dir, true
 }
 
 // githubRelease is the subset of the GitHub release API response we use
@@ -257,18 +329,20 @@ func extractFromZip(zipPath, name, destPath string) error {
 }
 
 // Install replaces the working sing-box.exe with the staged binary. The
-// previous binary is kept as sing-box.exe.old and restored if the swap fails.
+// previous binary is kept as sing-box.exe.old and restored if the swap fails;
+// what was replaced is recorded for Rollback.
 func (u *Updater) Install(stagedPath string) error {
 	// Whatever happens, the staging directory goes (never Bin itself)
-	if dir := filepath.Dir(stagedPath); strings.HasPrefix(filepath.Base(dir), stagingPrefix) {
+	if dir, ok := u.stagingDir(stagedPath); ok {
 		defer os.RemoveAll(dir)
 	}
+	u.last = nil
 	target := filepath.Join(u.exeDir, config.SingBoxExe)
 	backup := target + ".old"
 
-	hadPrevious := false
+	record := &installRecord{}
 	if _, err := os.Stat(target); err == nil {
-		hadPrevious = true
+		record.hadPrevious = true
 		os.Remove(backup)
 		if err := os.Rename(target, backup); err != nil {
 			return fmt.Errorf("failed to back up the current binary: %w", err)
@@ -277,9 +351,8 @@ func (u *Updater) Install(stagedPath string) error {
 
 	// The release's DLLs first (the old ones kept as .old until the binary is
 	// in place): a new binary must not start with the old libraries
-	restoreDLLs, err := u.installDLLs(filepath.Dir(stagedPath))
-	if err != nil {
-		if hadPrevious {
+	if err := u.installDLLs(filepath.Dir(stagedPath), record); err != nil {
+		if record.hadPrevious {
 			os.Rename(backup, target)
 		}
 		return fmt.Errorf("failed to install the libraries: %w", err)
@@ -287,8 +360,8 @@ func (u *Updater) Install(stagedPath string) error {
 
 	// Copy instead of rename: the staging dir may be on another volume
 	if err := copyFile(stagedPath, target); err != nil {
-		restoreDLLs()
-		if hadPrevious {
+		u.restoreDLLs(record)
+		if record.hadPrevious {
 			os.Remove(target)
 			if restoreErr := os.Rename(backup, target); restoreErr != nil {
 				return fmt.Errorf("install failed (%v) and restore failed: %w", err, restoreErr)
@@ -297,38 +370,80 @@ func (u *Updater) Install(stagedPath string) error {
 		return fmt.Errorf("failed to install the new binary: %w", err)
 	}
 
+	u.last = record
 	return nil
 }
 
-// installDLLs copies the staged *.dll into Bin, keeping replaced ones as
-// .old; the returned func undoes it
-func (u *Updater) installDLLs(stagedDir string) (func(), error) {
-	dlls, _ := filepath.Glob(filepath.Join(stagedDir, "*.dll"))
-	var done []string
-	undo := func() {
-		for _, name := range done {
-			target := filepath.Join(u.exeDir, name)
-			os.Remove(target)
-			os.Rename(target+".old", target)
-		}
+// Rollback puts back what the last Install replaced: the previous
+// sing-box.exe and libraries from their .old copies (over the new ones), and
+// removes the libraries that release added — the new version does not
+// start. sing-box must be stopped. An error when that Install had no
+// previous binary: there is nothing to go back to.
+func (u *Updater) Rollback() error {
+	record := u.last
+	if record == nil {
+		return errors.New("no installed update to roll back")
 	}
+	if !record.hadPrevious {
+		return errors.New("there was no previous sing-box.exe")
+	}
+	u.last = nil
+
+	target := filepath.Join(u.exeDir, config.SingBoxExe)
+	var errs []error
+	// A rename replaces the new binary (the .old is on the same volume)
+	if err := os.Rename(target+".old", target); err != nil {
+		errs = append(errs, fmt.Errorf("failed to restore the previous binary: %w", err))
+	}
+	if err := u.restoreDLLs(record); err != nil {
+		errs = append(errs, fmt.Errorf("failed to restore the libraries: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// installDLLs copies the staged *.dll into Bin, keeping replaced ones as
+// .old, and records which ones replaced a library and which are new; on
+// failure it has undone itself
+func (u *Updater) installDLLs(stagedDir string, record *installRecord) error {
+	dlls, _ := filepath.Glob(filepath.Join(stagedDir, "*.dll"))
 	for _, src := range dlls {
 		name := filepath.Base(src)
 		target := filepath.Join(u.exeDir, name)
 		if _, err := os.Stat(target); err == nil {
 			os.Remove(target + ".old")
 			if err := os.Rename(target, target+".old"); err != nil {
-				undo()
-				return func() {}, err
+				u.restoreDLLs(record)
+				return err
 			}
+			record.replacedDLLs = append(record.replacedDLLs, name)
+		} else {
+			record.addedDLLs = append(record.addedDLLs, name)
 		}
-		done = append(done, name)
 		if err := copyFile(src, target); err != nil {
-			undo()
-			return func() {}, err
+			u.restoreDLLs(record)
+			return err
 		}
 	}
-	return undo, nil
+	return nil
+}
+
+// restoreDLLs undoes installDLLs: the replaced libraries back from .old, the
+// added ones removed (a stale .old of a library that was not there is left
+// alone — it is no backup of this install)
+func (u *Updater) restoreDLLs(record *installRecord) error {
+	var errs []error
+	for _, name := range record.replacedDLLs {
+		target := filepath.Join(u.exeDir, name)
+		if err := os.Rename(target+".old", target); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, name := range record.addedDLLs {
+		if err := os.Remove(filepath.Join(u.exeDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // stagingPrefix names the download directories inside Bin

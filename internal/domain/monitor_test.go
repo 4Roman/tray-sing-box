@@ -247,6 +247,23 @@ func TestWithStoppedStartsAgainEvenWhenFnFails(t *testing.T) {
 	}
 }
 
+// Only a change that went through is taken back: a failed fn has put things
+// back itself, so the failed start was one of what ran before — no undo
+func TestWithStoppedOrUndoLeavesAFailedFnAlone(t *testing.T) {
+	pm := &fakeProcessManager{running: true, startErr: errors.New("TUN adapter busy")}
+	svc := NewVPNService(pm, &fakeStorage{state: true})
+
+	fnErr := errors.New("swap failed")
+	undone := false
+	outcome, err := svc.WithStoppedOrUndo(func() error { return fnErr }, func() error { undone = true; return nil })
+	if !errors.Is(err, fnErr) || undone || outcome.Undone || outcome.Restarted {
+		t.Fatalf("WithStoppedOrUndo = %+v, %v (undo called: %v)", outcome, err, undone)
+	}
+	if pm.startCount() != 1 {
+		t.Fatalf("starts = %d, want one", pm.startCount())
+	}
+}
+
 // The restore starts the process only: the intent is already "running"
 func TestRestoreDoesNotRewriteIntent(t *testing.T) {
 	pm := &fakeProcessManager{}

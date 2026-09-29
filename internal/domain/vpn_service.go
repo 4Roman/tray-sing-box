@@ -164,37 +164,83 @@ func (s *VPNService) RestartIfRunning() (bool, error) {
 // monitor is held off for the whole duration. The returned error is the stop
 // failure (fn was not called), fn's own error, or the failure to start again.
 func (s *VPNService) WithStopped(fn func() error) (restarted bool, err error) {
+	outcome, err := s.WithStoppedOrUndo(fn, nil)
+	return outcome.Restarted, err
+}
+
+// SwapOutcome is what became of the start after WithStoppedOrUndo's fn
+type SwapOutcome struct {
+	Restarted  bool  // the process runs again: after fn, or after the undo
+	StartErr   error // it was running before and did not start after fn
+	Undone     bool  // undo took fn back after that
+	UndoErr    error // undo failed: nothing was started again
+	RestartErr error // the start after a successful undo failed as well
+}
+
+// WithStoppedOrUndo is WithStopped for a change that can be taken back (the
+// binary swap): when fn succeeded but the process that was running does not
+// start after it, undo reverts fn and the process is started once more. All
+// of it under the one hold of lifeMu: the crash monitor never retries the
+// change that does not start, nor sees the state half way back. The error is
+// WithStopped's (a failed start included, also when the undo brought the
+// process back); the outcome tells the rest. A nil undo is WithStopped.
+func (s *VPNService) WithStoppedOrUndo(fn, undo func() error) (outcome SwapOutcome, err error) {
 	s.lifeMu.Lock()
 	defer s.lifeMu.Unlock()
 
 	wasRunning := s.processManager.IsRunning()
 	if wasRunning {
 		if err := s.processManager.Stop(); err != nil {
-			return false, fmt.Errorf("failed to stop VPN: %w", err)
+			return outcome, fmt.Errorf("failed to stop VPN: %w", err)
 		}
 		s.notifyStatusChange(VPNStatusStopped)
 	}
 
 	fnErr := fn()
 
-	if !wasRunning && fnErr == nil {
-		// The binary was replaced while the VPN was down: a monitor that had
-		// given up (e.g. sing-box.exe was missing) may try again
-		s.resetAutoRestarts()
+	if !wasRunning {
+		if fnErr == nil {
+			// The binary was replaced while the VPN was down: a monitor that
+			// had given up (e.g. sing-box.exe was missing) may try again
+			s.resetAutoRestarts()
+		}
+		// Nothing ran before, so nothing tells whether fn's change starts:
+		// no undo
+		return outcome, fnErr
 	}
 
-	if wasRunning {
-		if err := s.processManager.Start(); err != nil {
-			log.Printf("Failed to start VPN again: %v", err)
-			if fnErr == nil {
-				fnErr = fmt.Errorf("failed to start VPN again: %w", err)
-			}
-		} else {
-			restarted = true
-			s.notifyStatusChange(VPNStatusRunning)
+	if outcome.StartErr = s.processManager.Start(); outcome.StartErr != nil {
+		log.Printf("Failed to start VPN again: %v", outcome.StartErr)
+		// Only a change that went through is taken back: a failed fn has
+		// put things back itself, and the start then failed on what ran before
+		if fnErr == nil && undo != nil {
+			s.undoAndStart(undo, &outcome)
+		}
+		if fnErr == nil {
+			fnErr = fmt.Errorf("failed to start VPN again: %w", outcome.StartErr)
 		}
 	}
-	return restarted, fnErr
+
+	outcome.Restarted = outcome.StartErr == nil || (outcome.Undone && outcome.RestartErr == nil)
+	if outcome.Restarted {
+		s.notifyStatusChange(VPNStatusRunning)
+	}
+	return outcome, fnErr
+}
+
+// undoAndStart takes back a change the process did not start after, and
+// starts it again unless the undo failed (a half-restored state is left to
+// the monitor). Called with lifeMu held.
+func (s *VPNService) undoAndStart(undo func() error, outcome *SwapOutcome) {
+	log.Printf("Taking the change back")
+	if outcome.UndoErr = undo(); outcome.UndoErr != nil {
+		log.Printf("Failed to take the change back: %v", outcome.UndoErr)
+		return
+	}
+	outcome.Undone = true
+	if outcome.RestartErr = s.processManager.Start(); outcome.RestartErr != nil {
+		log.Printf("Failed to start VPN after taking the change back: %v", outcome.RestartErr)
+	}
 }
 
 // GetStatus returns current VPN status
