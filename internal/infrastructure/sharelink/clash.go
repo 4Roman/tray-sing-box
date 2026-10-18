@@ -622,14 +622,21 @@ func clashTrojan(m clashMap) (string, error) {
 // TLS or REALITY, the certificate check and the transport. The server name
 // is set as mihomo picks it — servername (trojan: sni), for a WebSocket then
 // its Host header, then the server — and not left to the link parser, which
-// falls back to the Host header for every transport.
+// falls back to the Host header for every transport. So is the Host header
+// of a WebSocket that names none (see clashTransport).
 func clashV2Ray(m clashMap, typ, server string) (url.Values, error) {
 	q := url.Values{}
 	tlsOn := m.flag("tls")
+	// mihomo reads servername for vless and vmess, sni for trojan; the other
+	// key is taken when the right one is missing, it is what the generator meant
+	trojanSNI := ""
 	if typ == "trojan" {
 		// Trojan is TLS to mihomo whatever tls says; 3x-ui writes tls: false
 		// for its trojan without TLS, which sing-box runs
 		tlsOn = tlsOn || !m.has("tls")
+		if trojanSNI = clashFirst(m, "sni", "servername"); trojanSNI == "" {
+			trojanSNI = server
+		}
 	}
 	if err := clashTLSAddons(m); err != nil {
 		return nil, err
@@ -648,7 +655,19 @@ func clashV2Ray(m clashMap, typ, server string) (url.Values, error) {
 	default:
 		q.Set("security", "none")
 	}
-	wsHost, err := clashTransport(m, q, tlsOn)
+	// The Host header mihomo sends over a WebSocket that names none: trojan's
+	// server name, the server for vmess and for vless over TLS — vless without
+	// TLS sends a random one, which no server can check
+	wsDefault := trojanSNI
+	if typ == "vmess" || typ == "vless" && tlsOn {
+		wsDefault = server
+		if strings.Contains(server, ":") {
+			// An IPv6 address, as HTTP writes it in a Host (mihomo's Go
+			// client sends it bare)
+			wsDefault = "[" + server + "]"
+		}
+	}
+	wsHost, err := clashTransport(m, q, tlsOn, wsDefault)
 	if err != nil {
 		return nil, err
 	}
@@ -659,16 +678,14 @@ func clashV2Ray(m clashMap, typ, server string) (url.Values, error) {
 		return nil, err
 	}
 	setIf(q, "fp", m.str("client-fingerprint"))
-	// mihomo reads servername for vless and vmess, sni for trojan; the other
-	// key is taken when the right one is missing, it is what the generator meant
-	sni := clashFirst(m, "servername", "sni")
-	if typ == "trojan" {
-		sni = clashFirst(m, "sni", "servername")
-	} else if sni == "" {
-		sni = wsHost
-	}
-	if sni == "" {
-		sni = server
+	sni := trojanSNI
+	if typ != "trojan" {
+		if sni = clashFirst(m, "servername", "sni"); sni == "" {
+			sni = wsHost
+		}
+		if sni == "" {
+			sni = server
+		}
 	}
 	q.Set("sni", sni)
 	return q, nil
@@ -687,8 +704,10 @@ func clashFirst(m clashMap, keys ...string) string {
 // clashTransport sets the transport of a vless, vmess or trojan entry in the
 // link's query, under the names the link parser reads. wsHost is the Host
 // header of a WebSocket or an HTTPUpgrade: mihomo's server name for TLS when
-// the entry names none.
-func clashTransport(m clashMap, q url.Values, tlsOn bool) (wsHost string, err error) {
+// the entry names none. A WebSocket of mihomo's (its HTTPUpgrade too)
+// without a Host header sends wsDefault, which is written out: sing-box
+// would send the server with its port (its HTTPUpgrade the TLS server name).
+func clashTransport(m clashMap, q url.Values, tlsOn bool, wsDefault string) (wsHost string, err error) {
 	network := strings.ToLower(strings.TrimSpace(m.str("network")))
 	switch network {
 	case "", "tcp":
@@ -721,7 +740,11 @@ func clashTransport(m clashMap, q url.Values, tlsOn bool) (wsHost string, err er
 			}
 		}
 		setIf(q, "path", path)
-		setIf(q, "host", host)
+		if host == "" {
+			setIf(q, "host", wsDefault)
+		} else {
+			q.Set("host", host)
+		}
 		return host, nil
 	case "httpupgrade":
 		// 3x-ui's own spelling; mihomo calls it ws with v2ray-http-upgrade

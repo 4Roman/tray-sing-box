@@ -400,6 +400,76 @@ var acceptedClash = []clashCase{
       headers:
         Host: cdn.example.com`,
 		`{"tls":{"server_name":"192.0.2.30"},"transport":{"type":"ws","headers":{"Host":"cdn.example.com"}}}`},
+	// The Host header mihomo sends when the entry names none: trojan's
+	// server name, the server for vless and vmess — not sing-box's
+	// server:port, nor the TLS server name it and Xray fall back to
+	{"trojan ws without a Host header: its sni is the Host", `
+  - name: tr-ws-sni
+    server: 104.16.1.1
+    port: 443
+    type: trojan
+    password: example
+    sni: my.example.com
+    network: ws
+    ws-opts:
+      path: /ws`,
+		`{"tls":{"server_name":"my.example.com"},"transport":{"type":"ws","path":"/ws","headers":{"Host":"my.example.com"}}}`},
+	{"trojan HTTPUpgrade without a host: the server, its sni", `
+  - name: tr-hu
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    network: ws
+    ws-opts:
+      v2ray-http-upgrade: true`,
+		`{"tls":{"server_name":"192.0.2.30"},"transport":{"type":"httpupgrade","host":"192.0.2.30"}}`},
+	{"vless ws over TLS without a Host header: the server, not the server name", `
+  - name: vl-ws-server
+    type: vless
+    server: cdn.example.net
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: my.example.com
+    network: ws
+    ws-opts:
+      path: /ws`,
+		`{"tls":{"server_name":"my.example.com"},"transport":{"type":"ws","path":"/ws","headers":{"Host":"cdn.example.net"}}}`},
+	{"vless HTTPUpgrade over TLS without a host: the server, not the server name", `
+  - name: vl-hu-server
+    type: vless
+    server: 192.0.2.12
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: hu.example.com
+    network: ws
+    ws-opts:
+      path: /hu
+      v2ray-http-upgrade: true`,
+		`{"tls":{"server_name":"hu.example.com"},"transport":{"type":"httpupgrade","path":"/hu","host":"192.0.2.12"}}`},
+	// mihomo sends a random host there: nothing the server can check
+	{"vless ws without TLS and a Host header: sing-box's own", `
+  - name: vl-ws-plain
+    type: vless
+    server: 192.0.2.11
+    port: 80
+    uuid: ` + testUUID + `
+    network: ws`,
+		`{"tls":null,"transport":{"type":"ws","headers":null}}`},
+	{"vmess ws without TLS and a Host header: the server", `
+  - name: vm-ws-plain
+    type: vmess
+    server: 192.0.2.20
+    port: 8080
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: ws
+    ws-opts:
+      path: /vm`,
+		`{"tls":null,"transport":{"type":"ws","path":"/vm","headers":{"Host":"192.0.2.20"}}}`},
 	// The key the other protocol reads is what the generator meant
 	{"trojan with servername only", `
   - name: tr-servername
@@ -592,7 +662,7 @@ var acceptedClash = []clashCase{
     Skip_Cert_Verify: "true"
     SERVERNAME: k.example.com`,
 		`{"type":"vless","tag":"K","server":"2001:db8::1","server_port":443,"tls":{"server_name":"k.example.com","insecure":true},
-		  "transport":{"type":"ws","path":"/k"}}`},
+		  "transport":{"type":"ws","path":"/k","headers":{"Host":"[2001:db8::1]"}}}`},
 	// A pin alone is dropped as on the links (the chain is checked), a
 	// name-cert-verify for the server name is the ordinary check
 	{"pin alone and name-cert-verify of the server name", `
