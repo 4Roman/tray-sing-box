@@ -671,6 +671,14 @@ func overQUIC(outbound Outbound) bool {
 // drops the upgrade request. Xray clients always offered http/1.1 there, so
 // such links work in them; the alpn is left out. The QUIC transport runs
 // its own TLS: no uTLS (sing-box does none over QUIC), no REALITY.
+//
+// A WebSocket of a link without host= gets the Host header Xray sends —
+// v2rayN and v2rayNG run Xray: the TLS server name (Xray's websocket
+// dialer: the host, else the TLS server name, else the address, never a
+// port). sing-box would send the server's address with its port, which a
+// CDN in front of the server routes nowhere. Its HTTPUpgrade falls back to
+// the TLS server name itself. Over REALITY Xray has no TLS settings to take
+// a name from (and runs no WebSocket).
 func fitTLSToTransport(tls, transport map[string]any) error {
 	if tls == nil || transport == nil {
 		return nil
@@ -678,6 +686,23 @@ func fitTLSToTransport(tls, transport map[string]any) error {
 	switch transport["type"] {
 	case "ws", "httpupgrade":
 		delete(tls, "alpn")
+		_, reality := tls["reality"]
+		if serverName, _ := tls["server_name"].(string); transport["type"] == "ws" && !reality && serverName != "" {
+			headers, _ := transport["headers"].(map[string]any)
+			for key := range headers {
+				if strings.EqualFold(key, "host") {
+					return nil
+				}
+			}
+			if headers == nil {
+				headers = map[string]any{}
+			}
+			if strings.Contains(serverName, ":") {
+				serverName = "[" + serverName + "]" // an IPv6 address, as a Host has it
+			}
+			headers["Host"] = serverName
+			transport["headers"] = headers
+		}
 	case "quic":
 		if _, reality := tls["reality"]; reality {
 			return errors.New("REALITY поверх транспорта QUIC не поддерживается sing-box")

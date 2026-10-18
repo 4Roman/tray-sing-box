@@ -158,6 +158,29 @@ var acceptedLinks = []linkCase{
 	{"vmess grpc custom path",
 		vmessJSON(`{"ps":"vm-grpc-path","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"grpc","path":"/vmsvc/Tun","tls":"tls"}`),
 		`{"transport":{"type":"grpc","service_name":"vmsvc"}}`},
+	// A WebSocket without host= sends the TLS server name as its Host, as
+	// Xray (v2rayN, v2rayNG) does — sing-box would send address:port
+	{"ws over TLS without a host",
+		"vless://" + testUUID + "@192.0.2.10:443?type=ws&path=%2Fws&security=tls&sni=front.example.com#ws-sni-host",
+		`{"tls":{"server_name":"front.example.com"},"transport":{"type":"ws","path":"/ws","headers":{"Host":"front.example.com"}}}`},
+	{"trojan ws without a host or an sni",
+		"trojan://secret@[2001:db8::1]:443?type=ws&path=%2Fws#ws-ipv6-host",
+		`{"tls":{"server_name":"2001:db8::1"},"transport":{"headers":{"Host":"[2001:db8::1]"}}}`},
+	{"vmess ws over TLS without a host",
+		vmessJSON(`{"ps":"vm-ws-sni","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","path":"/ws","tls":"tls","sni":"front.example.com"}`),
+		`{"transport":{"type":"ws","headers":{"Host":"front.example.com"}}}`},
+	{"ws keeps its host",
+		"vless://" + testUUID + "@192.0.2.10:443?type=ws&host=cdn.example.com&security=tls&sni=front.example.com#ws-own-host",
+		`{"tls":{"server_name":"front.example.com"},"transport":{"headers":{"Host":"cdn.example.com"}}}`},
+	// Without TLS Xray sends the address too, sing-box with its port
+	{"ws without TLS or a host",
+		"vless://" + testUUID + "@192.0.2.10:80?type=ws&path=%2Fws&security=none#ws-plain-host",
+		`{"tls":null,"transport":{"type":"ws","headers":null}}`},
+	// sing-box's HTTPUpgrade takes the TLS server name by itself
+	{"httpupgrade over TLS without a host",
+		"vless://" + testUUID + "@192.0.2.10:443?type=httpupgrade&path=%2Fhu&security=tls&sni=front.example.com#hu-sni-host",
+		`{"transport":{"type":"httpupgrade","host":null,"headers":null}}`},
+
 	// A gRPC authority that is the server name sing-box sends anyway: kept
 	{"grpc authority of the server name",
 		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&authority=Front.Example.com%3A443&security=tls&sni=front.example.com#grpc-authority",
