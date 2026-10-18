@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"tray-sing-box/internal/domain"
 )
 
 // Modeled after the user's real config: per-process rules use a proxy,
@@ -166,6 +168,25 @@ func TestSwitchOutboundRepointsRules(t *testing.T) {
 	active, _ := e.ActiveOutbound()
 	if active != "proxy_vless" {
 		t.Fatalf("active after switch = %q", active)
+	}
+}
+
+// A server that is gone (a subscription refresh removed it while "select the
+// fastest" measured) or that is no proxy is refused with the error the
+// latency service tells the user about in its own words, nothing written
+func TestSwitchOutboundToAMissingServer(t *testing.T) {
+	path := writeRouted(t)
+	e := New(path)
+	before, _ := os.ReadFile(path)
+	for _, tag := range []string{"gone", "direct"} {
+		if err := e.SwitchOutbound(tag); !errors.Is(err, domain.ErrNoSuchOutbound) {
+			t.Fatalf("SwitchOutbound(%q) = %v, want ErrNoSuchOutbound", tag, err)
+		} else if !strings.Contains(err.Error(), `outbound "`+tag+`" not found or is not a proxy`) {
+			t.Fatalf("SwitchOutbound(%q) = %v", tag, err)
+		}
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatal("config.json changed")
 	}
 }
 

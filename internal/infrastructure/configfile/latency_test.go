@@ -666,21 +666,25 @@ func TestRoutingTarget(t *testing.T) {
 		name, route string
 		want        domain.RoutingTarget
 	}{
-		{"node as final", `{"final": "a"}`, domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}}},
+		{"node as final", `{"final": "a"}`, domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}},
 		{"selector as final", `{"rules": [{"rule_set": "ru", "outbound": "direct"}], "final": "proxy"}`,
-			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy"}},
+			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy"}},
 		{"urltest by a rule", `{"rules": [{"action": "sniff"}, {"domain": ["x"], "outbound": "auto"}], "final": "direct"}`,
-			domain.RoutingTarget{Kind: domain.RoutingURLTest, Tag: "auto"}},
+			domain.RoutingTarget{Kind: domain.RoutingURLTest, Tag: "auto", Groups: []string{"auto"}, Final: "direct", InRules: true}},
 		{"split between two servers", `{"rules": [{"domain": ["x"], "outbound": "a"}, {"domain": ["y"], "outbound": "a"}], "final": "b"}`,
-			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a", "b"}}},
+			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a", "b"}, Final: "b", InRules: true}},
 		{"the first rule decides, groups are no proxies", `{"rules": [{"domain": ["x"], "outbound": "proxy"}], "final": "b"}`,
-			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", ProxyRefs: []string{"b"}}},
+			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", ProxyRefs: []string{"b"}, Groups: []string{"proxy"}, Final: "b", InRules: true}},
+		{"a group by a rule and as final", `{"rules": [{"clash_mode": "Global", "outbound": "proxy"}], "final": "proxy"}`,
+			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy", InRules: true}},
+		{"a server by a rule, a group as final", `{"rules": [{"domain": ["x"], "outbound": "a"}], "final": "auto"}`,
+			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Groups: []string{"auto"}, Final: "auto", InRules: true}},
 		{"direct, block and a relay are none", `{"rules": [{"outbound": "block"}, {"outbound": "stls"}], "final": "direct"}`,
-			domain.RoutingTarget{}},
+			domain.RoutingTarget{Final: "direct"}},
 		{"folded keys", `{"Rules": [{"Outbound": "b"}], "FINAL": "a"}`,
-			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "b", ProxyRefs: []string{"b", "a"}}},
+			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "b", ProxyRefs: []string{"b", "a"}, Final: "a", InRules: true}},
 		{"without final the first outbound is the default", `{"rules": [{"outbound": "direct"}]}`,
-			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy"}},
+			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -692,7 +696,7 @@ func TestRoutingTarget(t *testing.T) {
 	}
 	// No route at all: the first outbound takes everything
 	got := routingTarget(probeConfig(t, `{"outbounds": [{"type": "vless", "tag": "a"}, {"type": "direct", "tag": "direct"}]}`))
-	if want := (domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}}); !reflect.DeepEqual(got, want) {
+	if want := (domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}); !reflect.DeepEqual(got, want) {
 		t.Errorf("routingTarget without route = %+v, want %+v", got, want)
 	}
 }

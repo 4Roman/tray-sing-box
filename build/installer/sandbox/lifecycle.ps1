@@ -21,6 +21,10 @@ page opens in, the setup started by the shell); elevation is then granted
 without a prompt, and each phase elevates itself:
     lifecycle.ps1 -Setup <setup.exe> -SingBoxDir <dir> -Uac -Phases dir-refused,interactive,...
 -KeepOpen leaves the sandbox running (its id is printed; `wsb stop --id <id>`).
+The latency test (the settings page, "select the fastest", the tray item, a
+TUN config, the app killed during a check) measures through local servers to
+www.gstatic.com, so it needs the network:
+    lifecycle.ps1 -Setup <setup.exe> -SingBoxDir <dir> -Network -Phases install,latency,collect
 For a look by hand at a clean installation (the first-config section of the
 settings page), with the network and the clipboard shared:
     lifecycle.ps1 -Setup <setup.exe> -SingBoxDir <dir> -Phases fresh -Network -Clipboard -KeepOpen

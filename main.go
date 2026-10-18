@@ -22,6 +22,7 @@ import (
 	"tray-sing-box/internal/infrastructure/configfile"
 	"tray-sing-box/internal/infrastructure/connectivity"
 	"tray-sing-box/internal/infrastructure/dpibypass"
+	"tray-sing-box/internal/infrastructure/latency"
 	"tray-sing-box/internal/infrastructure/logger"
 	"tray-sing-box/internal/infrastructure/logtail"
 	"tray-sing-box/internal/infrastructure/migrate"
@@ -234,6 +235,14 @@ func main() {
 	application = app.New(vpnService, importService, updateService, dpiService, subscriptionService, connectivityService, importSources, settingsUI, autostartManager)
 	// One lock for the long operations of both entry points (tray + web UI)
 	settingsUI.ShareOpLock(application.OpLock())
+
+	// Latency test and "select the fastest server": every server is measured
+	// by a short-lived sing-box of its own (the VPN is not touched); only
+	// the switch to the fastest takes the operation lock
+	latencyService := domain.NewLatencyService(configEditor, latency.New(layout.Bin, layout.Data),
+		settingsService.UseOutbound, application.OpLock())
+	settingsUI.SetLatency(latencyService)
+	application.SetLatency(latencyService)
 
 	// Self-update of this app from its GitHub releases (only when the
 	// repository and the signing key are configured, see config)

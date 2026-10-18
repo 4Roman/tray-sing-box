@@ -50,6 +50,16 @@
   .outbound .badge {
     font-size: 12px; color: #4cc36a; margin-left: auto;
   }
+  /* The delay of the last latency check, right-aligned before the badge */
+  .outbound .latency {
+    font-size: 12px; margin-left: auto; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .outbound .latency + .badge { margin-left: 10px; }
+  .outbound .latency.fast { color: #4cc36a; }
+  .outbound .latency.mid { color: #e8c872; }
+  .outbound .latency.slow { color: #f1948f; }
+  .outbound .latency.none { color: #8b929e; }
   #msg {
     position: sticky; top: 12px; z-index: 5;
     border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
@@ -133,7 +143,14 @@
 <section>
   <h2>Активный сервер</h2>
   <div id="outbound-list"></div>
-  <button id="switch-btn" onclick="switchOutbound()">Использовать выбранный</button>
+  <div class="row">
+    <button id="switch-btn" onclick="switchOutbound()">Использовать выбранный</button>
+    <button id="latency-btn" class="secondary" onclick="testLatency()" hidden>Проверить задержку</button>
+    <button id="fastest-btn" class="secondary" onclick="selectFastest()" hidden>Выбрать самый быстрый</button>
+  </div>
+  <div id="latency-note" class="vpn-state" style="margin-top:10px" hidden>
+    Задержка — время до ответа https://www.gstatic.com через сервер (подключение, рукопожатие и один запрос; так же меряет группа urltest). Каждый сервер проверяется напрямую, мимо правил маршрутизации, отдельным временным sing-box — работающий VPN не затрагивается. Проверка подключается ко всем серверам списка с вашего адреса.
+  </div>
 </section>
 
 <section>
@@ -233,10 +250,10 @@ if (SESSION) history.replaceState(null, '', '/');
 let sessionEnded = false;
 let msgTimer = null;
 
-// show puts a message at the top of the page. A success goes away by itself;
-// a problem, or a list to read, stays until the next message or until the
-// user closes it.
-function show(kind, text) {
+// show puts a message at the top of the page. A success goes away by itself
+// (unless keep: the progress of a long operation); a problem, or a list to
+// read, stays until the next message or until the user closes it.
+function show(kind, text, keep) {
   // Once the session is over its notice stays; later failures add nothing
   if (sessionEnded) return;
   const el = document.getElementById('msg');
@@ -245,7 +262,7 @@ function show(kind, text) {
   el.className = kind;
   body.textContent = text;
   body.scrollTop = 0;
-  if (kind === 'ok') msgTimer = setTimeout(hideMsg, 6000);
+  if (kind === 'ok' && !keep) msgTimer = setTimeout(hideMsg, 6000);
 }
 
 function hideMsg() {
@@ -284,7 +301,14 @@ async function api(path, body) {
   return data;
 }
 
+// The servers as the last refresh listed them, and the results of the last
+// latency check by tag (from the page or the tray)
+let outboundList = [], outboundActive = '';
+let latencyResults = {};
+
 function renderOutbounds(list, active) {
+  outboundList = list;
+  outboundActive = active;
   const box = document.getElementById('outbound-list');
   box.innerHTML = '';
   for (const o of list) {
@@ -303,19 +327,25 @@ function renderOutbounds(list, active) {
     label.append(radio, tag, type);
     // A ShadowTLS helper only wraps the connection of the server that names
     // it as its detour: selected itself, nothing connects
-    if (o.type === 'shadowtls') {
-      radio.disabled = true;
+    if (o.type === 'shadowtls') radio.disabled = true;
+    // What the latency check says about the server (why it was not tested,
+    // why it is never the fastest) says the same and more than the hints
+    const result = latencyResults[o.tag];
+    const hints = [];
+    if (result && result.note) {
+      hints.push(result.note);
+    } else {
+      if (o.type === 'shadowtls') hints.push('промежуточный узел, только через detour');
+      if (o.tag === 'dpi-bypass') hints.push('обход DPI без VPN');
+    }
+    for (const text of hints) {
       const hint = document.createElement('span');
       hint.className = 'type';
-      hint.textContent = 'промежуточный узел, только через detour';
+      hint.textContent = text;
       label.append(hint);
     }
-    if (o.tag === 'dpi-bypass') {
-      const hint = document.createElement('span');
-      hint.className = 'type';
-      hint.textContent = 'обход DPI без VPN';
-      label.append(hint);
-    }
+    const mark = result && latencyMark(result);
+    if (mark) label.append(mark);
     if (o.tag === active) {
       const badge = document.createElement('span');
       badge.className = 'badge';
@@ -353,6 +383,15 @@ async function refresh() {
     btn.dataset.want = (d.running || d.status === 'starting') ? 'false' : 'true';
     btn.textContent = btn.dataset.want === 'true' ? 'Включить' : 'Выключить';
     btn.disabled = false;
+    // The latency test: only when the app has it, and there is a config
+    const latency = !!d.latency && !missing;
+    for (const id of ['latency-btn', 'fastest-btn', 'latency-note']) {
+      document.getElementById(id).hidden = !latency;
+    }
+    if (latency && !latencyLoaded) {
+      latencyLoaded = true;
+      await loadLatency();
+    }
     if (missing) {
       document.getElementById('outbound-list').textContent = 'Конфига ещё нет — см. «Первоначальная настройка» выше';
     } else {
@@ -473,6 +512,100 @@ function switchOutbound() {
     show('ok', 'Трафик переключён на «' + chosen.value + '»' + restartedSuffix(d));
     await refresh();
   });
+}
+
+// --- the latency test ---------------------------------------------------------
+// Every server is measured by a separate short-lived sing-box of the app; the
+// page gets tags, delays and notes only. Everything it shows of a report goes
+// through textContent: a tag or a note may come from a subscription.
+
+let latencyLoaded = false;
+const LATENCY_STATUS_RU = { timeout: 'нет ответа', error: 'ошибка', unfinished: 'не успели' };
+
+// latencyMark is the delay of one server as the list shows it; null for a
+// server that was not measured (its note says why)
+function latencyMark(r) {
+  const span = document.createElement('span');
+  span.className = 'latency';
+  if (r.status === 'ok') {
+    span.textContent = r.delay_ms + ' мс';
+    span.classList.add(r.delay_ms < 200 ? 'fast' : r.delay_ms < 500 ? 'mid' : 'slow');
+    return span;
+  }
+  if (!LATENCY_STATUS_RU[r.status]) return null;
+  span.textContent = LATENCY_STATUS_RU[r.status];
+  span.classList.add(r.status === 'unfinished' ? 'none' : 'slow');
+  return span;
+}
+
+function showLatency(report) {
+  latencyResults = {};
+  for (const r of (report && report.results) || []) latencyResults[r.tag] = r;
+  // Before the first refresh there is no list to mark yet
+  if (outboundList.length) renderOutbounds(outboundList, outboundActive);
+}
+
+// latencySummary: when the check ran, how many answered, the fastest
+function latencySummary(report) {
+  if (!report.total) return 'В конфиге нет серверов, которые можно проверить — причины указаны рядом с ними.';
+  let text = 'Проверено в ' + new Date(report.tested).toLocaleTimeString() + ': ответили ' +
+    report.answered + ' из ' + report.total;
+  const best = (report.results || []).find(r => r.tag === report.fastest && r.status === 'ok');
+  if (best) text += '. Быстрее всех — «' + best.tag + '» (' + best.delay_ms + ' мс)';
+  return text;
+}
+
+// loadLatency shows the marks of the last check (also one from the tray)
+async function loadLatency() {
+  try {
+    const d = await api('/api/latency');
+    if (d.report) showLatency(d.report);
+  } catch (e) {
+    // The marks are a bonus: the list works without them
+  }
+}
+
+// Both return the run (the sandbox test awaits it)
+function testLatency() {
+  return latencyRun({ select: false });
+}
+
+function selectFastest() {
+  return latencyRun({ select: true, confirm: false });
+}
+
+async function latencyRun(body) {
+  const buttons = ['latency-btn', 'fastest-btn', 'switch-btn'].map(id => document.getElementById(id));
+  buttons.forEach(b => { b.disabled = true; });
+  show('ok', 'Проверяю задержку серверов… (до 30 с)', true);
+  try {
+    let d = await api('/api/latency', body);
+    let f = d.fastest;
+    // Traffic through a selector group: the switch replaces the group with
+    // the server, only when the user agrees (decided on this same check)
+    if (f && f.needs_confirm) {
+      showLatency(d.report);
+      if (!confirm(f.message)) {
+        show('ok', latencySummary(d.report) + '\nАктивный сервер не изменён.');
+        return;
+      }
+      d = await api('/api/latency', { select: true, confirm: true });
+      f = d.fastest;
+    }
+    showLatency(d.report);
+    let text = latencySummary(d.report);
+    if (f) text += '\n' + f.message;
+    // Kept or switched: done; refused (urltest, split routing, none
+    // answered): a reason to read
+    show(!f || f.tag ? 'ok' : 'warn', text, !!f);
+    if (f && f.switched) await refresh();
+  } catch (e) {
+    show('err', e.message);
+    // What was measured before the failure (a switch that failed)
+    await loadLatency();
+  } finally {
+    buttons.forEach(b => { b.disabled = false; });
+  }
 }
 
 async function refreshAppUpdate() {

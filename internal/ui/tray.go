@@ -31,6 +31,7 @@ type TrayUI struct {
 	settingsItem        *systray.MenuItem
 	updateItem          *systray.MenuItem
 	appUpdateItem       *systray.MenuItem
+	fastestItem         *systray.MenuItem
 	dpiItem             *systray.MenuItem
 	autostartItem       *systray.MenuItem
 	quitItem            *systray.MenuItem
@@ -47,6 +48,7 @@ type TrayUI struct {
 	SettingsCh        chan bool
 	UpdateCh          chan bool
 	AppUpdateCh       chan bool
+	FastestCh         chan bool
 	DPICh             chan bool
 	AutostartCh       chan bool
 	QuitCh            chan bool
@@ -66,6 +68,7 @@ func New(iconOn, iconOff []byte) *TrayUI {
 		SettingsCh:        make(chan bool),
 		UpdateCh:          make(chan bool),
 		AppUpdateCh:       make(chan bool),
+		FastestCh:         make(chan bool),
 		DPICh:             make(chan bool),
 		AutostartCh:       make(chan bool),
 		QuitCh:            make(chan bool),
@@ -97,6 +100,9 @@ func New(iconOn, iconOff []byte) *TrayUI {
 	ui.settingsItem = systray.AddMenuItem(SettingsTitle, SettingsTooltip)
 	ui.updateItem = systray.AddMenuItem(UpdateTitle, UpdateTooltip)
 	ui.appUpdateItem = systray.AddMenuItem(AppUpdateTitle, AppUpdateTooltip)
+	// Item ids follow the creation order (items and separators): the
+	// sandbox life-cycle test posts them (build/installer/sandbox)
+	ui.fastestItem = systray.AddMenuItem(FastestTitle, FastestTooltip)
 
 	systray.AddSeparator()
 
@@ -138,6 +144,8 @@ func (t *TrayUI) listenEvents() {
 			t.UpdateCh <- true
 		case <-t.appUpdateItem.ClickedCh:
 			t.AppUpdateCh <- true
+		case <-t.fastestItem.ClickedCh:
+			t.FastestCh <- true
 		case <-t.dpiItem.ClickedCh:
 			t.DPICh <- true
 		case <-t.autostartItem.ClickedCh:
@@ -196,6 +204,12 @@ func (t *TrayUI) UpdateStatus(status domain.VPNStatus) {
 // not configured in this build)
 func (t *TrayUI) HideAppUpdate() {
 	t.appUpdateItem.Hide()
+}
+
+// HideFastest removes the "select the fastest server" item (the latency test
+// is not wired in)
+func (t *TrayUI) HideFastest() {
+	t.fastestItem.Hide()
 }
 
 // UpdateConnectivity reflects the latest connectivity verdict in the status

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"tray-sing-box/internal/domain"
@@ -251,5 +252,36 @@ func TestSubscriptionErrorIsBounded(t *testing.T) {
 		if !strings.Contains(message, "\n  …и ещё строк: ") {
 			t.Fatalf("the lines left out are not counted:\n%.2000s", message)
 		}
+	}
+}
+
+// The tray's "select the fastest": the check summed up, then the decision;
+// a switch the page would ask about is not made from the tray
+func TestFastestMessage(t *testing.T) {
+	tested := time.Date(2026, 10, 18, 12, 30, 5, 0, time.Local)
+	report := &domain.LatencyReport{Tested: tested, Answered: 2, Total: 3, Fastest: "nl-2", Results: []domain.LatencyResult{
+		{Tag: "de-1", Status: domain.LatencyOK, DelayMs: 120, Eligible: true},
+		{Tag: "nl-2", Status: domain.LatencyOK, DelayMs: 40, Eligible: true},
+		{Tag: "dead", Status: domain.LatencyTimeout, Eligible: true},
+	}}
+	got := FastestMessage(report, &domain.FastestOutcome{Tag: "nl-2", Previous: "de-1", Switched: true, Message: "Выбран самый быстрый — «nl-2» (40 мс; был «de-1» — 120 мс)."})
+	want := "Проверено в 12:30:05: ответили 2 из 3. Быстрее всех — «nl-2» (40 мс).\n\nВыбран самый быстрый — «nl-2» (40 мс; был «de-1» — 120 мс)."
+	if got != want {
+		t.Errorf("switched:\n%s\nwant\n%s", got, want)
+	}
+
+	got = FastestMessage(report, &domain.FastestOutcome{Tag: "nl-2", Previous: "proxy\nсписок", NeedsConfirm: true, Message: "Сейчас трафик идёт через группу «proxy». … Продолжить?"})
+	want = "Проверено в 12:30:05: ответили 2 из 3. Быстрее всех — «nl-2» (40 мс).\n\nТрафик идёт через группу «proxy список» — выберите сервер в «Настройках»"
+	if got != want {
+		t.Errorf("a selector:\n%s\nwant\n%s", got, want)
+	}
+
+	none := &domain.LatencyReport{Tested: tested, Total: 1, Results: []domain.LatencyResult{{Tag: "dead", Status: domain.LatencyTimeout, Eligible: true}}}
+	got = FastestMessage(none, &domain.FastestOutcome{Message: "Ни один сервер не ответил — активный сервер не изменён."})
+	if want := "Проверено в 12:30:05: ответили 0 из 1.\n\nНи один сервер не ответил — активный сервер не изменён."; got != want {
+		t.Errorf("none answered:\n%s\nwant\n%s", got, want)
+	}
+	if got := LatencyReportLine(&domain.LatencyReport{Tested: tested}); got != LatencyNothingToTest {
+		t.Errorf("nothing to test: %q", got)
 	}
 }

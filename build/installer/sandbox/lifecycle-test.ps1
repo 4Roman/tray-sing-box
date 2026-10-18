@@ -30,6 +30,13 @@
 #             on the screen (import-qr.png), through the tray items
 #   singbox-update  (networked, after install) the tray item replaces the
 #             running older sing-box with the latest release
+#   latency   (networked, after install) the latency test of the settings
+#             page and "select the fastest" against local servers (a second
+#             sing-box from another folder, a relay adding 300 ms, a dead
+#             address): the test instance is a second process of the app's
+#             sing-box.exe that leaves the VPN alone and dies with the app;
+#             the same over a TUN config (its connections bypass the TUN);
+#             the tray item; the app killed during a check
 #   cancel    sing-box cannot start, the tray toggle calls the attempts off
 #   giveup    sing-box cannot start (config.json hidden) -> "starting", 5
 #             attempts, then the yes/no report; "yes" records the VPN off
@@ -275,6 +282,20 @@ public static class SbWin {
         }
     }
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool result);
+
+    // 1 when the process runs in a job object, 0 when not, -1 unknown
+    public static int InJob(int pid) {
+        IntPtr p = OpenProcess(0x1000, false, pid); // PROCESS_QUERY_LIMITED_INFORMATION
+        if (p == IntPtr.Zero) return -1;
+        bool inJob;
+        bool ok = IsProcessInJob(p, IntPtr.Zero, out inJob);
+        CloseHandle(p);
+        if (!ok) return -1;
+        return inJob ? 1 : 0;
+    }
+
     // --- the Inno Setup wizard, clicked through with its defaults ---
     [DllImport("user32.dll")]
     static extern bool IsWindowEnabled(IntPtr hwnd);
@@ -324,14 +345,15 @@ public static class SbWin {
 
 # Menu item ids: systray numbers items AND separators from 1 in creation order
 # (internal/ui/tray.go): status 1, sep 2, toggle 3, sep 4, import x2 5-6,
-# subscriptions 7, settings 8, sing-box update 9, app update 10, sep 11,
-# DPI 12, autostart 13, sep 14, quit 15
+# subscriptions 7, settings 8, sing-box update 9, app update 10, select the
+# fastest 11, sep 12, DPI 13, autostart 14, sep 15, quit 16
 $menuToggle = 3
 $menuImportClipboard = 5
 $menuImportQR = 6
 $menuSettings = 8
 $menuSingBoxUpdate = 9
-$menuQuit = 15
+$menuFastest = 11
+$menuQuit = 16
 
 # --- helpers ---------------------------------------------------------------
 
@@ -600,6 +622,134 @@ function StopSubscriptionProvider($job) {
     New-Item -ItemType File -Force 'C:\e2e\sub.stop' | Out-Null
     [void](Wait-Job $job -Timeout 10)
     Remove-Job $job -Force
+}
+
+# --- the latency test (phase latency) ----------------------------------------
+
+# A TCP relay that waits before it connects each client on: a server with a
+# known extra delay. Compiled in the job that runs it.
+$relaySource = @'
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+
+public static class SbRelay {
+    // Accepts on ip:listenPort; each connection waits delayMs, then is piped
+    // to ip:upstreamPort. Ends once stopFile exists.
+    public static void Run(string ip, int listenPort, int upstreamPort, int delayMs, string stopFile) {
+        TcpListener l = new TcpListener(IPAddress.Parse(ip), listenPort);
+        l.Start();
+        try {
+            while (!File.Exists(stopFile)) {
+                if (!l.Pending()) { Thread.Sleep(20); continue; }
+                TcpClient c = l.AcceptTcpClient();
+                Thread t = new Thread(delegate () { Serve(c, ip, upstreamPort, delayMs); });
+                t.IsBackground = true;
+                t.Start();
+            }
+        } finally {
+            l.Stop();
+        }
+    }
+
+    static void Serve(TcpClient c, string ip, int port, int delayMs) {
+        TcpClient u = null;
+        try {
+            Thread.Sleep(delayMs);
+            u = new TcpClient();
+            u.Connect(ip, port);
+            NetworkStream a = c.GetStream();
+            NetworkStream b = u.GetStream();
+            Thread up = new Thread(delegate () { Pipe(a, b); });
+            up.IsBackground = true;
+            up.Start();
+            Pipe(b, a);
+            up.Join(30000);
+        } catch (Exception) {
+        } finally {
+            c.Close();
+            if (u != null) u.Close();
+        }
+    }
+
+    static void Pipe(Stream from, Stream to) {
+        byte[] buf = new byte[16384];
+        try {
+            int n;
+            while ((n = from.Read(buf, 0, buf.Length)) > 0) to.Write(buf, 0, n);
+        } catch (Exception) {
+        }
+        try { to.Close(); } catch (Exception) { }
+    }
+}
+'@
+
+# The IPv4 address of the interface the default route uses (a server on it
+# is not "on this computer" to the app, unlike one on the loopback)
+function SandboxAddress {
+    $route = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric)[0]
+    if (-not $route) { return '' }
+    $a = @(Get-NetIPAddress -InterfaceIndex $route.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue)[0]
+    if ($a) { return [string]$a.IPAddress }
+    return ''
+}
+
+function PortOpen([string]$addr, [int]$port) {
+    $c = New-Object System.Net.Sockets.TcpClient
+    try {
+        $t = $c.ConnectAsync($addr, $port)
+        return ($t.Wait(1000) -and $c.Connected)
+    }
+    catch { return $false }
+    finally { $c.Close() }
+}
+
+# A sing-box.exe of the installation that is not the VPN: the test instance
+function HelperPid([int]$vpn) {
+    $h = @(Procs $sb | Where-Object { [int]$_.ProcessId -ne $vpn })
+    if ($h.Count -eq 0) { return 0 }
+    return [int]$h[0].ProcessId
+}
+
+# Opens the settings page from the tray in the DevTools-driven browser
+function OpenSettingsPage {
+    $before = @(Pages | ForEach-Object { $_.id })
+    if (-not (MenuClick $menuSettings)) { return $null }
+    $script:latPage = $null
+    if (-not (WaitFor { $script:latPage = @(Pages | Where-Object { $_.url -match '^http://127\.0\.0\.1:\d+/' -and $before -notcontains $_.id })[0]; [bool]$script:latPage } 30)) { return $null }
+    $ws = CdpOpen $script:latPage.webSocketDebuggerUrl
+    [void](WaitFor { (Js $ws 'document.readyState') -eq 'complete' } 20)
+    return $ws
+}
+
+# Starts a check from the page's button handler without waiting for it;
+# window.latDone gets the message it ends with
+function StartLatencyCheck($ws) {
+    [void](Js $ws "(() => { window.latDone = null; testLatency().then(() => { window.latDone = document.getElementById('msg').className + '|' + document.getElementById('msg-text').textContent; }); return true; })()")
+}
+
+function LatencyDone($ws, [int]$seconds) {
+    return (WaitFor { $null -ne (Js $ws 'window.latDone') } $seconds)
+}
+
+# The last report as the page gets it, decoded
+function LatencyReport($ws) {
+    $j = Js $ws "(async () => JSON.stringify((await api('/api/latency')).report))()"
+    if (-not $j) { return $null }
+    return ($j | ConvertFrom-Json)
+}
+
+function ResultOf($report, [string]$tag) {
+    if (-not $report) { return $null }
+    return @($report.results | Where-Object { $_.tag -eq $tag })[0]
+}
+
+# Saves the route section as it is in config.json: the app's own restart
+# (RestartIfRunning, no intent write) with a config written by hand
+function RestartThroughThePage($ws) {
+    return (Js $ws "(async () => { await refresh(); await api('/api/section', { name: 'route', content: document.getElementById('route').value }); return true; })()")
 }
 
 Log "start, $([Environment]::OSVersion.VersionString)"
@@ -918,6 +1068,179 @@ switch ($Phase) {
         $new = LogSince $mark
         Check 'log: updated and restarted' ($new -match 'sing-box updated .* \(restarted: true\)')
         Check 'no staging folder left' (@(Get-ChildItem -Path $pf -Directory -Filter '.sing-box-update-*' -Force -ErrorAction SilentlyContinue).Count -eq 0)
+        CheckNoPopup 'no popup'
+    }
+
+    'latency' {
+        # (networked, after install) the latency test against servers of the
+        # sandbox itself: a second sing-box from ANOTHER folder serves a mixed
+        # proxy on the sandbox's address (on the loopback it would be "a
+        # server on this computer", not tested), a relay in front of it adds
+        # 300 ms, 192.0.2.1 answers nothing. The test instance is a second
+        # process of the app's own sing-box.exe for a few seconds.
+        $vpnPid = FirstPid $sb
+        Check 'VPN running' ($vpnPid -ne 0 -and (Intent) -eq 1) "PID $vpnPid"
+        $ip = SandboxAddress
+        Check 'the sandbox has an address' ([bool]$ip) $ip
+        if (-not $ip) { Finish 'no address' }
+        $cfg = Join-Path $pd 'config.json'
+        $soFast = -join [char[]](0x438, 0x20, 0x442, 0x430, 0x43A) # "i tak": the current server is fine
+
+        # The servers: sing-box of another folder (not the app's: the app
+        # neither adopts nor counts it) and the slow relay
+        New-Item -ItemType Directory -Force 'C:\e2e\srv' | Out-Null
+        Copy-Item -Path $sb -Destination 'C:\e2e\srv\sing-box.exe' -Force
+        Get-ChildItem -Path $pf -Filter '*.dll' | Copy-Item -Destination 'C:\e2e\srv' -Force
+        Set-Content -Path 'C:\e2e\srv\server.json' -Encoding ASCII -Value ('{"log":{"level":"warn"},"inbounds":[{"type":"mixed","tag":"in","listen":"' + $ip + '","listen_port":18090}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"auto_detect_interface":true}}')
+        New-NetFirewallRule -DisplayName 'sb-latency-test' -Direction Inbound -Protocol TCP -LocalPort 18090, 18091 -Action Allow -ErrorAction SilentlyContinue | Out-Null
+        $server = Start-Process -FilePath 'C:\e2e\srv\sing-box.exe' -ArgumentList @('run', '-c', 'C:\e2e\srv\server.json') -WorkingDirectory 'C:\e2e\srv' -WindowStyle Hidden -PassThru
+        Set-Content -Path 'C:\e2e\relay.cs' -Encoding ASCII -Value $relaySource
+        Remove-Item -LiteralPath 'C:\e2e\relay.stop' -ErrorAction SilentlyContinue
+        $relay = Start-Job -ScriptBlock {
+            param($ip)
+            Add-Type -Path 'C:\e2e\relay.cs'
+            [SbRelay]::Run($ip, 18091, 18090, 300, 'C:\e2e\relay.stop')
+        } -ArgumentList $ip
+        Check 'the server listens' (WaitFor { PortOpen $ip 18090 } 20)
+        Check 'the relay listens' (WaitFor { PortOpen $ip 18091 } 30)
+
+        $outs = '{"type":"direct","tag":"direct"},' +
+            '{"type":"socks","tag":"lat-live","server":"' + $ip + '","server_port":18090},' +
+            '{"type":"socks","tag":"lat-slow","server":"' + $ip + '","server_port":18091},' +
+            '{"type":"socks","tag":"lat-dead","server":"192.0.2.1","server_port":1080}'
+        $plain = '{"log":{"level":"info","timestamp":true},"inbounds":[{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":2080}],"outbounds":[' + $outs + '],"route":{"auto_detect_interface":true}}'
+        Set-Content -Path $cfg -Encoding ASCII -Value $plain
+
+        Check 'browser with DevTools' (PrepareBrowser)
+        $ws = OpenSettingsPage
+        Check 'the settings page opens' ($null -ne $ws)
+        if ($null -eq $ws) { Finish 'no settings page' }
+        Check 'the page offers the latency test' (WaitFor { (Js $ws "!document.getElementById('latency-btn').hidden && !document.getElementById('fastest-btn').hidden") -eq $true } 15)
+
+        # 1. A check from the page's button: the test instance next to the VPN
+        $mark = LogMark
+        $cfgBefore = ConfigText
+        StartLatencyCheck $ws
+        $helper = 0
+        Check 'a test instance runs next to the VPN' (WaitFor { $script:helper = HelperPid $vpnPid; $script:helper -ne 0 } 15) "PID $helper"
+        if ($helper -ne 0) {
+            $line = [string](Get-CimInstance Win32_Process -Filter "ProcessId=$helper").CommandLine
+            Check 'its config comes through stdin, no secret on its command line' (($line -match 'run -c stdin') -and -not ($line -match '[0-9a-fA-F]{64}')) $line
+            Check 'it runs elevated like the VPN' ((LevelOf $helper) -ge (LevelOf $vpnPid)) "helper $(LevelOf $helper), VPN $(LevelOf $vpnPid)"
+            # U4: the job of the test instance under the job of the task
+            Log "test instance in a job: $([SbWin]::InJob($helper)), the app: $([SbWin]::InJob((FirstPid $exe)))"
+        }
+        Check 'the check ends' (LatencyDone $ws 45) ([string](Js $ws 'window.latDone'))
+        $rep = LatencyReport $ws
+        $live = ResultOf $rep 'lat-live'
+        $slow = ResultOf $rep 'lat-slow'
+        $dead = ResultOf $rep 'lat-dead'
+        Check 'latency: the live server answers, may be chosen' ($live -and $live.status -eq 'ok' -and $live.eligible) (ConvertTo-Json $live -Compress)
+        Check 'latency: the relay adds its 300 ms' ($slow -and $slow.status -eq 'ok' -and $live.status -eq 'ok' -and ([int]$slow.delay_ms - [int]$live.delay_ms) -ge 250) "live $($live.delay_ms) ms, slow $($slow.delay_ms) ms"
+        Check 'latency: the dead address does not answer' ($dead -and ($dead.status -eq 'timeout' -or $dead.status -eq 'error')) (ConvertTo-Json $dead -Compress)
+        Check 'latency: direct is not tested' ((ResultOf $rep 'direct').status -eq 'skipped')
+        Check 'latency: the page marks the servers' ((Js $ws "document.querySelectorAll('#outbound-list .latency').length") -ge 3)
+        Check 'the test instance is gone' (WaitFor { @(Procs $sb).Count -eq 1 } 10) "$(@(Procs $sb).Count) sing-box.exe"
+        Check 'the VPN untouched' ((SamePid $sb $vpnPid) -and (Intent) -eq 1) "PID $(FirstPid $sb), intent $(Intent)"
+        Check 'a check writes nothing' ((ConfigText) -eq $cfgBefore)
+        Check 'log: one line for the check' ((LogSince $mark) -match 'Latency: 2 of 3 answered in [\d.]+ s \(test sing-box PID \d+') (([regex]::Match((LogSince $mark), 'Latency: [^\r\n]*')).Value)
+
+        # 2. Select the fastest: nothing went through a server, so route.final
+        # becomes the live one; the usual switch (backup, history, restart
+        # without an intent write)
+        $history = @(Get-ChildItem (Join-Path $pd 'config-history') -Filter 'config-*.json' -ErrorAction SilentlyContinue).Count
+        Start-Sleep -Seconds 11 # the checks are 10 s apart at least
+        $j = Js $ws "(async () => JSON.stringify(await api('/api/latency', { select: true, confirm: false })))()"
+        $r = $null
+        if ($j) { $r = $j | ConvertFrom-Json }
+        Check 'select: switched to the live server' ($r -and $r.fastest.switched -and $r.fastest.tag -eq 'lat-live') $j
+        Check 'select: route.final is the live server' ((ConfigJson).route.final -eq 'lat-live')
+        Check 'select: the VPN restarted' (WaitFor { $n = FirstPid $sb; $n -ne 0 -and $n -ne $vpnPid } 30) "PID $vpnPid -> $(FirstPid $sb)"
+        Check 'select: intent untouched' ((Intent) -eq 1) "intent $(Intent)"
+        Check 'select: backup and history' ((Test-Path "$cfg.bak") -and @(Get-ChildItem (Join-Path $pd 'config-history') -Filter 'config-*.json' -ErrorAction SilentlyContinue).Count -gt $history)
+        [void](WaitFor { @(Procs $sb).Count -eq 1 } 10)
+        $vpnPid = FirstPid $sb
+        Start-Sleep -Seconds 11
+        $j = Js $ws "(async () => JSON.stringify(await api('/api/latency', { select: true, confirm: false })))()"
+        $r = $null
+        if ($j) { $r = $j | ConvertFrom-Json }
+        Check 'select again: the current server is kept' ($r -and -not $r.fastest.switched -and $r.fastest.tag -eq 'lat-live' -and $r.fastest.message.Contains($soFast)) $j
+        Check 'select again: no restart' (SamePid $sb $vpnPid) "PID $(FirstPid $sb)"
+
+        # 3. The tray item: the same, the popup says so
+        Start-Sleep -Seconds 11
+        Check 'menu: select the fastest' (MenuClick $menuFastest)
+        $d = $null
+        $ok = WaitFor { $script:d = @([SbWin]::Dialogs([uint32](FirstPid $exe)))[0]; [bool]$script:d } 60
+        $text = ''
+        if ($ok) { $text = [SbWin]::DialogText($d); [void][SbWin]::CloseBox($d) }
+        Check 'tray: the popup keeps the live server' ($ok -and $text.Contains('lat-live') -and $text.Contains($soFast)) $text
+        Check 'tray: no restart' (SamePid $sb $vpnPid)
+        [void](WaitFor { @(DialogTexts).Count -eq 0 } 10)
+
+        # 4. With a TUN VPN (strict route): the test instance dials past the
+        # TUN - its connection to the dead address leaves from the sandbox's
+        # address, not from the TUN's
+        $routed = ConfigText
+        $tun = '{"log":{"level":"info","timestamp":true},"dns":{"servers":[{"type":"udp","tag":"dns-out","server":"1.1.1.1"}],"final":"dns-out"},' +
+            '"inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}],"outbounds":[' + $outs + '],' +
+            '"route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}],"final":"lat-live","auto_detect_interface":true}}'
+        Set-Content -Path $cfg -Encoding ASCII -Value $tun
+        $old = FirstPid $sb
+        [void](RestartThroughThePage $ws)
+        Check 'TUN: the VPN restarted with it' (WaitFor { $n = FirstPid $sb; $n -ne 0 -and $n -ne $old } 30)
+        $wintun = $null
+        [void](WaitFor { $script:wintun = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wintun|sing-box' })[0]; [bool]$script:wintun } 30)
+        # U2: what kind of interface Windows makes of it
+        if ($wintun) { Log "TUN adapter: '$($wintun.InterfaceDescription)' InterfaceType $($wintun.InterfaceType) ifIndex $($wintun.ifIndex)" }
+        Check 'TUN: the adapter is up' ([bool]$wintun)
+        $vpnPid = FirstPid $sb
+        Start-Sleep -Seconds 11
+        StartLatencyCheck $ws
+        $helper = 0
+        [void](WaitFor { $script:helper = HelperPid $vpnPid; $script:helper -ne 0 } 15)
+        $from = @()
+        [void](WaitFor {
+                $script:from = @(Get-NetTCPConnection -OwningProcess $script:helper -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -eq '192.0.2.1' } | ForEach-Object { [string]$_.LocalAddress })
+                $script:from.Count -gt 0
+            } 10)
+        Check 'TUN: the test instance dials from the sandbox address' ($from.Count -gt 0 -and -not ($from -contains '172.19.0.1') -and ($from -contains $ip)) ("helper $helper from " + ($from -join ', '))
+        Check 'TUN: the check ends' (LatencyDone $ws 45) ([string](Js $ws 'window.latDone'))
+        $live = ResultOf (LatencyReport $ws) 'lat-live'
+        Check 'TUN: the live server answers' ($live -and $live.status -eq 'ok') (ConvertTo-Json $live -Compress)
+        Check 'TUN: the VPN untouched' (SamePid $sb $vpnPid)
+
+        # Back to the config without TUN
+        Set-Content -Path $cfg -Encoding ASCII -Value $routed
+        $old = FirstPid $sb
+        [void](RestartThroughThePage $ws)
+        Check 'back without TUN' (WaitFor { $n = FirstPid $sb; $n -ne 0 -and $n -ne $old } 30)
+
+        # 5. The app killed during a check: the test instance dies with it
+        # (its job), the VPN runs on, and the next start adopts it
+        [void](WaitFor { @(Procs $sb).Count -eq 1 } 10)
+        $vpnPid = FirstPid $sb
+        Start-Sleep -Seconds 11
+        StartLatencyCheck $ws
+        $helper = 0
+        $ok = WaitFor { $script:helper = HelperPid $vpnPid; $script:helper -ne 0 } 15
+        Check 'a test instance runs' $ok "PID $helper"
+        Stop-Process -Id (FirstPid $exe) -Force
+        if ($ok) { Check 'the test instance dies with the app' (WaitFor { -not (Get-Process -Id $helper -ErrorAction SilentlyContinue) } 10) }
+        Check 'the VPN survives the app' (SamePid $sb $vpnPid) "PID $(FirstPid $sb)"
+        $ws.Dispose()
+        & schtasks.exe /Run /TN SingBoxTray | Out-Null
+        Check 'the task starts the app again' (WaitFor { Running $exe } 60)
+        Check 'tray icon shown' (WaitFor { IconShown } 60)
+        Check 'the VPN adopted (same PID)' (SamePid $sb $vpnPid)
+
+        # The servers go; the config without them
+        New-Item -ItemType File -Force 'C:\e2e\relay.stop' | Out-Null
+        [void](Wait-Job $relay -Timeout 10)
+        Remove-Job $relay -Force
+        Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+        Remove-NetFirewallRule -DisplayName 'sb-latency-test' -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $root 'payload\config.json') -Destination $cfg -Force
         CheckNoPopup 'no popup'
     }
 

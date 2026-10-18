@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -21,6 +22,10 @@ type ConfigVersion struct {
 	Saved time.Time `json:"saved"`
 	Size  int64     `json:"size"`
 }
+
+// ErrNoSuchOutbound: SwitchOutbound found no proxy outbound with the tag
+// (it was removed meanwhile, or it is a group or direct)
+var ErrNoSuchOutbound = errors.New("not found or is not a proxy")
 
 // SettingsStore reads and edits sections of the sing-box configuration
 type SettingsStore interface {

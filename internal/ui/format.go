@@ -188,3 +188,31 @@ func subscriptionLine(u domain.SubscriptionUpdate) string {
 	}
 	return line
 }
+
+// LatencyReportLine sums a latency check up: when it ran, how many of the
+// servers it measured answered, the fastest one
+func LatencyReportLine(r *domain.LatencyReport) string {
+	if r.Total == 0 {
+		return LatencyNothingToTest
+	}
+	line := fmt.Sprintf(LatencySummary, r.Tested.Local().Format("15:04:05"), r.Answered, r.Total)
+	for _, res := range r.Results {
+		if res.Tag == r.Fastest && res.Status == domain.LatencyOK {
+			line += fmt.Sprintf(LatencySummaryFastest, domain.DisplayName(res.Tag), res.DelayMs)
+			break
+		}
+	}
+	return line
+}
+
+// FastestMessage is the popup text of "select the fastest" from the tray:
+// the check, then what was decided. The tray asks no questions: a switch
+// that would replace a selector group is left to the settings page, which
+// asks first.
+func FastestMessage(r *domain.LatencyReport, o *domain.FastestOutcome) string {
+	text := o.Message
+	if o.NeedsConfirm {
+		text = fmt.Sprintf(FastestGroupMsg, domain.DisplayName(o.Previous))
+	}
+	return LatencyReportLine(r) + "\n\n" + text
+}

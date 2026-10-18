@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -49,6 +50,7 @@ type Application struct {
 	dpiService          *domain.DPIBypassService
 	subscriptionService *domain.SubscriptionService
 	connectivity        *domain.ConnectivityService
+	latency             *domain.LatencyService // nil: no latency test
 	importSources       ImportSources
 	settingsUI          SettingsOpener
 	autostartManager    AutostartManager
@@ -93,6 +95,12 @@ func New(vpnService *domain.VPNService, importService *domain.ImportService, upd
 // SetAppUpdater enables self-update of the application (before OnReady)
 func (a *Application) SetAppUpdater(svc *domain.AppUpdateService) {
 	a.appUpdate = svc
+}
+
+// SetLatency enables "select the fastest server" in the tray (before
+// OnReady). The service takes opMu itself, for the switch only.
+func (a *Application) SetLatency(svc *domain.LatencyService) {
+	a.latency = svc
 }
 
 // OpLock is the mutex that serializes the long operations. The web UI takes
@@ -215,6 +223,10 @@ func (a *Application) OnReady(trayIcon, trayIconOff []byte) {
 	} else {
 		go a.appUpdateLoop()
 	}
+
+	if a.latency == nil {
+		a.trayUI.HideFastest()
+	}
 }
 
 // appUpdateLoop checks for a new release of the application shortly after
@@ -278,6 +290,11 @@ func (a *Application) handleAppUpdate() {
 // "Выход" item and by another process (`--quit`, the installer). sing-box
 // keeps running by design.
 func (a *Application) RequestQuit() {
+	// A latency check measures without opMu (only its switch to the
+	// fastest server takes it, and is waited for like any config change),
+	// and its test instance dies with the app anyway (job object). Ended
+	// first all the same: no switch starts after the user asked to quit.
+	a.cancelLatency()
 	go func() {
 		a.opMu.Lock()
 		if !a.trayReady.Load() {
@@ -300,6 +317,7 @@ func (a *Application) RequestQuit() {
 // new instance would then find a truncated sing-box.exe or config.json. The
 // lock is released only by the process exit, so nothing new can start.
 func (a *Application) RelaunchAfterUpdate() {
+	a.cancelLatency()
 	a.opMu.Lock()
 	if err := a.appUpdate.Relaunch(); err != nil {
 		a.opMu.Unlock()
@@ -309,6 +327,41 @@ func (a *Application) RelaunchAfterUpdate() {
 	}
 	log.Printf("App update: relaunching into the new version")
 	systray.Quit()
+}
+
+// cancelLatency ends a running latency check, if any
+func (a *Application) cancelLatency() {
+	if a.latency != nil {
+		a.latency.Cancel()
+	}
+}
+
+// handleSelectFastest measures every server and switches to the fastest
+// (tray item). Not under runLocked: the check itself holds no lock — the
+// service takes opMu for the switch only — and the popup comes after, with
+// no lock held. Runs outside the event loop.
+func (a *Application) handleSelectFastest() {
+	if a.latency == nil {
+		return
+	}
+	report, outcome, err := a.latency.SelectFastest(context.Background(), false)
+	if a.trayUI != nil {
+		a.trayUI.UpdateStatus(a.vpnService.GetStatus())
+	}
+	title, text, failed := fastestPopup(report, outcome, err)
+	if failed {
+		ui.ShowError(title, text)
+		return
+	}
+	ui.ShowInfo(title, text)
+}
+
+// fastestPopup is the popup of "select the fastest" from the tray
+func fastestPopup(report *domain.LatencyReport, outcome *domain.FastestOutcome, err error) (title, text string, failed bool) {
+	if err != nil {
+		return ui.FastestErrorTitle, err.Error(), true
+	}
+	return ui.FastestDoneTitle, ui.FastestMessage(report, outcome), false
 }
 
 // subscriptionLoop refreshes the saved subscriptions shortly after start and
@@ -419,6 +472,8 @@ func (a *Application) eventLoop() {
 			go a.handleUpdate()
 		case <-a.trayUI.AppUpdateCh:
 			go a.handleAppUpdate()
+		case <-a.trayUI.FastestCh:
+			go a.handleSelectFastest()
 		case <-a.trayUI.DPICh:
 			go a.handleToggleDPI()
 		case wantEnabled := <-a.trayUI.AutostartCh:

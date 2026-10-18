@@ -16,6 +16,41 @@ func cssRule(t *testing.T, selector string) string {
 	return strings.Join(strings.Fields(m[1]), " ")
 }
 
+// The latency test on the page: its buttons and caption hidden until the
+// app says it has the test, the elements the sandbox test drives kept, and
+// everything of a report written as text — tags and notes come from
+// subscriptions
+func TestPageLatency(t *testing.T) {
+	for _, want := range []string{
+		`<div id="outbound-list"></div>`,
+		`<button id="switch-btn" onclick="switchOutbound()">`,
+		`<button id="latency-btn" class="secondary" onclick="testLatency()" hidden>Проверить задержку</button>`,
+		`<button id="fastest-btn" class="secondary" onclick="selectFastest()" hidden>Выбрать самый быстрый</button>`,
+		`<div id="latency-note" class="vpn-state" style="margin-top:10px" hidden>`,
+		"Задержка — время до ответа https://www.gstatic.com через сервер (подключение, рукопожатие и один запрос; так же меряет группа urltest). " +
+			"Каждый сервер проверяется напрямую, мимо правил маршрутизации, отдельным временным sing-box — работающий VPN не затрагивается. " +
+			"Проверка подключается ко всем серверам списка с вашего адреса.",
+		"'Проверяю задержку серверов… (до 30 с)'",
+		"const latency = !!d.latency && !missing;",
+	} {
+		if !strings.Contains(pageHTML, want) {
+			t.Errorf("page.html has no %q", want)
+		}
+	}
+	start := strings.Index(pageHTML, "// --- the latency test")
+	end := strings.Index(pageHTML, "async function refreshAppUpdate")
+	if start < 0 || end < start {
+		t.Fatal("no latency section in the script")
+	}
+	if section := pageHTML[start:end]; strings.Contains(section, "innerHTML") || !strings.Contains(section, "span.textContent = r.delay_ms + ' мс';") {
+		t.Error("the latency marks are not written as text")
+	}
+	// The notes as hints, through textContent like the static ones
+	if !strings.Contains(pageHTML, "hint.textContent = text;") {
+		t.Error("the notes are not written as text")
+	}
+}
+
 // The page's message sticks to the top of the window while the page
 // scrolls, and a list to read stays until the next message. One as long as
 // a subscription's list of every node it left out (40 XHTTP nodes of a 3x-ui

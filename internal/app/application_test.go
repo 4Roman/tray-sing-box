@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"tray-sing-box/internal/domain"
 	"tray-sing-box/internal/ui"
@@ -68,6 +70,69 @@ func TestUpdateErrorTitle(t *testing.T) {
 		if got := updateErrorTitle(tc.result); got != tc.want {
 			t.Errorf("updateErrorTitle(%+v) = %q, want %q", tc.result, got, tc.want)
 		}
+	}
+}
+
+// latencySource and waitingProber: a check that measures until it is ended
+type latencySource struct{}
+
+func (latencySource) ProbePlan() (*domain.ProbePlan, error) {
+	return &domain.ProbePlan{Candidates: []domain.LatencyCandidate{{Tag: "a", Type: "vless", Testable: true, Eligible: true}}}, nil
+}
+
+func (latencySource) RoutingTarget() (domain.RoutingTarget, error) { return domain.RoutingTarget{}, nil }
+
+func (latencySource) DetourTargets(string) ([]string, error) { return nil, nil }
+
+type waitingProber struct{ started, ended chan struct{} }
+
+func (p waitingProber) Measure(ctx context.Context, _ *domain.ProbePlan, _ []string) (map[string]domain.Delay, error) {
+	close(p.started)
+	select {
+	case <-ctx.Done():
+		close(p.ended)
+	case <-time.After(10 * time.Second):
+	}
+	return nil, ctx.Err()
+}
+
+// Quitting and the relaunch after a self-update end a running latency check
+// first, before they wait for opMu (held here: neither gets further, so
+// neither reaches systray or os.Exit)
+func TestQuitEndsTheLatencyCheck(t *testing.T) {
+	for name, quit := range map[string]func(a *Application){
+		"quit":     func(a *Application) { a.RequestQuit() },
+		"relaunch": func(a *Application) { go a.RelaunchAfterUpdate() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			prober := waitingProber{started: make(chan struct{}), ended: make(chan struct{})}
+			a := &Application{}
+			a.SetLatency(domain.NewLatencyService(latencySource{}, prober, nil, nil))
+			a.trayReady.Store(true)
+			a.opMu.Lock() // never released: the test ends with the quit pending
+
+			go a.latency.Test(context.Background())
+			<-prober.started
+			quit(a)
+			select {
+			case <-prober.ended:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the latency check went on")
+			}
+		})
+	}
+}
+
+// The tray's popup: the decision with the check, or the error
+func TestFastestPopup(t *testing.T) {
+	report := &domain.LatencyReport{Total: 1, Answered: 1, Fastest: "b", Results: []domain.LatencyResult{{Tag: "b", Status: domain.LatencyOK, DelayMs: 40, Eligible: true}}}
+	title, text, failed := fastestPopup(report, &domain.FastestOutcome{Tag: "b", Switched: true, Message: "Выбран самый быстрый — «b» (40 мс)."}, nil)
+	if failed || title != ui.FastestDoneTitle || !strings.HasSuffix(text, "\n\nВыбран самый быстрый — «b» (40 мс).") {
+		t.Fatalf("switched: %q %q %v", title, text, failed)
+	}
+	title, text, failed = fastestPopup(nil, nil, domain.ErrLatencyBusy)
+	if !failed || title != ui.FastestErrorTitle || text != "Проверка задержки уже идёт" {
+		t.Fatalf("busy: %q %q %v", title, text, failed)
 	}
 }
 

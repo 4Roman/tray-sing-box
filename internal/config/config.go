@@ -103,4 +103,8 @@ const (
 	// the best one by at most max(FastestKeepMarginMs, FastestKeepMarginPct %)
 	FastestKeepMarginMs  = 30
 	FastestKeepMarginPct = 15
+	// The confirmation "select the fastest" asks for (traffic through a
+	// selector group) decides on the check it was asked about when that is
+	// at most this old, seconds: a new one would come too soon after it
+	FastestConfirmSeconds = 120
 )

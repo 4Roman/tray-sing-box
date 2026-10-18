@@ -92,6 +92,7 @@ type Server struct {
 	dpi      *domain.DPIBypassService
 	subs     *domain.SubscriptionService
 	conn     *domain.ConnectivityService
+	latency  *domain.LatencyService // nil: no latency test (see SetLatency)
 	sources  Sources
 	logs     LogAccess
 
@@ -174,6 +175,8 @@ func (s *Server) start() (string, error) {
 	mux.HandleFunc("POST /api/section", s.auth(s.handleSaveSection))
 	mux.HandleFunc("POST /api/config/create", s.auth(s.handleCreateConfig))
 	mux.HandleFunc("POST /api/switch", s.auth(s.handleSwitch))
+	mux.HandleFunc("POST /api/latency", s.auth(s.handleLatency))
+	mux.HandleFunc("GET /api/latency", s.auth(s.handleLatencyLast))
 	mux.HandleFunc("POST /api/vpn", s.auth(s.handleVPN))
 	mux.HandleFunc("POST /api/import", s.auth(s.handleImport))
 	mux.HandleFunc("POST /api/update", s.auth(s.handleUpdate))
@@ -505,6 +508,10 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.conn != nil {
 		resp["connectivity"] = s.conn.Status()
+	}
+	if s.latency != nil {
+		// The page shows the latency buttons only then
+		resp["latency"] = true
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

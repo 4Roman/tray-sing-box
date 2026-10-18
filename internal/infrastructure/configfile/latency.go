@@ -3,6 +3,7 @@ package configfile
 import (
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"tray-sing-box/internal/config"
@@ -439,7 +440,8 @@ func excludedReason(message string) string {
 // routingTarget is where the routing sends the traffic: the first top-level
 // route rule naming a proxy or a group, then route.final — or, without it,
 // the first outbound, sing-box's default then. ProxyRefs are the distinct
-// proxies among all of them, the ones SwitchOutbound would repoint.
+// proxies among all of them, the ones SwitchOutbound would repoint, Groups
+// the distinct groups, which it leaves where they are.
 func routingTarget(cfg map[string]any) domain.RoutingTarget {
 	kinds := map[string]string{} // tag -> kind, "" for direct/block/dns and relays
 	first, firstSeen := "", false
@@ -473,6 +475,7 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 		})
 		final = foldedString(route, "final")
 	}
+	ruleRefs := len(refs)
 	if final == "" {
 		final = first
 	}
@@ -480,7 +483,7 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 		refs = append(refs, final)
 	}
 
-	var rt domain.RoutingTarget
+	rt := domain.RoutingTarget{Final: final}
 	seen := map[string]bool{}
 	for _, ref := range refs {
 		kind := kinds[ref]
@@ -490,11 +493,17 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 		if rt.Kind == "" {
 			rt.Kind, rt.Tag = kind, ref
 		}
-		if kind == domain.RoutingNode && !seen[ref] {
-			seen[ref] = true
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		if kind == domain.RoutingNode {
 			rt.ProxyRefs = append(rt.ProxyRefs, ref)
+		} else {
+			rt.Groups = append(rt.Groups, ref)
 		}
 	}
+	rt.InRules = rt.Tag != "" && slices.Contains(refs[:ruleRefs], rt.Tag)
 	return rt
 }
 

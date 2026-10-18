@@ -961,7 +961,7 @@ func (e *Editor) SwitchOutbound(tag string) error {
 		if typ := outboundTypeIn(cfg, tag); relayOnlyTypes[typ] {
 			return fmt.Errorf("«%s» — промежуточный узел (%s): он работает только как detour другого сервера, выбрать его активным нельзя", tag, typ)
 		}
-		return fmt.Errorf("outbound %q not found or is not a proxy", tag)
+		return fmt.Errorf("outbound %q %w", tag, domain.ErrNoSuchOutbound)
 	}
 
 	route, _ := cfg["route"].(map[string]any)

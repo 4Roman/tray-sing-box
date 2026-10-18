@@ -68,6 +68,17 @@ const (
 	AppUpdateInstalledMsg = "Установлена версия %s (была %s). Перезапустить приложение сейчас? VPN при этом не прерывается."
 	AppUpdateAvailableMsg = "Доступна версия %s (установлена %s).\n\n%s\n\nОбновить сейчас? VPN при этом не прерывается."
 
+	FastestTitle      = "Выбрать самый быстрый сервер"
+	FastestTooltip    = "Проверить задержку всех серверов и переключиться на самый быстрый"
+	FastestDoneTitle  = "Самый быстрый сервер"
+	FastestErrorTitle = "Ошибка проверки задержки"
+	// The tray asks nothing: a switch that replaces a selector group is
+	// confirmed on the settings page
+	FastestGroupMsg       = "Трафик идёт через группу «%s» — выберите сервер в «Настройках»"
+	LatencySummary        = "Проверено в %s: ответили %d из %d."
+	LatencySummaryFastest = " Быстрее всех — «%s» (%d мс)."
+	LatencyNothingToTest  = "В конфиге нет серверов, которые можно проверить."
+
 	AlreadyRunningTitle = "Sing-Box VPN"
 	AlreadyRunningMsg   = "Приложение уже запущено — иконка находится в области уведомлений (возможно, среди скрытых значков)."
 
