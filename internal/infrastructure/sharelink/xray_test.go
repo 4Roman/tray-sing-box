@@ -290,6 +290,31 @@ func TestXray3xuiSubscription(t *testing.T) {
 	}
 }
 
+// 3x-ui's balancer document (buildBalancerConfig): the members are copies of
+// the other documents' nodes retagged "bal-<id>-<protocol>[-N]", the remarks
+// the balancer's. Each node is imported once, under its own remarks, wherever
+// the balancer stands in the array; a member that is no copy keeps its tag.
+func TestXray3xuiBalancer(t *testing.T) {
+	node := func(tag, server string) string {
+		return `{"protocol": "vless", "tag": "` + tag + `",
+		  "settings": {"address": "` + server + `", "port": 443, "id": "` + testUUID + `", "encryption": "none", "level": 8},
+		  "streamSettings": {"network": "grpc", "security": "tls", "tlsSettings": {"serverName": "g.example.com"},
+		    "grpcSettings": {"serviceName": "svc"}}}`
+	}
+	balancer := `{"remarks": "Auto", "outbounds": [` + node("bal-1-vless", "203.0.113.3") + `, ` + node("bal-1-vless-2", "203.0.113.1") + `,
+	  ` + node("bal-1-vless-3", "203.0.113.2") + `, ` + xrayDefaultOutbounds + `],
+	  "routing": {"rules": [{"type": "field", "network": "tcp,udp", "balancerTag": "balancer"}],
+	    "balancers": [{"tag": "balancer", "selector": ["bal-1-"], "strategy": {"type": "random"}}]}}`
+	single := func(remarks, server string) string {
+		return `{"remarks": "` + remarks + `", "outbounds": [` + node("proxy", server) + `, ` + xrayDefaultOutbounds + `]}`
+	}
+	byTag, tags, reasons := parseXray(t, "["+balancer+","+single("A", "203.0.113.1")+","+single("B", "203.0.113.2")+"]")
+	if strings.Join(tags, "|") != "A|B|bal-1-vless" || len(reasons) != 0 {
+		t.Fatalf("imported %q, skipped %v", tags, reasons)
+	}
+	checkOutbound(t, byTag["bal-1-vless"], `{"server":"203.0.113.3"}`)
+}
+
 // 3x-ui v2.5 with fragmentation on: sing-box fragments otherwise (tls.fragment
 // splits the server name only, and nothing over REALITY), so the node that
 // dials through the "fragment" freedom is left out with the reason — in

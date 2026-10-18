@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"net/url"
 	"strconv"
@@ -34,7 +35,8 @@ var xrayStructural = map[string]bool{"freedom": true, "blackhole": true, "dns": 
 var errXrayBroken = errors.New("запись outbound повреждена")
 
 // xrayStringList is Xray's StringList: an array of strings or one string of
-// comma-separated items
+// comma-separated items — kept as it is, the link joins the items with
+// commas anyway (joined)
 type xrayStringList []string
 
 func (l *xrayStringList) UnmarshalJSON(data []byte) error {
@@ -47,7 +49,7 @@ func (l *xrayStringList) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return err
 	}
-	*l = strings.Split(s, ",")
+	*l = xrayStringList{s}
 	return nil
 }
 
@@ -225,6 +227,7 @@ type xraySockopt struct {
 type xrayProfile struct {
 	remarks   string
 	outbounds []json.RawMessage
+	balancer  bool // its routing balances between its outbounds
 }
 
 // xrayConfigOf reads raw as a whole configuration: an object whose
@@ -240,11 +243,21 @@ func xrayConfigOf(raw json.RawMessage) (xrayProfile, bool) {
 		return xrayProfile{}, false
 	}
 	_ = json.Unmarshal(obj["remarks"], &p.remarks) // a name, when it is a string
+	var routing struct {
+		Balancers []json.RawMessage `json:"balancers"`
+	}
+	p.balancer = json.Unmarshal(obj["routing"], &routing) == nil && len(routing.Balancers) > 0
 	return p, true
 }
 
 // xray takes the nodes of an Xray profile: one configuration, an array of
-// them (3x-ui), or a bare array of outbounds
+// them (3x-ui), or a bare array of outbounds.
+//
+// A configuration that balances (routing.balancers) is a group, its remarks
+// the group's name: 3x-ui's balancer documents carry copies of the other
+// documents' nodes, retagged. Such a configuration is read after the others,
+// its remarks name no node, and a node the profile already gave is not taken
+// twice.
 func (c *collector) xray(text string) {
 	var profiles []xrayProfile
 	if text = strings.TrimSpace(text); strings.HasPrefix(text, "{") {
@@ -273,9 +286,22 @@ func (c *collector) xray(text string) {
 		}
 	}
 	counter := 0
-	for _, p := range profiles {
-		c.xrayConfig(p, &counter)
+	taken := map[string]string{} // the content of every node the profile gave -> its tag
+	for _, balancers := range []bool{false, true} {
+		for _, p := range profiles {
+			if p.balancer == balancers {
+				c.xrayConfig(p, &counter, taken)
+			}
+		}
 	}
+}
+
+// xrayContent is what tells an outbound from another: all but its tag
+func xrayContent(o Outbound) string {
+	other := maps.Clone(o)
+	delete(other, "tag")
+	data, _ := json.Marshal(other)
+	return string(data)
 }
 
 // xrayConfig takes the proxy outbounds of one configuration. Its first one
@@ -284,8 +310,9 @@ func (c *collector) xray(text string) {
 // configuration name each other in the dialer chains; the chains are checked
 // as those of a sing-box profile (keepChains) and point at the tags the nodes
 // get when they are added. counter numbers the outbounds of the whole
-// profile, for the names of nodes without one.
-func (c *collector) xrayConfig(p xrayProfile, counter *int) {
+// profile, for the names of nodes without one; taken holds the nodes the
+// profile gave so far (see xray).
+func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]string) {
 	type entry struct {
 		raw      json.RawMessage
 		head     xrayHead
@@ -317,7 +344,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int) {
 			continue
 		}
 		localTag := strings.TrimSpace(e.head.Tag)
-		main := !named
+		main := !named && !p.balancer
 		named = true
 		name, tag := fmt.Sprintf("узел %d", e.n), localTag
 		if plainName(localTag) {
@@ -366,9 +393,20 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int) {
 		}
 		local := cand.outbound.Tag()
 		cand.outbound["tag"] = tags[i]
-		c.add(cand.outbound)
+		content := xrayContent(cand.outbound)
+		tag, copied := taken[content]
+		if copied && p.balancer {
+			log.Printf("Xray profile: a balancer's copy of a node is left out, the node is imported once")
+			kept[i] = false
+		} else {
+			c.add(cand.outbound)
+			tag = cand.outbound.Tag()
+			if !copied {
+				taken[content] = tag
+			}
+		}
 		if _, seen := final[local]; !seen {
-			final[local] = cand.outbound.Tag()
+			final[local] = tag
 		}
 	}
 	for i, cand := range candidates {
