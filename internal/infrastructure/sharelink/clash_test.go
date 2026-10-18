@@ -3,6 +3,7 @@ package sharelink
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -1140,6 +1141,75 @@ func TestClashProfileShapes(t *testing.T) {
 	}
 }
 
+// proxy-providers: the nodes of an inline list (payload) are entries of the
+// profile, with what the list sets for them applied as mihomo applies it; a
+// list to download (http, file) is not followed, and a profile of nothing
+// else gets the hint
+func TestClashProviders(t *testing.T) {
+	entry := func(name, server string) string {
+		return "{name: " + name + ", type: trojan, server: " + server + ", port: 443, password: pw}"
+	}
+	for _, text := range []string{
+		"proxy-providers:\n  sub:\n    type: http\n    url: https://example.com/" + testSecret + "\n" +
+			"proxy-groups:\n  - {name: PROXY, type: select, use: [sub]}\n",
+		"proxy-providers:\n  local: {type: file, path: ./nodes.yaml}\n",
+		"proxies: []\nproxy-providers:\n  sub: {type: http, url: https://example.com/x, payload: [" + entry("fallback", "192.0.2.30") + "]}\n",
+	} {
+		if imported, skipped, err := parseQuickly(t, text); !errors.Is(err, errClashProviders) || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("%.40q: imported %q, skipped %q, error %v", text, imported, skipped, err)
+		}
+	}
+
+	imported, skipped, err := parseQuickly(t, "proxies:\n  - "+entry("C", "192.0.2.30")+"\n"+
+		"proxy-providers:\n  sub: {type: http, url: https://example.com/"+testSecret+"}\n"+
+		"  own:\n    type: inline\n    payload:\n      - "+entry("A", "192.0.2.31")+"\n      - "+entry("B", "192.0.2.32")+"\n")
+	if err != nil || strings.Join(imported, ",") != "C,A,B" || len(skipped) != 1 || !strings.HasPrefix(skipped[0], "sub: ") ||
+		!strings.Contains(skipped[0], "proxy-providers") || strings.Contains(skipped[0], testSecret) {
+		t.Errorf("inline beside proxies: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+	if imported, skipped, err := parseQuickly(t, "proxy-providers:\n  own: {type: inline, payload: ["+entry("A", "192.0.2.31")+"]}\n"); err != nil ||
+		strings.Join(imported, ",") != "A" || len(skipped) != 0 {
+		t.Errorf("inline only: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+
+	// What the list sets: its dialer-proxy (over the node's own), then the
+	// override (its dialer-proxy over the list's), the prefix and suffix of
+	// the names; exclude-type leaves nodes out, and so does a repeated name
+	outbounds, sk, err := ParseAllReport("proxies:\n  - " + entry("relay", "192.0.2.40") + "\n  - " + entry("relay2", "192.0.2.41") + "\n" +
+		"proxy-providers:\n" +
+		"  own:\n    type: inline\n    dialer-proxy: relay\n    exclude-type: ss|VMESS\n" +
+		"    override: {skip-cert-verify: true, additional-prefix: '[own] ', additional-suffix: ' *'}\n" +
+		"    payload:\n" +
+		"      - " + entry("A", "192.0.2.42") + "\n" +
+		"      - {name: S, type: ss, server: 192.0.2.43, port: 8388, cipher: aes-128-gcm, password: pw}\n" +
+		"      - {name: V, type: vmess, server: 192.0.2.44, port: 443, uuid: " + testUUID + ", cipher: auto}\n" +
+		"      - " + entry("A", "192.0.2.45") + "\n" +
+		"      - {name: B, type: trojan, server: 192.0.2.46, port: 443, password: pw, dialer-proxy: other}\n" +
+		"  two: {type: inline, dialer-proxy: relay, override: {dialer-proxy: relay2}, payload: [" + entry("D", "192.0.2.47") + "]}\n")
+	if err != nil || len(sk) != 0 || len(outbounds) != 5 {
+		t.Fatalf("imported %v, skipped %+v, error %v", outbounds, sk, err)
+	}
+	byTag := map[string]Outbound{}
+	for _, o := range outbounds {
+		byTag[o.Tag()] = o
+	}
+	checkOutbound(t, byTag["[own] A *"], `{"server":"192.0.2.42","detour":"relay","tls":{"insecure":true}}`)
+	checkOutbound(t, byTag["[own] B *"], `{"detour":"relay","tls":{"insecure":true}}`)
+	checkOutbound(t, byTag["D"], `{"detour":"relay2","tls":{"insecure":null}}`)
+
+	// What the app cannot repeat (mihomo's regular expressions and
+	// expressions): the list is left out, with the reason
+	imported, skipped, err = parseQuickly(t, "proxies:\n  - "+entry("C", "192.0.2.30")+"\n"+
+		"proxy-providers:\n"+
+		"  f: {type: inline, filter: 'HK|SG', payload: ["+entry("A", "192.0.2.31")+"]}\n"+
+		"  x: {type: inline, override: {proxy-name: [{pattern: A, target: Z}]}, payload: ["+entry("B", "192.0.2.32")+"]}\n"+
+		"  bad: {type: inline, payload: {name: E}}\n")
+	if err != nil || strings.Join(imported, ",") != "C" || len(skipped) != 3 || !strings.Contains(skipped[0], "(filter)") ||
+		!strings.Contains(skipped[1], "(override.proxy-name)") || skipped[2] != "bad: поле «payload» повреждено" {
+		t.Errorf("refused lists: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+}
+
 // dialer-proxy is a detour: kept when it names another imported node, the
 // node left out when it names a group or a node that is not imported
 func TestClashDialerProxy(t *testing.T) {
@@ -1393,6 +1463,26 @@ func TestClashAliasExpansion(t *testing.T) {
 		if !errors.Is(err, errClashBroken) || !russian(err.Error()) || len(imported) != 0 || len(skipped) != 0 {
 			t.Errorf("%s: imported %d, skipped %d, error %v", name, len(imported), len(skipped), err)
 		}
+	}
+
+	// An inline list repeated by aliases: its nodes are charged as each copy
+	// of the list is read, before the copies come to gigabytes
+	var lists strings.Builder
+	lists.WriteString("x-list: &p\n  type: inline\n  override: {additional-prefix: '* '}\n  payload:\n")
+	for i := range 200 {
+		fmt.Fprintf(&lists, "    - {name: n%d, type: trojan, server: 192.0.2.30, port: 443, password: pw}\n", i)
+	}
+	lists.WriteString("proxy-providers:\n")
+	for i := range 5000 {
+		fmt.Fprintf(&lists, "  p%d: *p\n", i)
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, _, err := parseQuickly(t, lists.String()); !errors.Is(err, errClashBroken) {
+		t.Errorf("aliased lists: error %v", err)
+	}
+	if runtime.ReadMemStats(&after); after.TotalAlloc-before.TotalAlloc > 200<<20 {
+		t.Errorf("aliased lists: %d MB allocated", (after.TotalAlloc-before.TotalAlloc)>>20)
 	}
 
 	var common strings.Builder

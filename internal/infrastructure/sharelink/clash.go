@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"net/netip"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -26,7 +28,9 @@ import (
 // node cannot work without it (ShadowTLS, a client certificate, SOCKS over
 // TLS), and left out when it is the client's own business (multiplexing,
 // UDP relay hints, buffer sizes, Hysteria 2 bandwidth). The groups and the
-// rules of a profile are the provider's routing, not servers: not read.
+// rules of a profile are the provider's routing, not servers: not read. Of
+// its proxy-providers the inline lists are read, their nodes being entries
+// as well; a list mihomo would download is not followed.
 //
 // Values are read as the provider wrote them, not as YAML types them: an
 // unquoted short-id 2351e1 is a float to YAML (mihomo then gets
@@ -36,9 +40,10 @@ import (
 // case-insensitively and with '_' for '-'.
 
 var (
-	// clashProxies: the top-level proxy list of a Clash/mihomo YAML profile,
-	// how a profile the YAML parser cannot read is still recognized
-	clashProxies = regexp.MustCompile(`(?m)^proxies:`)
+	// clashProxies: the top-level proxy list (or lists, proxy-providers) of
+	// a Clash/mihomo YAML profile, how a profile the YAML parser cannot read
+	// is still recognized
+	clashProxies = regexp.MustCompile(`(?m)^(proxies|proxy-providers):`)
 	// yamlErrorLine: the line number in a YAML parser error (the rest of
 	// the message may quote the text, credentials included)
 	yamlErrorLine = regexp.MustCompile(`line (\d+)`)
@@ -70,7 +75,7 @@ const (
 // clash reads text as a Clash/mihomo YAML profile. ok is false when it is
 // none (the text is then read as links); err refuses the profile as a whole.
 func (c *collector) clash(text string) (ok bool, err error) {
-	if !strings.Contains(text, "proxies") {
+	if !strings.Contains(text, "proxies") && !strings.Contains(text, "proxy-providers") {
 		return false, nil
 	}
 	var doc yaml.Node
@@ -104,19 +109,34 @@ func (c *collector) clash(text string) (ok bool, err error) {
 			providers = root.Content[i+1]
 		}
 	}
-	if proxies == nil {
+	if proxies == nil && providers == nil {
 		return false, nil
 	}
-	if proxies.Kind == yaml.AliasNode && proxies.Alias != nil {
+	if proxies != nil && proxies.Kind == yaml.AliasNode && proxies.Alias != nil {
 		proxies = proxies.Alias
+	}
+	r := newYAMLReader(len(text))
+	lists, listsErr := r.providers(providers)
+	if errors.Is(listsErr, errClashExpansion) {
+		return true, listsErr
 	}
 	// Share links under a "proxies:" line may be YAML as well, a list or a
 	// text: the entries of a profile are mappings
-	if !holdsMapping(proxies) && len(extractLinks(text)) > 0 {
+	entries := proxies != nil && holdsMapping(proxies)
+	for _, list := range lists {
+		for _, v := range list.entries {
+			entries = entries || v.kind == yaml.MappingNode
+		}
+	}
+	if !entries && len(extractLinks(text)) > 0 {
 		return false, nil
+	}
+	if listsErr != nil {
+		return true, listsErr
 	}
 	var items []*yaml.Node
 	switch {
+	case proxies == nil:
 	case proxies.Kind == yaml.SequenceNode:
 		items = proxies.Content
 	case proxies.Kind == yaml.ScalarNode && proxies.ShortTag() == "!!null":
@@ -124,19 +144,39 @@ func (c *collector) clash(text string) (ok bool, err error) {
 	default:
 		return true, errClashBroken
 	}
-	if len(items) == 0 && providers != nil {
-		return true, errClashProviders
-	}
 
 	// The entries are read first: a profile that expands too far is refused
-	// before anything of it is translated
-	r := newYAMLReader(len(text))
-	values := make([]*clashValue, len(items))
-	errs := make([]error, len(items))
-	for i, item := range items {
-		values[i], errs[i] = r.value(item)
-		if errors.Is(errs[i], errClashExpansion) || errs[i] == nil && !r.entry(values[i]) {
+	// before anything of it is translated (the lists' nodes are charged as
+	// they are read). The nodes of the inline lists follow the proxies.
+	type clashItem struct {
+		n   *yaml.Node // nil for a list's node
+		v   *clashValue
+		err error
+	}
+	var all []clashItem
+	for _, item := range items {
+		v, err := r.value(item)
+		if errors.Is(err, errClashExpansion) || err == nil && !r.entry(v) {
 			return true, errClashExpansion
+		}
+		all = append(all, clashItem{item, v, err})
+	}
+	for _, list := range lists {
+		for _, v := range list.entries {
+			all = append(all, clashItem{v: v})
+		}
+	}
+	external, refused := false, false
+	for _, list := range lists {
+		external = external || list.external
+		refused = refused || list.reason != "" && !list.external
+	}
+	if len(all) == 0 && external && !refused {
+		return true, errClashProviders
+	}
+	for _, list := range lists {
+		if list.reason != "" {
+			c.skip(list.name, list.reason)
 		}
 	}
 
@@ -145,18 +185,18 @@ func (c *collector) clash(text string) (ok bool, err error) {
 	// and not in a ring (sing-box does not start otherwise, and sing-box
 	// check does not notice); the tags are made unique there
 	var outbounds []any
-	for i, item := range items {
-		v, err := values[i], errs[i]
+	for i, item := range all {
+		v, err := item.v, item.err
 		if err == nil && v.kind != yaml.MappingNode {
 			err = errClashEntry
 		}
 		if err != nil {
-			c.skip(clashName(nil, item, i), err.Error())
+			c.skip(clashName(nil, item.n, i), err.Error())
 			continue
 		}
 		outbound, err := clashOutbound(v, i)
 		if err != nil {
-			c.skip(clashName(v, item, i), err.Error())
+			c.skip(clashName(v, item.n, i), err.Error())
 			continue
 		}
 		if outbound != nil {
@@ -184,13 +224,181 @@ func holdsMapping(list *yaml.Node) bool {
 	return false
 }
 
+// clashProvider is one of a profile's proxy-providers, read: the nodes of an
+// inline list, with what the list sets for them applied, or why the list
+// gives none
+type clashProvider struct {
+	name     string        // what the report calls it
+	entries  []*clashValue // an inline list's
+	reason   string        // why its nodes are not read
+	external bool          // a list to download (http, file)
+}
+
+// clashOverrides are the options of a list's override that set a field of
+// each of its nodes (mihomo's overrideSchema.Apply): the entry is then read
+// as if it had the field itself
+var clashOverrides = []string{
+	"tfo", "mptcp", "udp", "udp-over-tcp", "up", "down", "dialer-proxy",
+	"skip-cert-verify", "name-cert-verify", "interface-name", "routing-mark", "ip-version",
+}
+
+// providers reads the proxy-providers of a profile. The nodes of an inline
+// list (payload) are entries of the profile, with what the list sets for
+// them applied as mihomo applies it; a list mihomo downloads (http, file)
+// is not followed, and the fallback nodes such a list may carry are no
+// more than a stand-in for it. Lists that choose or rename their nodes by
+// mihomo's regular expressions or expressions are refused: the app would
+// take other nodes, or under other names.
+func (r *yamlReader) providers(n *yaml.Node) ([]clashProvider, error) {
+	if n == nil {
+		return nil, nil
+	}
+	if n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	switch {
+	case n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null":
+		return nil, nil
+	case n.Kind != yaml.MappingNode:
+		return nil, errClashBroken
+	}
+	var lists []clashProvider
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		list := clashProvider{name: fmt.Sprintf("список %d", len(lists)+1)}
+		if name, _, ok := scalarText(n.Content[i]); ok && plainName(name) {
+			list.name = shortName(name)
+		}
+		if n.Content[i].ShortTag() == "!!merge" {
+			list.reason = "списки серверов (proxy-providers), взятые ссылкой YAML (<<), приложение не читает"
+			lists = append(lists, list)
+			continue
+		}
+		v, err := r.value(n.Content[i+1])
+		if err == nil && v.kind == yaml.MappingNode {
+			err = r.inline(&list, v)
+		} else if !errors.Is(err, errClashExpansion) {
+			list.reason, err = "список серверов (proxy-providers) повреждён", nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		lists = append(lists, list)
+	}
+	return lists, nil
+}
+
+// inline reads the nodes of an inline list into list, after mihomo's
+// ProxiesParser: exclude-type leaves nodes out, and so does a name the list
+// already gave; then the list's dialer-proxy is set, then the override.
+// Each node is an entry of the profile and charged as one as it is read:
+// aliases may repeat a list, an error refuses the profile.
+func (r *yamlReader) inline(list *clashProvider, v *clashValue) error {
+	e := &clashEntry{}
+	m := clashMap{v: v, e: e}
+	if typ := m.str("type"); e.err != nil {
+		list.reason = e.err.Error()
+		return nil
+	} else if typ != "inline" {
+		list.external = true
+		list.reason = "это внешний список серверов (proxy-providers), а его приложение не загружает"
+		return nil
+	}
+	override := m.sub("override")
+	for _, key := range []string{"filter", "exclude-filter"} {
+		if m.str(key) != "" {
+			list.reason = fmt.Sprintf("список серверов (proxy-providers) отбирает узлы выражением mihomo (%s) — так приложение не умеет", key)
+			return nil
+		}
+	}
+	for _, key := range []string{"proxy-name", "override-expr"} {
+		if override.has(key) {
+			list.reason = fmt.Sprintf("список серверов (proxy-providers) меняет узлы выражением mihomo (override.%s) — так приложение не умеет", key)
+			return nil
+		}
+	}
+	var excluded []string
+	if s := m.str("exclude-type"); s != "" {
+		excluded = strings.Split(s, "|")
+	}
+	set := map[string]*clashValue{}
+	if dialer := m.v.field("dialer-proxy"); dialer != nil && dialer.kind == yaml.ScalarNode && dialer.text != "" {
+		set["dialer-proxy"] = dialer
+	}
+	for _, key := range clashOverrides {
+		if f := override.v.field(key); f != nil {
+			set[key] = f
+		}
+	}
+	prefix, suffix := override.str("additional-prefix"), override.str("additional-suffix")
+	payload := m.v.field("payload")
+	if payload != nil && payload.kind != yaml.SequenceNode {
+		m.bad("payload")
+	}
+	if e.err != nil {
+		list.reason = e.err.Error()
+		return nil
+	}
+	if payload == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	left := 0
+	for _, entry := range payload.items {
+		if !r.entry(entry) {
+			return errClashExpansion
+		}
+		if entry.kind != yaml.MappingNode {
+			list.entries = append(list.entries, entry) // reported as a broken entry
+			continue
+		}
+		if typ := entry.field("type"); len(excluded) > 0 && (typ == nil || typ.kind != yaml.ScalarNode || slices.ContainsFunc(excluded, func(t string) bool {
+			return strings.EqualFold(typ.text, t)
+		})) {
+			left++
+			continue
+		}
+		name := entry.field("name")
+		if name != nil && name.kind == yaml.ScalarNode {
+			if seen[name.text] {
+				left++
+				continue
+			}
+			seen[name.text] = true
+		}
+		list.entries = append(list.entries, overridden(entry, set, name, prefix, suffix))
+	}
+	if left > 0 {
+		log.Printf("Clash profile: an inline list leaves out %d of its nodes (exclude-type, repeated names)", left)
+	}
+	return nil
+}
+
+// overridden is an entry with the fields a list sets for its nodes, and the
+// prefix and the suffix of the name around it
+func overridden(entry *clashValue, set map[string]*clashValue, name *clashValue, prefix, suffix string) *clashValue {
+	if len(set) == 0 && (prefix == "" && suffix == "" || name == nil || name.kind != yaml.ScalarNode) {
+		return entry
+	}
+	v := &clashValue{kind: yaml.MappingNode, fields: maps.Clone(entry.fields), size: entry.size}
+	if name != nil && name.kind == yaml.ScalarNode && (prefix != "" || suffix != "") {
+		text := prefix + name.text + suffix
+		v.fields["name"] = &clashValue{kind: yaml.ScalarNode, text: text, tag: "!!str", size: 1 + int64(len(text))}
+		v.size = sizeAdd(v.size, int64(len(prefix)+len(suffix)))
+	}
+	for key, f := range set {
+		v.fields[key] = f
+		v.size = sizeAdd(v.size, sizeAdd(int64(len(key)), f.size))
+	}
+	return v
+}
+
 // clashName is what an entry is called in the report: its name on one
 // line, shortened (a provider's text reaches the popups), else its number
 func clashName(v *clashValue, n *yaml.Node, index int) string {
 	if f := v.field("name"); f != nil && f.kind == yaml.ScalarNode && plainName(f.text) {
 		return shortName(f.text)
 	}
-	if v == nil && n.Kind == yaml.MappingNode {
+	if v == nil && n != nil && n.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			key, _, _ := scalarText(n.Content[i])
 			if value := n.Content[i+1]; clashKey(key) == "name" && value.Kind == yaml.ScalarNode {
