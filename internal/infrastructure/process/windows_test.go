@@ -45,6 +45,10 @@ func TestMain(m *testing.M) {
 		quitChild(name)
 		return
 	}
+	if mode := os.Getenv(helperChildEnv); mode != "" {
+		helperChild(mode, os.Getenv(helperChildDirEnv))
+		return
+	}
 	// The fakes this test starts run at the test's own level (below High on
 	// a developer machine): they must count as elevated, like the real
 	// sing-box started by the elevated app
@@ -80,6 +84,8 @@ func fakeSingBox(mode string) {
 			fmt.Fprintln(os.Stderr, "INFO[0000] connection: a fake log line of a reasonable length")
 			time.Sleep(10 * time.Millisecond)
 		}
+	case "serve":
+		fakeServe()
 	default:
 		fmt.Fprintln(os.Stderr, "INFO[0000] fake sing-box started")
 		time.Sleep(2 * time.Minute)
