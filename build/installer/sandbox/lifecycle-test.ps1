@@ -1091,7 +1091,13 @@ switch ($Phase) {
         New-Item -ItemType Directory -Force 'C:\e2e\srv' | Out-Null
         Copy-Item -Path $sb -Destination 'C:\e2e\srv\sing-box.exe' -Force
         Get-ChildItem -Path $pf -Filter '*.dll' | Copy-Item -Destination 'C:\e2e\srv' -Force
-        Set-Content -Path 'C:\e2e\srv\server.json' -Encoding ASCII -Value ('{"log":{"level":"warn"},"inbounds":[{"type":"mixed","tag":"in","listen":"' + $ip + '","listen_port":18090}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"auto_detect_interface":true}}')
+        # The test URL's addresses, looked up now and handed to the server as
+        # its only DNS (hosts): under the VPN's strict_route (the TUN part
+        # below) only the VPN's own exe may query DNS off the TUN, and a real
+        # remote server is not behind this machine's TUN at all
+        $gstatic = @(Resolve-DnsName -Name 'www.gstatic.com' -Type A -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress } | ForEach-Object { '"' + $_.IPAddress + '"' })
+        if ($gstatic.Count -eq 0) { Finish 'www.gstatic.com does not resolve' }
+        Set-Content -Path 'C:\e2e\srv\server.json' -Encoding ASCII -Value ('{"log":{"level":"warn"},"dns":{"servers":[{"type":"hosts","tag":"h","predefined":{"www.gstatic.com":[' + ($gstatic -join ',') + ']}}],"final":"h"},"inbounds":[{"type":"mixed","tag":"in","listen":"' + $ip + '","listen_port":18090}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"auto_detect_interface":true}}')
         New-NetFirewallRule -DisplayName 'sb-latency-test' -Direction Inbound -Protocol TCP -LocalPort 18090, 18091 -Action Allow -ErrorAction SilentlyContinue | Out-Null
         $server = Start-Process -FilePath 'C:\e2e\srv\sing-box.exe' -ArgumentList @('run', '-c', 'C:\e2e\srv\server.json') -WorkingDirectory 'C:\e2e\srv' -WindowStyle Hidden -PassThru
         Set-Content -Path 'C:\e2e\relay.cs' -Encoding ASCII -Value $relaySource
@@ -1180,19 +1186,23 @@ switch ($Phase) {
 
         # 4. With a TUN VPN (strict route): the test instance dials past the
         # TUN - its connection to the dead address leaves from the sandbox's
-        # address, not from the TUN's
+        # address, not from the TUN's. The VPN sends everything direct: the
+        # local test servers go out to the internet through this TUN too, and
+        # through lat-live they would reach themselves in a loop
         $routed = ConfigText
         $tun = '{"log":{"level":"info","timestamp":true},"dns":{"servers":[{"type":"udp","tag":"dns-out","server":"1.1.1.1"}],"final":"dns-out"},' +
             '"inbounds":[{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true,"strict_route":true}],"outbounds":[' + $outs + '],' +
-            '"route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}],"final":"lat-live","auto_detect_interface":true}}'
+            '"route":{"rules":[{"action":"sniff"},{"protocol":"dns","action":"hijack-dns"}],"final":"direct","auto_detect_interface":true}}'
         Set-Content -Path $cfg -Encoding ASCII -Value $tun
         $old = FirstPid $sb
         [void](RestartThroughThePage $ws)
         Check 'TUN: the VPN restarted with it' (WaitFor { $n = FirstPid $sb; $n -ne 0 -and $n -ne $old } 30)
         $wintun = $null
-        [void](WaitFor { $script:wintun = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceDescription -match 'Wintun|sing-box' })[0]; [bool]$script:wintun } 30)
+        # sing-box names it tun0 (interface_name); Wintun adapters may be hidden
+        [void](WaitFor { $script:wintun = @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'tun0' -or $_.InterfaceDescription -match 'Wintun|sing' })[0]; [bool]$script:wintun } 30)
         # U2: what kind of interface Windows makes of it
-        if ($wintun) { Log "TUN adapter: '$($wintun.InterfaceDescription)' InterfaceType $($wintun.InterfaceType) ifIndex $($wintun.ifIndex)" }
+        if ($wintun) { Log "TUN adapter: '$($wintun.Name)' '$($wintun.InterfaceDescription)' InterfaceType $($wintun.InterfaceType) ifIndex $($wintun.ifIndex)" }
+        else { Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue | ForEach-Object { Log "adapter: '$($_.Name)' '$($_.InterfaceDescription)' $($_.Status)" } }
         Check 'TUN: the adapter is up' ([bool]$wintun)
         $vpnPid = FirstPid $sb
         Start-Sleep -Seconds 11
