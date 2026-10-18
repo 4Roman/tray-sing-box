@@ -193,7 +193,7 @@ func (c *collector) singBox(entries []any) {
 			c.skip(name, err.Error())
 			continue
 		}
-		candidates = append(candidates, candidate{outbound, name})
+		candidates = append(candidates, candidate{outbound: outbound, name: name})
 	}
 
 	// A repeated tag keeps its name on the first node that has it, the later
@@ -213,6 +213,9 @@ func (c *collector) singBox(entries []any) {
 type candidate struct {
 	outbound Outbound
 	name     string
+	// quiet: left out, it is not reported — another document of the
+	// profile gave the node already (a balancer's copy of it, see xray)
+	quiet bool
 }
 
 // keepChains decides which candidates are kept for their detours (a tag
@@ -253,7 +256,9 @@ func (c *collector) keepChains(candidates []candidate, direct map[string]bool) [
 	var orphans []int // kept candidates whose detour lost its last node
 	leave := func(i int, reason string) {
 		kept[i] = false
-		c.skip(candidates[i].name, reason)
+		if !candidates[i].quiet {
+			c.skip(candidates[i].name, reason)
+		}
 		tag := candidates[i].outbound.Tag()
 		if left[tag]--; left[tag] == 0 {
 			for _, j := range dependents[tag] {

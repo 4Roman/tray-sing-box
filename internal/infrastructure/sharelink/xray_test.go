@@ -315,6 +315,33 @@ func TestXray3xuiBalancer(t *testing.T) {
 	checkOutbound(t, byTag["bal-1-vless"], `{"server":"203.0.113.3"}`)
 }
 
+// A balancer's copy of a node another document refused is not reported a
+// second time, under the tag the balancer gave it — refused by the link
+// parser or for its chain; a member no other document has is
+func TestXray3xuiBalancerRefusedCopy(t *testing.T) {
+	const xhttp = `"protocol": "vless", "settings": {"address": "203.0.113.50", "port": 443, "id": "` + testUUID + `", "encryption": "none"},
+	  "streamSettings": {"network": "xhttp", "security": "tls", "xhttpSettings": {"path": "/xh"}}`
+	const chained = `"protocol": "vless", "settings": {"address": "203.0.113.51", "port": 443, "id": "` + testUUID + `", "encryption": "none"},
+	  "streamSettings": {"network": "grpc", "security": "tls", "grpcSettings": {"serviceName": "svc"}, "sockopt": {"dialerProxy": "relay"}}`
+	const relay = `{"protocol": "trojan", "tag": "relay", "settings": {"address": "198.51.100.1", "port": 443, "password": "pw"}}`
+	const kcp = `"protocol": "vmess", "settings": {"address": "203.0.113.52", "port": 443, "id": "` + testUUID + `"},
+	  "streamSettings": {"network": "kcp"}`
+	body := `[
+	  {"remarks": "PL-xhttp", "outbounds": [{"tag": "proxy", ` + xhttp + `}, ` + xrayDefaultOutbounds + `]},
+	  {"remarks": "A", "outbounds": [{"tag": "proxy", ` + chained + `}, ` + relay + `, ` + xrayDefaultOutbounds + `]},
+	  {"remarks": "Auto", "outbounds": [{` + xhttp + `, "tag": "bal-1-vless"}, {"Tag": "bal-1-vless-2", ` + chained + `},
+	    {"tag": "bal-1-vmess", ` + kcp + `}, ` + xrayDefaultOutbounds + `],
+	   "routing": {"balancers": [{"tag": "balancer", "selector": ["bal-1-"]}]}}]`
+	_, tags, reasons := parseXray(t, body)
+	if strings.Join(tags, "|") != "A|relay" {
+		t.Errorf("imported %q", tags)
+	}
+	checkReasons(t, reasons, map[string]string{
+		"PL-xhttp":    "транспорт XHTTP не поддерживается sing-box",
+		"bal-1-vmess": "mKCP",
+	})
+}
+
 // 3x-ui v2.5 with fragmentation on: the node dials through the "fragment"
 // freedom, which is the direct connection with Xray's fragmentation. Over
 // TLS sing-box fragments the ClientHello too ("tlshello" ->

@@ -257,7 +257,8 @@ func xrayConfigOf(raw json.RawMessage) (xrayProfile, bool) {
 // the group's name: 3x-ui's balancer documents carry copies of the other
 // documents' nodes, retagged. Such a configuration is read after the others,
 // its remarks name no node, and a node the profile already gave is not taken
-// twice.
+// twice — nor reported a second time, under the tag the balancer gave it,
+// when it was refused.
 func (c *collector) xray(text string) {
 	var profiles []xrayProfile
 	if text = strings.TrimSpace(text); strings.HasPrefix(text, "{") {
@@ -286,14 +287,23 @@ func (c *collector) xray(text string) {
 		}
 	}
 	counter := 0
-	taken := map[string]string{} // the content of every node the profile gave -> its tag
+	read := xrayRead{
+		taken: map[string]string{},
+		seen:  map[string]bool{},
+	}
 	for _, balancers := range []bool{false, true} {
 		for _, p := range profiles {
 			if p.balancer == balancers {
-				c.xrayConfig(p, &counter, taken)
+				c.xrayConfig(p, &counter, read)
 			}
 		}
 	}
+}
+
+// xrayRead is what the configurations of a profile read so far gave
+type xrayRead struct {
+	taken map[string]string // the content of every node given (xrayContent) -> its tag
+	seen  map[string]bool   // every proxy outbound read, as written (xrayRawContent)
 }
 
 // xrayContent is what tells an outbound from another: all but its tag
@@ -304,15 +314,33 @@ func xrayContent(o Outbound) string {
 	return string(data)
 }
 
+// xrayRawContent is an outbound of the profile as written, all but its tag:
+// what 3x-ui's balancer document copies (retagged, the JSON written anew)
+func xrayRawContent(raw json.RawMessage) string {
+	var obj map[string]any
+	if json.Unmarshal(raw, &obj) != nil {
+		return string(bytes.TrimSpace(raw))
+	}
+	for key := range obj {
+		if strings.EqualFold(key, "tag") { // as Xray matches the key
+			delete(obj, key)
+		}
+	}
+	data, _ := json.Marshal(obj)
+	return string(data)
+}
+
 // xrayConfig takes the proxy outbounds of one configuration. Its first one
 // is named by the remarks (3x-ui's node, tagged "proxy" in every
 // configuration of the array), the others by their tags. The tags of a
 // configuration name each other in the dialer chains; the chains are checked
 // as those of a sing-box profile (keepChains) and point at the tags the nodes
 // get when they are added. counter numbers the outbounds of the whole
-// profile, for the names of nodes without one; taken holds the nodes the
-// profile gave so far (see xray).
-func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]string) {
+// profile, for the names of nodes without one; read holds what the profile
+// gave so far (see xray). A balancer's copy of a node another configuration
+// had is left out without a report when it is refused here: that node was
+// reported (or imported) under its own name.
+func (c *collector) xrayConfig(p xrayProfile, counter *int, read xrayRead) {
 	type entry struct {
 		raw      json.RawMessage
 		head     xrayHead
@@ -356,14 +384,24 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 				name = shortName(remarks)
 			}
 		}
+		raw := xrayRawContent(e.raw)
+		copied := p.balancer && read.seen[raw]
+		read.seen[raw] = true
+		skip := func(reason string) {
+			if copied {
+				log.Printf("Xray profile: a balancer's copy of a node refused or imported in another document is left out")
+				return
+			}
+			c.skip(name, reason)
+		}
 		if e.broken {
-			c.skip(name, errXrayBroken.Error())
+			skip(errXrayBroken.Error())
 			continue
 		}
 
 		outbound, dialer, err := xrayNode(e.raw, e.protocol)
 		if err != nil {
-			c.skip(name, err.Error())
+			skip(err.Error())
 			continue
 		}
 		if dialer != "" {
@@ -371,7 +409,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 				// The direct connection sing-box makes anyway, with what the
 				// freedom adds to it
 				if reason := freedom.dial(outbound, dialer); reason != "" {
-					c.skip(name, reason)
+					skip(reason)
 					continue
 				}
 			} else {
@@ -382,7 +420,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 			tag = outbound.Tag() // the link parser's own
 		}
 		outbound["tag"] = localTag
-		candidates = append(candidates, candidate{outbound, name})
+		candidates = append(candidates, candidate{outbound: outbound, name: name, quiet: copied})
 		tags = append(tags, tag)
 	}
 
@@ -395,7 +433,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 		local := cand.outbound.Tag()
 		cand.outbound["tag"] = tags[i]
 		content := xrayContent(cand.outbound)
-		tag, copied := taken[content]
+		tag, copied := read.taken[content]
 		if copied && p.balancer {
 			log.Printf("Xray profile: a balancer's copy of a node is left out, the node is imported once")
 			kept[i] = false
@@ -403,7 +441,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 			c.add(cand.outbound)
 			tag = cand.outbound.Tag()
 			if !copied {
-				taken[content] = tag
+				read.taken[content] = tag
 			}
 		}
 		if _, seen := final[local]; !seen {

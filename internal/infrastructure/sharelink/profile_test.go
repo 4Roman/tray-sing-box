@@ -301,7 +301,7 @@ func chainCandidates(tags []string, detours []any) []candidate {
 		if detours[i] != nil {
 			o["detour"] = detours[i]
 		}
-		candidates[i] = candidate{o, fmt.Sprintf("n%d", i)}
+		candidates[i] = candidate{outbound: o, name: fmt.Sprintf("n%d", i)}
 	}
 	return candidates
 }
