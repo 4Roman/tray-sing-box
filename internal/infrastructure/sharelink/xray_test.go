@@ -604,6 +604,22 @@ func TestXrayECH(t *testing.T) {
 	checkReasons(t, reasons, map[string]string{"broken": "конфигурация ECH повреждена"})
 }
 
+// Xray sends grpcSettings.authority as gRPC's :authority, sing-box the TLS
+// server name: a node is kept only where the two are the same
+func TestXrayGRPCAuthority(t *testing.T) {
+	node := func(tag, authority string) string {
+		return `{"protocol": "trojan", "tag": "` + tag + `", "settings": {"address": "203.0.113.30", "port": 443, "password": "pw"},
+		  "streamSettings": {"network": "grpc", "security": "tls", "tlsSettings": {"serverName": "front.example.com"},
+		    "grpcSettings": {"serviceName": "svc", "authority": "` + authority + `"}}}`
+	}
+	byTag, tags, reasons := parseXray(t, `{"outbounds": [`+node("empty", "")+`, `+node("same", "FRONT.example.com")+`, `+node("other", "real.example.net")+`]}`)
+	if strings.Join(tags, "|") != "empty|same" {
+		t.Errorf("imported %q", tags)
+	}
+	checkOutbound(t, byTag["same"], `{"tls":{"server_name":"front.example.com"},"transport":{"type":"grpc","service_name":"svc"}}`)
+	checkReasons(t, reasons, map[string]string{"other": "имя для gRPC (authority) отличается от имени сервера"})
+}
+
 // Xray's h2 transport is HTTP/2: over TLS (or REALITY) sing-box's http
 // transport speaks it, without TLS that one speaks HTTP/1.1 — refused, as
 // a Clash profile's h2 without TLS is

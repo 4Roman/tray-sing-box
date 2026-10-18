@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -383,8 +384,40 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 	if transport != nil {
 		outbound["transport"] = transport
 	}
+	if err := grpcAuthority(outbound, q.Get("authority")); err != nil {
+		return err
+	}
 	fragmentTLS(outbound, fragment)
 	return linkECH(outbound, q.Get("ech"))
+}
+
+// grpcAuthority refuses a gRPC node whose authority sing-box would not
+// send. Xray sends its grpcSettings.authority (a link's authority=, as
+// 3x-ui writes it) as the :authority of the requests, sing-box the TLS
+// server name — the server's address without TLS — and has no option for
+// another one: a CDN or a reverse proxy routing gRPC by :authority would
+// send the node's requests elsewhere. An authority that is that name (a
+// port aside) is what sing-box sends anyway.
+func grpcAuthority(outbound Outbound, authority string) error {
+	authority = strings.TrimSpace(authority)
+	transport, _ := outbound["transport"].(map[string]any)
+	if authority == "" || transport["type"] != "grpc" {
+		return nil
+	}
+	name, _ := outbound["server"].(string)
+	if tls, _ := outbound["tls"].(map[string]any); tls != nil {
+		if serverName, _ := tls["server_name"].(string); serverName != "" {
+			name = serverName
+		}
+	}
+	if host, _, err := net.SplitHostPort(authority); err == nil {
+		authority = host
+	}
+	if !strings.EqualFold(strings.Trim(authority, "[]"), name) {
+		return errors.New("имя для gRPC (authority) отличается от имени сервера, а sing-box отправляет только имя сервера — " +
+			"запросы ушли бы не туда")
+	}
+	return nil
 }
 
 // finalMask checks Xray's finalmask, which 3x-ui and v2rayN put into a link
@@ -677,6 +710,8 @@ type vmessLink struct {
 	Pbk      string          `json:"pbk"` // REALITY's public key (Marzban)
 	Sid      string          `json:"sid"` // REALITY's short_id
 	Ech      string          `json:"ech"` // Xray's echConfigList (3x-ui)
+	// The :authority of gRPC (3x-ui)
+	Authority string `json:"authority"`
 }
 
 // rawInt parses a JSON value that may be a number or a quoted number
@@ -845,6 +880,9 @@ func parseVMess(link string) (Outbound, error) {
 	}
 	if transport != nil {
 		outbound["transport"] = transport
+	}
+	if err := grpcAuthority(outbound, v.Authority); err != nil {
+		return nil, err
 	}
 	fragmentTLS(outbound, fragment)
 	if err := linkECH(outbound, v.Ech); err != nil {

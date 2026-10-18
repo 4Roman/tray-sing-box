@@ -158,6 +158,13 @@ var acceptedLinks = []linkCase{
 	{"vmess grpc custom path",
 		vmessJSON(`{"ps":"vm-grpc-path","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"grpc","path":"/vmsvc/Tun","tls":"tls"}`),
 		`{"transport":{"type":"grpc","service_name":"vmsvc"}}`},
+	// A gRPC authority that is the server name sing-box sends anyway: kept
+	{"grpc authority of the server name",
+		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&authority=Front.Example.com%3A443&security=tls&sni=front.example.com#grpc-authority",
+		`{"tls":{"server_name":"front.example.com"},"transport":{"type":"grpc","service_name":"svc"}}`},
+	{"grpc authority of the address, no TLS",
+		vmessJSON(`{"ps":"vm-grpc-authority","add":"192.0.2.20","port":80,"id":"` + testUUID + `","net":"grpc","path":"svc","authority":"192.0.2.20"}`),
+		`{"tls":null,"transport":{"type":"grpc"}}`},
 	{"grpc keeps the alpn",
 		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&security=tls&alpn=h2&sni=example.com#grpc-alpn",
 		`{"tls":{"alpn":["h2"]},"transport":{"type":"grpc"}}`},
@@ -486,6 +493,14 @@ var refusedLinks = []refusalCase{
 	{"fm-broken", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=%7B" + testSecret + "#fm-broken", "fm (finalmask) в ссылке повреждён"},
 	{"vm-fm", vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":"443","id":"` + testUUID + `","fm":{"tcp":[{"type":"header-custom","settings":{"clients":["` + testSecret + `"]}}]}}`), "маскировка finalmask «header-custom»"},
 	{"grpc-custom-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fcustom%2Fpath%7Cp2&security=tls#grpc-custom-path", "собственный путь gRPC"},
+	// sing-box sends the TLS server name as gRPC's :authority, Xray the
+	// authority
+	{"grpc-authority", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&authority=real.example.net&security=tls&sni=front.example.com#grpc-authority",
+		"имя для gRPC (authority) отличается от имени сервера"},
+	{"vm-grpc-authority", vmessJSON(`{"ps":"vm-grpc-authority","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"grpc","path":"svc","tls":"tls","sni":"front.example.com","authority":"real.example.net"}`),
+		"имя для gRPC (authority) отличается от имени сервера"},
+	{"grpc-authority-reality", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&authority=real.example.net&security=reality&sni=www.example.com&pbk=" + testPBK + "#grpc-authority-reality",
+		"имя для gRPC (authority) отличается от имени сервера"},
 	// ECH is never dropped: refused where sing-box cannot do it as meant
 	{"ech-reality", "vless://" + testUUID + "@192.0.2.10:443?security=reality&sni=www.example.com&pbk=" + testPBK + "&ech=" + url.QueryEscape(testECH) + "#ech-reality",
 		"ECH вместе с REALITY"},
