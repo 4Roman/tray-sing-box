@@ -319,9 +319,6 @@ func TestLatencyTooSoon(t *testing.T) {
 	if _, err := svc.Test(context.Background()); !errors.Is(err, ErrLatencyTooSoon) {
 		t.Fatalf("a check %d s after the end of the last: %v, want ErrLatencyTooSoon", config.LatencyMinIntervalSeconds-1, err)
 	}
-	if _, _, err := svc.SelectFastest(context.Background(), false); !errors.Is(err, ErrLatencyTooSoon) {
-		t.Fatalf("select the fastest as soon: %v, want ErrLatencyTooSoon", err)
-	}
 	clock.advance(time.Second)
 	if _, err := svc.Test(context.Background()); err != nil {
 		t.Fatalf("a check %d s after: %v", config.LatencyMinIntervalSeconds, err)
@@ -566,7 +563,8 @@ func TestSelectFastestConfirmation(t *testing.T) {
 	if err != nil || !outcome.NeedsConfirm || len(used) != 0 {
 		t.Fatalf("outcome %+v, err %v, used %v", outcome, err, used)
 	}
-	clock.advance(5 * time.Second)
+	// The user answers after a while: a new check would not come too soon
+	clock.advance(config.LatencyMinIntervalSeconds*time.Second + 5*time.Second)
 	_, outcome, err = svc.SelectFastest(context.Background(), true)
 	if err != nil || !outcome.Switched || !reflect.DeepEqual(used, []string{"b"}) {
 		t.Fatalf("confirmed: outcome %+v, err %v, used %v", outcome, err, used)
@@ -581,6 +579,55 @@ func TestSelectFastestConfirmation(t *testing.T) {
 	}
 	if prober.callCount() != 2 {
 		t.Fatalf("a late confirmation did not measure again (%d test instances)", prober.callCount())
+	}
+}
+
+// "Select the fastest" right after "check latency" (the two buttons side by
+// side, the tray after the page) decides on that check: a new test instance
+// would be refused as too soon anyway, and none fresher could be had. Once
+// the interval has passed it measures again — and a report older than the
+// last test instance (that one failed) is never the one decided on.
+func TestSelectFastestAfterTest(t *testing.T) {
+	prober := twoServers()
+	var used []string
+	svc, clock := newTestLatencyService(twoCandidates(nodeRouting("a")), prober,
+		func(tag string) (bool, error) { used = append(used, tag); return true, nil }, &trackingLock{})
+
+	tested, err := svc.Test(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(config.LatencyMinIntervalSeconds*time.Second - time.Second)
+	report, outcome, err := svc.SelectFastest(context.Background(), false)
+	if err != nil {
+		t.Fatalf("select the fastest right after a check: %v", err)
+	}
+	if report != tested || prober.callCount() != 1 {
+		t.Errorf("a second test instance (%d), or another report than the check's", prober.callCount())
+	}
+	if !outcome.Switched || !reflect.DeepEqual(used, []string{"b"}) {
+		t.Errorf("outcome %+v, used %v", outcome, used)
+	}
+
+	clock.advance(time.Second)
+	if _, _, err := svc.SelectFastest(context.Background(), false); err != nil || prober.callCount() != 2 {
+		t.Fatalf("after the interval: %v, %d test instances, want 2", err, prober.callCount())
+	}
+
+	// The next test instance fails: its predecessor's report is no answer
+	clock.advance(config.LatencyMinIntervalSeconds * time.Second)
+	prober.mu.Lock()
+	prober.err = errors.New("the test sing-box did not start")
+	prober.mu.Unlock()
+	if _, err := svc.Test(context.Background()); err == nil {
+		t.Fatal("the failing check succeeded")
+	}
+	clock.advance(time.Second)
+	if _, _, err := svc.SelectFastest(context.Background(), false); !errors.Is(err, ErrLatencyTooSoon) {
+		t.Fatalf("select the fastest after a failed check: %v, want ErrLatencyTooSoon", err)
+	}
+	if len(used) != 2 {
+		t.Errorf("switched on an old report: %v", used)
 	}
 }
 

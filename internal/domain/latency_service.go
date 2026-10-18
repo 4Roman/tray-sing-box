@@ -189,10 +189,13 @@ type LatencyService struct {
 	// included
 	flight sync.Mutex
 
-	mu     sync.Mutex
-	last   *LatencyReport     // kept in memory only
-	ended  time.Time          // when the last test instance was done
-	cancel context.CancelFunc // of the running check, nil between checks
+	mu    sync.Mutex
+	last  *LatencyReport // kept in memory only
+	ended time.Time      // when the last test instance was done
+	// lastEnded: last is the report of that test instance (it may have
+	// failed, leaving an older one)
+	lastEnded bool
+	cancel    context.CancelFunc // of the running check, nil between checks
 
 	// Test hooks
 	now      func() time.Time
@@ -239,13 +242,16 @@ func (s *LatencyService) Test(ctx context.Context) (*LatencyReport, error) {
 }
 
 // SelectFastest checks the delays (like Test) and routes the traffic
-// through the fastest server when ChooseFastest says so. A confirmation
-// (the question ChooseFastest asked about a selector group) decides on the
-// check it was asked about, when that is at most FastestConfirmSeconds old:
-// a second measurement would come too soon after the first anyway. The
-// routing is read again under the operation lock, so the decision and the
-// switch see the same config. The report comes back with an error from the
-// switch too (GET /api/latency shows it as the last one).
+// through the fastest server when ChooseFastest says so. It decides on the
+// last check instead of measuring again while that test instance ended less
+// than LatencyMinIntervalSeconds ago ("check latency", then "select the
+// fastest" next to it: a new one would be refused as too soon, and none
+// could be fresher), and a confirmation (the question ChooseFastest asked
+// about a selector group) on the check it was asked about, when that is at
+// most FastestConfirmSeconds old (recent). The routing is read again under
+// the operation lock, so the decision and the switch see the same config.
+// The report comes back with an error from the switch too (GET /api/latency
+// shows it as the last one).
 func (s *LatencyService) SelectFastest(ctx context.Context, confirm bool) (*LatencyReport, *FastestOutcome, error) {
 	if !s.flight.TryLock() {
 		return nil, nil, ErrLatencyBusy
@@ -333,14 +339,19 @@ func (s *LatencyService) cancellable(parent context.Context) (context.Context, f
 	}
 }
 
-// recent is the last report when a confirmation may decide on it
+// recent is the last report when "select the fastest" may decide on it
+// without measuring again: the last test instance made it and ended less
+// than the interval ago, or the request is a confirmation within the reuse
+// time of the check it was asked about
 func (s *LatencyService) recent(confirm bool) *LatencyReport {
-	if !confirm {
-		return nil
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.last != nil && s.now().Sub(s.last.Tested) <= s.reuse {
+	switch {
+	case s.last == nil:
+		return nil
+	case s.lastEnded && s.now().Sub(s.ended) < s.interval:
+		return s.last
+	case confirm && s.now().Sub(s.last.Tested) <= s.reuse:
 		return s.last
 	}
 	return nil
@@ -359,7 +370,8 @@ func (s *LatencyService) check(ctx context.Context) (*LatencyReport, error) {
 	}
 
 	var delays map[string]Delay
-	if slices.ContainsFunc(plan.Candidates, func(c LatencyCandidate) bool { return c.Testable }) {
+	measured := slices.ContainsFunc(plan.Candidates, func(c LatencyCandidate) bool { return c.Testable })
+	if measured {
 		s.mu.Lock()
 		soon := !s.ended.IsZero() && s.now().Sub(s.ended) < s.interval
 		s.mu.Unlock()
@@ -371,7 +383,7 @@ func (s *LatencyService) check(ctx context.Context) (*LatencyReport, error) {
 		delays, err = s.prober.Measure(mctx, plan, probeOrder(plan, rt))
 		cancel()
 		s.mu.Lock()
-		s.ended = s.now()
+		s.ended, s.lastEnded = s.now(), false
 		s.mu.Unlock()
 		if ctx.Err() != nil {
 			return nil, ErrLatencyCanceled
@@ -386,7 +398,7 @@ func (s *LatencyService) check(ctx context.Context) (*LatencyReport, error) {
 
 	report := buildReport(plan, rt, delays, s.now())
 	s.mu.Lock()
-	s.last = report
+	s.last, s.lastEnded = report, measured
 	s.mu.Unlock()
 	return report, nil
 }
