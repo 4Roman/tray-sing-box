@@ -554,7 +554,10 @@ func clashVLESS(m clashMap) (string, error) {
 	return "vless://" + url.User(uuid).String() + "@" + net.JoinHostPort(server, strconv.Itoa(port)) + "?" + q.Encode(), nil
 }
 
-// clashVMess writes the v2rayN JSON form: the URL form has no alterId
+// clashVMess writes the v2rayN JSON form: the URL form has no alterId. The
+// alterId is kept (an Xray profile's is not): mihomo's VMess, sing-vmess as
+// sing-box's, speaks the legacy header with one above 0, and the server a
+// Clash profile is for takes that
 func clashVMess(m clashMap) (string, error) {
 	server, port, err := clashEndpoint(m)
 	if err != nil {
