@@ -793,7 +793,12 @@ func streamQuery(st *xrayStream, address string) (url.Values, map[string]string,
 			}
 		}
 	case "h2", "http":
-		// Removed from Xray; sing-box's http transport is v2ray's HTTP/2
+		// Removed from Xray; sing-box's http transport is v2ray's HTTP/2 —
+		// over TLS or REALITY: without, it speaks HTTP/1.1, where Xray spoke
+		// HTTP/2 in the clear (h2c) or refused the stream
+		if tls == nil && security != "reality" {
+			return nil, nil, errors.New("транспорт h2 без TLS не поддерживается sing-box")
+		}
 		q.Set("type", "http")
 		if h := st.HTTPSettings; h != nil {
 			setIf(q, "host", joined(h.Host))

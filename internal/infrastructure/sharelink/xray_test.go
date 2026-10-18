@@ -604,6 +604,25 @@ func TestXrayECH(t *testing.T) {
 	checkReasons(t, reasons, map[string]string{"broken": "конфигурация ECH повреждена"})
 }
 
+// Xray's h2 transport is HTTP/2: over TLS (or REALITY) sing-box's http
+// transport speaks it, without TLS that one speaks HTTP/1.1 — refused, as
+// a Clash profile's h2 without TLS is
+func TestXrayH2NeedsTLS(t *testing.T) {
+	node := func(tag, network, security string) string {
+		return `{"protocol": "vless", "tag": "` + tag + `", "settings": {"address": "203.0.113.5", "port": 443, "id": "` + testUUID + `"},
+		  "streamSettings": {"network": "` + network + `", ` + security + `"httpSettings": {"host": ["a.example.com"], "path": "/h2"}}}`
+	}
+	byTag, _, reasons := parseXray(t, `{"outbounds": [`+node("tls", "h2", `"security": "tls", "tlsSettings": {"serverName": "a.example.com"}, `)+`,
+	  `+node("reality", "http", `"security": "reality", "realitySettings": {"serverName": "www.example.com", "publicKey": "`+testPBK+`"}, `)+`,
+	  `+node("plain", "h2", "")+`, `+node("none", "http", `"security": "none", `)+`]}`)
+	checkOutbound(t, byTag["tls"], `{"tls":{"server_name":"a.example.com"},"transport":{"type":"http","host":["a.example.com"],"path":"/h2"}}`)
+	checkOutbound(t, byTag["reality"], `{"tls":{"reality":{"enabled":true}},"transport":{"type":"http"}}`)
+	checkReasons(t, reasons, map[string]string{
+		"plain": "транспорт h2 без TLS не поддерживается sing-box",
+		"none":  "транспорт h2 без TLS не поддерживается sing-box",
+	})
+}
+
 // Without a server name TLS checks the address, as in Xray — a link would
 // take the WebSocket's host for it
 func TestXrayServerNameIsTheAddress(t *testing.T) {
