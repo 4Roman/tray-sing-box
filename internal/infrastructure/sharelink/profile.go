@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -197,10 +198,9 @@ func (c *collector) singBox(entries []any) {
 
 	// A repeated tag keeps its name on the first node that has it, the later
 	// ones get a suffix (add): a detour naming a repeated tag means the first
-	// kept node of that name. The ring walk of keepChains follows one detour
-	// per name and can be wrong for repeated tags; a profile sing-box itself
-	// runs has none, and a ring that gets through is refused by the config
-	// editor's dependency check.
+	// kept node of that name. keepChains takes it for any node of the name,
+	// so none of them is left in a ring; a profile sing-box itself runs has
+	// no repeated tag (sing-box would keep the last outbound of the tag).
 	kept := c.keepChains(candidates, direct)
 	for i, cand := range candidates {
 		if kept[i] {
@@ -218,68 +218,171 @@ type candidate struct {
 // keepChains decides which candidates are kept for their detours (a tag
 // among the candidates'): kept inside the profile, dropped when they only
 // say "direct" (a tag in direct), otherwise the node cannot work as the
-// provider meant it and is skipped. Repeated, as leaving out one node breaks
-// the chains through it.
+// provider meant it and is skipped — and with it every node chained through
+// it, the next ones at a time (the report lists them so). The nodes of a
+// ring go as well, then the nodes chained into the ring. In linear time: an
+// 8 MB profile holds a hundred thousand nodes, and the import runs under the
+// app's operation lock.
 func (c *collector) keepChains(candidates []candidate, direct map[string]bool) []bool {
 	kept := make([]bool, len(candidates))
-	for i := range kept {
+	target := make([]string, len(candidates)) // the tag a candidate's detour names, "" for none
+	holders := map[string][]int{}             // the candidates of a tag
+	for i, cand := range candidates {
 		kept[i] = true
-	}
-	for changed := true; changed; {
-		changed = false
-		tags := map[string]bool{}
-		for i, cand := range candidates {
-			if kept[i] {
-				tags[cand.outbound.Tag()] = true
-			}
-		}
-		for i, cand := range candidates {
-			if !kept[i] {
-				continue
-			}
-			detour, hasDetour := cand.outbound["detour"]
-			if !hasDetour {
-				continue
-			}
-			target, _ := detour.(string)
-			switch {
-			case target == "" || direct[target]:
+		tag := cand.outbound.Tag()
+		holders[tag] = append(holders[tag], i)
+		if detour, hasDetour := cand.outbound["detour"]; hasDetour {
+			if t, _ := detour.(string); t != "" && !direct[t] {
+				target[i] = t
+			} else {
 				delete(cand.outbound, "detour")
-			case !tags[target]:
-				kept[i], changed = false, true
-				c.skip(cand.name, fmt.Sprintf("узел работает через «%s», которого нет среди импортируемых", quotedName(target)))
 			}
 		}
-		if changed {
+	}
+	left := make(map[string]int, len(holders)) // the kept candidates of a tag
+	for tag, of := range holders {
+		left[tag] = len(of)
+	}
+	dependents := map[string][]int{} // the candidates whose detour names a tag
+	for i, t := range target {
+		if t != "" {
+			dependents[t] = append(dependents[t], i)
+		}
+	}
+
+	var orphans []int // kept candidates whose detour lost its last node
+	leave := func(i int, reason string) {
+		kept[i] = false
+		c.skip(candidates[i].name, reason)
+		tag := candidates[i].outbound.Tag()
+		if left[tag]--; left[tag] == 0 {
+			for _, j := range dependents[tag] {
+				if kept[j] {
+					orphans = append(orphans, j)
+				}
+			}
+		}
+	}
+	missing := func(next []int) {
+		for len(next) > 0 {
+			slices.Sort(next)
+			level := next
+			orphans = nil
+			for _, i := range level {
+				if kept[i] {
+					leave(i, fmt.Sprintf("узел работает через «%s», которого нет среди импортируемых", quotedName(target[i])))
+				}
+			}
+			next = orphans
+		}
+	}
+	var first []int
+	for i, t := range target {
+		if t != "" && left[t] == 0 {
+			first = append(first, i)
+		}
+	}
+	missing(first)
+
+	// A chain that comes back to its start: every node of the ring goes, the
+	// ones chained into it follow
+	ring := detourRings(target, kept, holders)
+	orphans = nil
+	for i := range candidates {
+		if ring[i] {
+			leave(i, "цепочка detour узла замыкается в кольцо — с ней sing-box не запустится")
+		}
+	}
+	missing(orphans)
+	return kept
+}
+
+// detourRings marks the kept candidates that lie on a ring of detours. A
+// detour names a tag, and a tag given twice may be meant as any of its
+// nodes: the graph goes from a node to the tag its detour names and from a
+// tag to each of its kept nodes, and a node is on a ring when its strongly
+// connected component (Tarjan's, without recursion) holds more than itself.
+// Where tags are unique that is a chain coming back to the node. No chain
+// comes back to a node without a tag (Xray's may have none): nothing names
+// it.
+func detourRings(target []string, kept []bool, holders map[string][]int) []bool {
+	n := len(target)
+	tagNode := map[string]int{} // a tag a detour names -> its vertex, n and up
+	var tagHolders [][]int
+	for i, t := range target {
+		if _, seen := tagNode[t]; kept[i] && t != "" && !seen {
+			tagNode[t] = n + len(tagHolders)
+			var of []int
+			for _, j := range holders[t] {
+				if kept[j] {
+					of = append(of, j)
+				}
+			}
+			tagHolders = append(tagHolders, of)
+		}
+	}
+	// next is the k-th edge from vertex v
+	next := func(v, k int) (int, bool) {
+		if v < n {
+			return tagNode[target[v]], k == 0 && target[v] != ""
+		}
+		if of := tagHolders[v-n]; k < len(of) {
+			return of[k], true
+		}
+		return 0, false
+	}
+	vertices := n + len(tagHolders)
+	index, low := make([]int, vertices), make([]int, vertices) // index 0: not reached yet
+	onStack := make([]bool, vertices)
+	var stack []int
+	ring := make([]bool, n)
+	reached := 0
+	type frame struct{ v, k int }
+	for root := range n {
+		if !kept[root] || index[root] != 0 {
 			continue
 		}
-
-		// A chain that comes back to its start: every node of the ring goes
-		// (the ones chained into it follow in the next round)
-		next := map[string]string{}
-		for i, cand := range candidates {
-			if detour, _ := cand.outbound["detour"].(string); kept[i] && detour != "" {
-				next[cand.outbound.Tag()] = detour
-			}
-		}
-		for i, cand := range candidates {
-			if !kept[i] {
+		reached++
+		index[root], low[root] = reached, reached
+		stack, onStack[root] = append(stack, root), true
+		path := []frame{{root, 0}}
+		for len(path) > 0 {
+			top := &path[len(path)-1]
+			v := top.v
+			if w, ok := next(v, top.k); ok {
+				top.k++
+				switch {
+				case index[w] == 0:
+					reached++
+					index[w], low[w] = reached, reached
+					stack, onStack[w] = append(stack, w), true
+					path = append(path, frame{w, 0})
+				case onStack[w]:
+					low[v] = min(low[v], index[w])
+				}
 				continue
 			}
-			tag := cand.outbound.Tag()
-			at := next[tag]
-			for steps := 0; at != "" && at != tag && steps < len(candidates); steps++ {
-				at = next[at]
+			path = path[:len(path)-1]
+			if len(path) > 0 {
+				parent := path[len(path)-1].v
+				low[parent] = min(low[parent], low[v])
 			}
-			// No chain comes back to a node without a tag (Xray's may have
-			// none): nothing can name it
-			if at == tag && tag != "" {
-				kept[i], changed = false, true
-				c.skip(cand.name, "цепочка detour узла замыкается в кольцо — с ней sing-box не запустится")
+			if low[v] == index[v] {
+				at := len(stack) - 1
+				for stack[at] != v {
+					at--
+				}
+				for _, w := range stack[at:] {
+					onStack[w] = false
+					if w < n && len(stack)-at > 1 {
+						ring[w] = true
+					}
+				}
+				stack = stack[:at]
 			}
 		}
 	}
-	return kept
+	return ring
 }
 
 // quotedName is a node's tag as a reason may quote it: shortened, "…" when

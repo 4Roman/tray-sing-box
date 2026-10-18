@@ -3,8 +3,12 @@ package sharelink
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A full sing-box config as the panels serve it at their "sing-box" URLs,
@@ -225,6 +229,192 @@ func TestProfileDetourRing(t *testing.T) {
 	if len(skipped) != 4 || !strings.Contains(reasons["C"], "кольцо") || !strings.Contains(reasons["D"], "кольцо") ||
 		!strings.Contains(reasons["self"], "кольцо") || !strings.Contains(reasons["E"], "«C»") {
 		t.Fatalf("skipped = %+v", skipped)
+	}
+}
+
+// keepChainsBefore is keepChains as it was before it was made linear: rounds
+// over all nodes, the chain walked from every node in each. The reference
+// the linear one must agree with where the tags are unique.
+func (c *collector) keepChainsBefore(candidates []candidate, direct map[string]bool) []bool {
+	kept := make([]bool, len(candidates))
+	for i := range kept {
+		kept[i] = true
+	}
+	for changed := true; changed; {
+		changed = false
+		tags := map[string]bool{}
+		for i, cand := range candidates {
+			if kept[i] {
+				tags[cand.outbound.Tag()] = true
+			}
+		}
+		for i, cand := range candidates {
+			if !kept[i] {
+				continue
+			}
+			detour, hasDetour := cand.outbound["detour"]
+			if !hasDetour {
+				continue
+			}
+			target, _ := detour.(string)
+			switch {
+			case target == "" || direct[target]:
+				delete(cand.outbound, "detour")
+			case !tags[target]:
+				kept[i], changed = false, true
+				c.skip(cand.name, fmt.Sprintf("узел работает через «%s», которого нет среди импортируемых", quotedName(target)))
+			}
+		}
+		if changed {
+			continue
+		}
+		next := map[string]string{}
+		for i, cand := range candidates {
+			if detour, _ := cand.outbound["detour"].(string); kept[i] && detour != "" {
+				next[cand.outbound.Tag()] = detour
+			}
+		}
+		for i, cand := range candidates {
+			if !kept[i] {
+				continue
+			}
+			tag := cand.outbound.Tag()
+			at := next[tag]
+			for steps := 0; at != "" && at != tag && steps < len(candidates); steps++ {
+				at = next[at]
+			}
+			if at == tag && tag != "" {
+				kept[i], changed = false, true
+				c.skip(cand.name, "цепочка detour узла замыкается в кольцо — с ней sing-box не запустится")
+			}
+		}
+	}
+	return kept
+}
+
+// chainCandidates builds the candidates of a chain test: tags[i] and the
+// detour detours[i] (nil: none), named after their position
+func chainCandidates(tags []string, detours []any) []candidate {
+	candidates := make([]candidate, len(tags))
+	for i, tag := range tags {
+		o := Outbound{"type": "trojan", "tag": tag}
+		if detours[i] != nil {
+			o["detour"] = detours[i]
+		}
+		candidates[i] = candidate{o, fmt.Sprintf("n%d", i)}
+	}
+	return candidates
+}
+
+// The linear keepChains decides as the rounds did where the tags are
+// unique: the same nodes kept, the same reasons in the same order, the same
+// detours removed
+func TestKeepChainsAsBefore(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 11))
+	direct := map[string]bool{"direct-out": true}
+	for round := range 5000 {
+		n := 1 + rng.IntN(14)
+		tags := make([]string, n)
+		detours := make([]any, n)
+		for i := range n {
+			tags[i] = fmt.Sprintf("t%d", i)
+			switch k := rng.IntN(10); {
+			case k == 0:
+				detours[i] = ""
+			case k == 1:
+				detours[i] = "direct-out"
+			case k == 2:
+				detours[i] = "gone"
+			case k == 3:
+				detours[i] = json.Number("1")
+			case k < 6:
+				// none
+			default:
+				detours[i] = fmt.Sprintf("t%d", rng.IntN(n))
+			}
+		}
+		before, after := chainCandidates(tags, detours), chainCandidates(tags, detours)
+		var cb, ca collector
+		keptBefore, keptAfter := cb.keepChainsBefore(before, direct), ca.keepChains(after, direct)
+		same := slices.Equal(keptBefore, keptAfter) && slices.Equal(cb.skipped, ca.skipped)
+		for i := range n {
+			b, hasB := before[i].outbound["detour"]
+			a, hasA := after[i].outbound["detour"]
+			same = same && hasA == hasB && a == b
+		}
+		if !same {
+			t.Fatalf("round %d, tags %q, detours %q:\nbefore %v %+v\nafter  %v %+v", round, tags, detours, keptBefore, cb.skipped, keptAfter, ca.skipped)
+		}
+	}
+}
+
+// A tag given twice (sing-box keeps the last outbound of the tag, mihomo
+// and Xray refuse the profile, the import names the first node so) may be
+// meant by a detour as any of its nodes: a node is in a ring when a chain
+// through any of them comes back to it, and only then
+func TestKeepChainsRepeatedTags(t *testing.T) {
+	for _, c := range []struct {
+		tags    []string
+		detours []any
+		kept    []bool
+	}{
+		// A ring of the first A with B, which the walk along the last A
+		// missed: the import names the first A "A", B goes back to it
+		{[]string{"A", "A", "B", "C"}, []any{"B", "C", "A", nil}, []bool{false, true, false, true}},
+		// The second A is no part of the ring of the first one with B
+		{[]string{"A", "A", "B"}, []any{"B", nil, "A"}, []bool{false, true, false}},
+		// Chained into a tag that has a node left
+		{[]string{"A", "A", "B", "D"}, []any{"B", nil, "A", "A"}, []bool{false, true, false, true}},
+	} {
+		var col collector
+		kept := col.keepChains(chainCandidates(c.tags, c.detours), nil)
+		if !slices.Equal(kept, c.kept) {
+			t.Errorf("%q %q: kept %v, want %v (%+v)", c.tags, c.detours, kept, c.kept, col.skipped)
+		}
+		for _, sk := range col.skipped {
+			if !strings.Contains(sk.Reason, "кольцо") {
+				t.Errorf("%q %q: %+v", c.tags, c.detours, sk)
+			}
+		}
+	}
+}
+
+// Long chains are decided in linear time: the rounds took many minutes for
+// the hundred thousand nodes an 8 MB profile holds
+func TestKeepChainsLong(t *testing.T) {
+	const n = 100000
+	chain := func(last any) ([]bool, collector) {
+		tags, detours := make([]string, n), make([]any, n)
+		for i := range n {
+			tags[i], detours[i] = fmt.Sprintf("n%d", i), fmt.Sprintf("n%d", i+1)
+		}
+		detours[n-1] = last
+		var c collector
+		var kept []bool
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			kept = c.keepChains(chainCandidates(tags, detours), nil)
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the chains took too long")
+		}
+		return kept, c
+	}
+	if kept, c := chain(nil); slices.Contains(kept, false) || len(c.skipped) != 0 {
+		t.Errorf("plain chain: %d left out", len(c.skipped))
+	}
+	// Each node goes with the one it is chained through, the last first
+	kept, c := chain("gone")
+	if slices.Contains(kept, true) || len(c.skipped) != n || c.skipped[0].Name != "n99999" || c.skipped[n-1].Name != "n0" ||
+		!strings.Contains(c.skipped[n-1].Reason, "«n1»") {
+		t.Errorf("chain to a missing node: %d left out, first %+v", len(c.skipped), c.skipped[:1])
+	}
+	kept, c = chain("n0")
+	if slices.Contains(kept, true) || len(c.skipped) != n || !strings.Contains(c.skipped[n-1].Reason, "кольцо") {
+		t.Errorf("ring: %d left out", len(c.skipped))
 	}
 }
 
