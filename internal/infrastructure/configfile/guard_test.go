@@ -48,6 +48,9 @@ func TestGuardRefusesNewRiskyConstructs(t *testing.T) {
 		"plugin cert":         `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;host=a.example;cert=C:/x.pem"}]}`,
 		"plugin cert escaped": `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;c\\ert=C:/x.pem"}]}`,
 		"plugin cert flag":    `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","Plugin_Opts":"tls;cert"}]}`,
+		// TLS spoofing installs the WinDivert driver
+		"tls spoof":           `{"outbounds":[{"type":"vless","tag":"v","tls":{"enabled":true,"server_name":"a.example","Spoof":"b.example"}}]}`,
+		"route-options spoof": `{"route":{"rules":[{"domain":"a.example","action":"route-options","tls_spoof":"b.example"}]},"outbounds":[]}`,
 	}
 	for name, updated := range refused {
 		err := checkNoNewRisky([]byte(base), decode(t, updated))

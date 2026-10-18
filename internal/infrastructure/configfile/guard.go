@@ -78,6 +78,11 @@ var riskyKeys = map[string]bool{
 	"output":      true, // log.output
 	"external_ui": true, "external_ui_download_url": true,
 	"masquerade": true, // an inbound serving files or proxying for unauthenticated clients
+	// TLS spoofing (tls.spoof, the route-options action's tls_spoof) installs
+	// the WinDivert kernel driver, written to the user's cache directory —
+	// which the built environment (process.SingBoxEnv) does not name, so under
+	// the app it would only fail every connection it is meant for
+	"spoof": true, "tls_spoof": true,
 }
 
 // riskyKey: a key naming a file, a directory or a program. process_path is a
