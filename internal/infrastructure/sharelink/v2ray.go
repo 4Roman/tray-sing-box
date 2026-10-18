@@ -459,12 +459,27 @@ func finalMask(raw string, overUDP bool) (*xrayFragment, error) {
 			return nil, broken
 		}
 		for _, mask := range masks {
-			if kind := mask.kind(); kind != "fragment" {
+			kind := mask.kind()
+			if oneSidedUDPMask(kind) {
+				log.Printf("Share link: finalmask %q dropped (junk datagrams before the stream's packets: the client's own)", kind)
+				continue
+			}
+			if kind != "fragment" {
 				return nil, fmt.Errorf("маскировка finalmask «%s» не поддерживается sing-box", token(kind))
 			}
 		}
 	}
 	return fragment, nil
+}
+
+// oneSidedUDPMask: Xray's "noise" only sends junk datagrams before a
+// stream's first packets to an address and reads nothing back (finalmask
+// noise: WriteTo alone; the server side does the same) — a peer without it
+// drops them as undecryptable. Like "fragment" it is the client's own
+// business, not a transformation both ends apply: dropped, never a reason
+// to refuse a node or to turn its UDP off.
+func oneSidedUDPMask(kind string) bool {
+	return kind == "noise"
 }
 
 // xrayMask is a mask of a finalmask layer

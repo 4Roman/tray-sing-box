@@ -277,9 +277,11 @@ func TestXray3xuiSubscription(t *testing.T) {
 	  "transport":{"type":"grpc","service_name":"svc"}}`)
 	checkOutbound(t, byTag["SE-ss2022"], `{"type":"shadowsocks","server":"203.0.113.40","server_port":8388,
 	  "method":"2022-blake3-aes-128-gcm","password":"MDEyMzQ1Njc4OWFiY2RlZg==:ZmVkY2JhOTg3NjU0MzIxMA==","plugin":null}`)
-	// Hysteria 2 as 3x-ui's hysteria2:// link of the same inbound says it
+	// Hysteria 2 as 3x-ui's hysteria2:// link of the same inbound says it;
+	// its alpn is left out — Xray offers h3 whatever it says, sing-box too
+	// when the list is empty
 	checkOutbound(t, byTag["JP-hy2"], `{"type":"hysteria2","server":"203.0.113.60","server_port":443,"password":"`+testSecret+`",
-	  "tls":{"enabled":true,"server_name":"jp.example.com","alpn":["h3"],"utls":null},
+	  "tls":{"enabled":true,"server_name":"jp.example.com","alpn":null,"utls":null},
 	  "obfs":{"type":"salamander","password":"obfs-pw"},"server_ports":["20000:30000"],"hop_interval":"10s"}`)
 	// The info node is imported as the SOCKS proxy it is; the subscription
 	// sync leaves it out (domain: withoutInfoNodes)
@@ -369,8 +371,8 @@ func TestXrayHysteria2(t *testing.T) {
 		"over tcp":       strings.Replace(xrayHysteria2Node("n", "2", ""), `"network": "hysteria"`, `"network": "tcp"`, 1),
 		"no tls":         strings.Replace(xrayHysteria2Node("n", "2", ""), `"security": "tls"`, `"security": "none"`, 1),
 		"no settings":    strings.Replace(xrayHysteria2Node("n", "2", ""), `"hysteriaSettings": {"version": 2, "auth": "pw"},`, ``, 1),
-		"noise mask":     xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "noise", "settings": {"password": "`+testSecret+`"}}]}`),
 		"realm":          xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "realm", "settings": {"token": "`+testSecret+`"}}]}`),
+		"xdns mask":      xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "xdns", "settings": {"domain": "`+testSecret+`"}}]}`),
 		"two salamander": xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "a"}}, {"type": "salamander", "settings": {"password": "b"}}]}`),
 		"gecko too big":  xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "a", "packetSize": "512-4096"}}]}`),
 		"no obfs pw":     xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander"}]}`),
@@ -382,8 +384,8 @@ func TestXrayHysteria2(t *testing.T) {
 		"over tcp":       "транспорт «tcp» для Hysteria 2 не поддерживается",
 		"no tls":         "Hysteria 2 работает только с TLS",
 		"no settings":    "нет настроек транспорта (hysteriaSettings)",
-		"noise mask":     "маскировка finalmask «noise» для Hysteria 2",
 		"realm":          "режим realm Hysteria 2",
+		"xdns mask":      "маскировка finalmask «xdns» для Hysteria 2",
 		"two salamander": "две маскировки salamander",
 		"gecko too big":  "запись outbound повреждена",
 		"no obfs pw":     "не указан пароль обфускации",
@@ -397,8 +399,18 @@ func TestXrayHysteria2(t *testing.T) {
 		}
 	}
 
-	// QUIC through a freedom: its fragmentation is dropped, its UDP masks
-	// refuse the node
+	// noise only sends junk ahead (oneSidedUDPMask); Xray offers h3 whatever
+	// the alpn says, so a copied one is left out
+	noisy := strings.Replace(xrayHysteria2Node("noisy", "2", `, "finalmask": {"udp": [{"type": "noise", "settings": {"password": "`+testSecret+`"}}, {"type": "salamander", "settings": {"password": "o"}}]}`),
+		`"serverName": "hy.example.com"`, `"serverName": "hy.example.com", "alpn": ["h2", "http/1.1"]`, 1)
+	byTag, _, reasons = parseXray(t, `{"outbounds": [`+noisy+`]}`)
+	if len(reasons) != 0 {
+		t.Fatalf("skipped %v", reasons)
+	}
+	checkOutbound(t, byTag["noisy"], `{"type":"hysteria2","obfs":{"type":"salamander","password":"o"},"tls":{"server_name":"hy.example.com","alpn":null}}`)
+
+	// QUIC through a freedom: its fragmentation is dropped, its two-sided UDP
+	// masks refuse the node, its noise does not
 	viaFreedom := func(freedom string) string {
 		return `{"outbounds": [` + xrayHysteria2Node("n", "2", `, "sockopt": {"dialerProxy": "f"}`) + `, {"protocol": "freedom", "tag": "f", ` + freedom + `}]}`
 	}
@@ -407,8 +419,8 @@ func TestXrayHysteria2(t *testing.T) {
 		t.Fatalf("skipped %v", reasons)
 	}
 	checkOutbound(t, byTag["n"], `{"type":"hysteria2","detour":null,"tls":{"fragment":null,"record_fragment":null}}`)
-	if _, _, err := ParseAllReport(viaFreedom(`"streamSettings": {"finalmask": {"udp": [{"type": "noise"}]}}`)); err == nil ||
-		!strings.Contains(err.Error(), "с маскировкой finalmask «noise»") {
+	if _, _, err := ParseAllReport(viaFreedom(`"streamSettings": {"finalmask": {"udp": [{"type": "noise"}, {"type": "xdns"}]}}`)); err == nil ||
+		!strings.Contains(err.Error(), "с маскировкой finalmask «xdns»") {
 		t.Errorf("error %v", err)
 	}
 }
@@ -515,8 +527,13 @@ func TestXrayFragmentDialer(t *testing.T) {
 		// TCP, UDP off for one that sends UDP itself
 		{"udp masks, TCP node", tlsWS, `"streamSettings": {"finalmask": {"udp": [{"type": "noise", "settings": {"noise": []}}]}}`,
 			`{"type":"vless","detour":null,"tls":{"fragment":null}}`},
-		{"udp masks, Shadowsocks", ss, `"streamSettings": {"finalmask": {"udp": [{"type": "noise"}], "tcp": [{"type": "fragment"}]}}`,
+		{"udp masks, Shadowsocks", ss, `"streamSettings": {"finalmask": {"udp": [{"type": "header-custom"}], "tcp": [{"type": "fragment"}]}}`,
 			`{"type":"shadowsocks","detour":null,"network":"tcp"}`},
+		// noise only sends junk ahead: UDP stays on, QUIC goes through
+		{"udp noise, Shadowsocks", ss, `"streamSettings": {"finalmask": {"udp": [{"type": "noise"}]}}`,
+			`{"type":"shadowsocks","detour":null,"network":null}`},
+		{"udp noise, QUIC node", quic, `"streamSettings": {"finalmask": {"udp": [{"type": "Noise"}]}}`,
+			`{"detour":null,"transport":{"type":"quic"}}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -531,7 +548,7 @@ func TestXrayFragmentDialer(t *testing.T) {
 	refused := []struct {
 		name, node, freedom, reason string
 	}{
-		{"udp masks, QUIC node", quic, `"streamSettings": {"finalmask": {"udp": [{"type": "Noise"}]}}`, "через «frag» с маскировкой finalmask «noise»"},
+		{"udp masks, QUIC node", quic, `"streamSettings": {"finalmask": {"udp": [{"type": "noise"}, {"type": "XDNS"}]}}`, "через «frag» с маскировкой finalmask «xdns»"},
 		{"another tcp mask", tlsWS, `"streamSettings": {"finalmask": {"tcp": [{"type": "fragment"}, {"type": "sudoku", "settings": {"password": "` + testSecret + `"}}]}}`,
 			"через «frag» с параметром finalmask «sudoku»"},
 		{"fragment Xray cannot read", tlsWS, freedomFragment(`{"packets": "tls-hello", "length": "100-200", "interval": "10-20"}`),

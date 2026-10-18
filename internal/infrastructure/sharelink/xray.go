@@ -537,8 +537,15 @@ func freedomOf(raw json.RawMessage) xrayFreedom {
 		if fragment != nil {
 			free.fragment = free.fragment.with(*fragment)
 		}
-		if len(udp) > 0 {
-			free.udpMask = udp[0].kind()
+		// The first mask that both ends apply (oneSidedUDPMask)
+		for _, mask := range udp {
+			kind := mask.kind()
+			if oneSidedUDPMask(kind) {
+				log.Printf("Xray profile: a freedom's UDP finalmask %q dropped (the client's own)", kind)
+				continue
+			}
+			free.udpMask = kind
+			break
 		}
 	}
 	security := strings.ToLower(strings.TrimSpace(st.Security))
@@ -963,7 +970,8 @@ func addHeaders(outbound Outbound, headers map[string]string) {
 // pad what each end sends, they need not match the server's) and udphop the
 // port hopping (its interval's lower end: sing-box hops at a fixed one).
 // Xray's other UDP masks transform the packets on both ends, sing-box has
-// none of them; quicParams (congestion control, Brutal's speeds, windows)
+// none of them (noise only sends junk ahead and is dropped, oneSidedUDPMask);
+// the alpn is left out: Xray offers h3 whatever it says; quicParams (congestion control, Brutal's speeds, windows)
 // tunes the client only and is dropped, as a Clash profile's speeds are.
 // The tcp layer touches nothing of a node that runs over QUIC.
 func xrayHysteria2(s xraySettings, st *xrayStream, hostPort, address string) (Outbound, error) {
@@ -998,6 +1006,10 @@ func xrayHysteria2(s xraySettings, st *xrayStream, hostPort, address string) (Ou
 	if err := tlsQuery(q, "tls", tls, address); err != nil {
 		return nil, err
 	}
+	// Xray's Hysteria dialer offers h3 whatever tlsSettings.alpn says (the
+	// HTTP/3 transport replaces the list), and sing-box offers h3 when the
+	// list is empty: a list copied from another node must not reach it
+	q.Del("alpn")
 
 	var fm struct {
 		UDP        []xrayMask      `json:"udp"`
@@ -1047,6 +1059,8 @@ func xrayHysteria2(s xraySettings, st *xrayStream, hostPort, address string) (Ou
 			}
 		case "realm":
 			return nil, errors.New("режим realm Hysteria 2 приложение не импортирует")
+		case "noise":
+			log.Printf("Xray profile: the UDP noise of a Hysteria 2 node is dropped (the client's own)")
 		default:
 			return nil, fmt.Errorf("маскировка finalmask «%s» для Hysteria 2 не поддерживается sing-box", token(kind))
 		}
