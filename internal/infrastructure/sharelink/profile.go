@@ -12,9 +12,9 @@ import (
 // Subscription bodies that are a whole profile rather than share links: a
 // sing-box configuration (what Marzban, Remnawave and the like serve at their
 // "sing-box" URLs) or its bare outbounds array, and SIP008 (the shadowsocks
-// online config JSON). Clash/mihomo YAML and Xray JSON are recognized and
-// refused with a hint: reading them would need a YAML parser and a
-// converter of Xray's whole config model.
+// online config JSON). Clash/mihomo YAML is read in clash.go. Xray JSON is
+// recognized and refused with a hint: reading it would need a converter of
+// Xray's whole config model.
 
 // profileProxyTypes are the outbound types taken from a sing-box profile;
 // the provider's structural ones (profileStructural) are its own plumbing
@@ -31,22 +31,8 @@ var profileStructural = map[string]bool{
 var (
 	errXrayProfile = errors.New("провайдер прислал профиль Xray (JSON), приложение его не читает: " +
 		"нужна ссылка на подписку в формате v2rayN (список ссылок или base64) или sing-box")
-	errClashProfile = errors.New("провайдер прислал профиль Clash/mihomo (YAML), приложение его не читает: " +
-		"нужна ссылка на подписку в формате v2rayN (список ссылок или base64) или sing-box")
 	errEmptyProfile = errors.New("в профиле нет серверов, которые приложение может импортировать")
 )
-
-// clashProxies: the top-level proxy list of a Clash/mihomo YAML profile
-var clashProxies = regexp.MustCompile(`(?m)^proxies:`)
-
-// foreignProfile recognizes a profile the app cannot read that carries no
-// share links (Clash YAML) and says so; nil otherwise
-func foreignProfile(text string) error {
-	if clashProxies.MatchString(text) {
-		return errClashProfile
-	}
-	return nil
-}
 
 // profile reads text as a JSON profile. ok is false when it is none (the
 // text is then read as links); err refuses the profile as a whole.

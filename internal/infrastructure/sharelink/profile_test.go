@@ -138,8 +138,6 @@ func TestSIP008(t *testing.T) {
 }
 
 func TestForeignProfilesAreNamed(t *testing.T) {
-	clash := "mixed-port: 7890\nproxies:\n  - name: \"DE\"\n    type: vless\n    server: 192.0.2.10\n    port: 443\n" +
-		"    uuid: " + testUUID + "\nproxy-groups:\n  - name: proxy\n    type: select\n    proxies: [DE]\n"
 	xray := `{"outbounds": [{"protocol": "vless", "tag": "proxy", "settings": {"vnext": [{"address": "192.0.2.10", "port": 443,
 	  "users": [{"id": "` + testUUID + `", "encryption": "none"}]}]}}, {"protocol": "freedom", "tag": "direct"}]}`
 	xrayArray := `[{"remarks": "DE", "outbounds": [{"protocol": "vless", "settings": {}}]}]`
@@ -147,8 +145,6 @@ func TestForeignProfilesAreNamed(t *testing.T) {
 		text string
 		want error
 	}{
-		{clash, errClashProfile},
-		{b64(clash), errClashProfile},
 		{xray, errXrayProfile},
 		{xrayArray, errXrayProfile},
 		{`{"outbounds": [{"type": "direct", "tag": "direct"}]}`, errEmptyProfile},

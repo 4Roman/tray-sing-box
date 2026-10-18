@@ -1,8 +1,9 @@
 // Package sharelink converts proxy share links (vless://, vmess://, trojan://,
 // ss://, hysteria2://, hysteria://, tuic://, anytls://, socks://) and
 // subscription bodies (lists of such links, base64 blobs, sing-box and SIP008
-// JSON profiles) into sing-box outbound JSON objects. sing-box core has no
-// native share-link import, so the conversion is implemented here.
+// JSON profiles, Clash/mihomo YAML profiles) into sing-box outbound JSON
+// objects. sing-box core has no native share-link import, so the conversion
+// is implemented here.
 //
 // A link sing-box cannot run as it is meant (an Xray-only transport, VLESS
 // Encryption, a plugin sing-box does not have, ...) is refused, not imported
@@ -105,7 +106,7 @@ var allSchemes = func() []string {
 
 // errNoLinks: the text holds nothing the app can read
 var errNoLinks = errors.New("в тексте нет ссылок на серверы (приложение понимает vless://, vmess://, trojan://, ss://, " +
-	"hysteria2://, hysteria://, tuic://, anytls://, socks://, их списки и подписки в base64, профили sing-box и SIP008)")
+	"hysteria2://, hysteria://, tuic://, anytls://, socks://, их списки и подписки в base64, профили sing-box, Clash/mihomo и SIP008)")
 
 // nodeError is the refusal of one link: the reason, for the user in Russian,
 // and the node's name when the link has one
@@ -302,28 +303,28 @@ func ParseAllReport(text string) ([]Outbound, []domain.SkippedNode, error) {
 	if ok, err := c.profile(text); ok {
 		return c.result(err)
 	}
+	// Before the links: a link in a comment or a name of the YAML is no node
+	if ok, err := c.clash(text); ok {
+		return c.result(err)
+	}
 
 	links := extractLinks(text)
-	var decoded string
 	if len(links) == 0 {
 		compact := strings.Join(strings.Fields(text), "")
 		if data, err := decodeBase64(compact); err == nil {
-			decoded = string(data)
+			decoded := string(data)
 			links = extractLinks(decoded)
 			if len(links) == 0 {
 				if ok, err := c.profile(decoded); ok {
+					return c.result(err)
+				}
+				if ok, err := c.clash(decoded); ok {
 					return c.result(err)
 				}
 			}
 		}
 	}
 	if len(links) == 0 {
-		if err := foreignProfile(text); err != nil {
-			return nil, nil, err
-		}
-		if err := foreignProfile(decoded); err != nil {
-			return nil, nil, err
-		}
 		return nil, nil, errNoLinks
 	}
 

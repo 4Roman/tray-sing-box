@@ -1,0 +1,1254 @@
+package sharelink
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// clashProxyList is a Clash profile of nothing but the given proxy entries
+// (block YAML, each starting with "  - ")
+func clashProxyList(entries ...string) string {
+	return "proxies:\n" + strings.Join(entries, "\n")
+}
+
+// clash3xui is a profile as 3x-ui's SubClashService writes it (goccy/go-yaml:
+// keys sorted, lists not indented, ambiguous scalars single-quoted): the info
+// node first, then one entry per inbound, and the select group with the
+// MATCH rule. The ss-over-ws entry is what 3x-ui writes for Shadowsocks on an
+// Xray transport; mihomo ignores the transport.
+const clash3xui = `proxies:
+- name: '⏳ 12.4GB / 30 days left'
+  port: 1080
+  server: 127.0.0.1
+  type: socks5
+- client-fingerprint: chrome
+  flow: xtls-rprx-vision
+  name: DE-reality
+  network: tcp
+  port: 443
+  reality-opts:
+    public-key: ` + testPBK + `
+    short-id: '2351e1'
+    support-x25519mlkem768: true
+  server: 192.0.2.10
+  servername: www.example.com
+  tls: true
+  type: vless
+  udp: true
+  uuid: ` + testUUID + `
+- alpn:
+  - h2
+  - http/1.1
+  client-fingerprint: firefox
+  name: NL-ws
+  network: ws
+  port: 443
+  server: cdn.example.com
+  servername: cdn.example.com
+  tls: true
+  type: vless
+  udp: true
+  uuid: ` + testUUID + `
+  ws-opts:
+    headers:
+      Host: cdn.example.com
+    path: /ws?ed=2048
+- alterId: 0
+  cipher: auto
+  grpc-opts:
+    grpc-service-name: grpcsvc
+  name: FI-vmess-grpc
+  network: grpc
+  port: 443
+  server: 192.0.2.20
+  servername: example.com
+  tls: true
+  type: vmess
+  udp: true
+  uuid: ` + testUUID + `
+- name: SE-trojan
+  network: tcp
+  password: pw-trojan
+  port: 443
+  server: 192.0.2.30
+  servername: example.com
+  sni: example.com
+  tls: true
+  type: trojan
+  udp: true
+- cipher: 2022-blake3-aes-128-gcm
+  name: PL-ss
+  network: tcp
+  password: MDEyMzQ1Njc4OWFiY2RlZg==:ZmVkY2JhOTg3NjU0MzIxMA==
+  port: 8388
+  server: 192.0.2.40
+  tls: false
+  type: ss
+  udp: true
+- alpn:
+  - h3
+  name: US-hy2
+  obfs: salamander
+  obfs-password: obfs-pw
+  password: hy2-pw
+  port: 443
+  ports: 20000-30000
+  server: 192.0.2.50
+  sni: hy.example.com
+  type: hysteria2
+  udp: true
+- alpn:
+  - h3
+  congestion-controller: bbr
+  name: JP-tuic
+  password: tuic-pw
+  port: 443
+  reduce-rtt: false
+  server: 192.0.2.60
+  sni: tuic.example.com
+  type: tuic
+  udp-relay-mode: native
+  uuid: ` + testUUID + `
+- name: HU-upgrade
+  network: httpupgrade
+  http-upgrade-opts:
+    headers:
+      Host: hu.example.com
+    path: /hu
+  port: 443
+  server: 192.0.2.12
+  servername: hu.example.com
+  tls: true
+  type: vless
+  udp: true
+  uuid: ` + testUUID + `
+- client-fingerprint: chrome
+  name: XH-xhttp
+  network: xhttp
+  port: 443
+  server: 192.0.2.11
+  servername: www.example.com
+  tls: true
+  type: vless
+  udp: true
+  uuid: ` + testUUID + `
+  xhttp-opts:
+    mode: auto
+    path: /xh
+- ip: 10.0.0.2
+  name: WG
+  port: 51820
+  private-key: ` + testSecret + `
+  public-key: x
+  server: 192.0.2.90
+  type: wireguard
+  udp: true
+- cipher: chacha20-ietf-poly1305
+  name: SS-ws
+  network: ws
+  password: ` + testSecret + `
+  port: 443
+  server: cdn.example.com
+  servername: cdn.example.com
+  tls: true
+  type: ss
+  udp: true
+  ws-opts:
+    path: /` + testSecret + `
+proxy-groups:
+- name: PROXY
+  proxies:
+  - DE-reality
+  - NL-ws
+  - DIRECT
+  type: select
+rules:
+- MATCH,PROXY
+`
+
+func TestClash3xuiProfile(t *testing.T) {
+	outbounds, skipped, err := ParseAllReport(clash3xui)
+	if err != nil {
+		t.Fatalf("ParseAllReport: %v", err)
+	}
+	byTag := map[string]Outbound{}
+	var tags []string
+	for _, o := range outbounds {
+		byTag[o.Tag()] = o
+		tags = append(tags, o.Tag())
+	}
+	if strings.Join(tags, ",") != "⏳ 12.4GB / 30 days left,DE-reality,NL-ws,FI-vmess-grpc,SE-trojan,PL-ss,US-hy2,JP-tuic,HU-upgrade" {
+		t.Fatalf("imported %q", tags)
+	}
+	// The info node stays a node here: the subscription drops it, a
+	// clipboard import keeps it, as for links
+	checkOutbound(t, byTag["⏳ 12.4GB / 30 days left"], `{"type":"socks","server":"127.0.0.1","server_port":1080}`)
+	checkOutbound(t, byTag["DE-reality"], `{"type":"vless","server":"192.0.2.10","server_port":443,"uuid":"`+testUUID+`",
+	  "flow":"xtls-rprx-vision","transport":null,"tls":{"enabled":true,"server_name":"www.example.com",
+	  "utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"public_key":"`+testPBK+`","short_id":"2351e1"}}}`)
+	checkOutbound(t, byTag["NL-ws"], `{"tls":{"server_name":"cdn.example.com","alpn":null,"utls":{"fingerprint":"firefox"}},
+	  "transport":{"type":"ws","path":"/ws","headers":{"Host":"cdn.example.com"},"max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}}`)
+	checkOutbound(t, byTag["FI-vmess-grpc"], `{"type":"vmess","security":"auto","alter_id":0,"tls":{"server_name":"example.com"},
+	  "transport":{"type":"grpc","service_name":"grpcsvc"}}`)
+	checkOutbound(t, byTag["SE-trojan"], `{"type":"trojan","password":"pw-trojan","tls":{"enabled":true,"server_name":"example.com"},"transport":null}`)
+	checkOutbound(t, byTag["PL-ss"], `{"type":"shadowsocks","method":"2022-blake3-aes-128-gcm",
+	  "password":"MDEyMzQ1Njc4OWFiY2RlZg==:ZmVkY2JhOTg3NjU0MzIxMA==","plugin":null}`)
+	checkOutbound(t, byTag["US-hy2"], `{"type":"hysteria2","password":"hy2-pw","server_port":443,"server_ports":["20000:30000"],
+	  "obfs":{"type":"salamander","password":"obfs-pw"},"tls":{"server_name":"hy.example.com","alpn":["h3"],"utls":null}}`)
+	checkOutbound(t, byTag["JP-tuic"], `{"type":"tuic","uuid":"`+testUUID+`","password":"tuic-pw","congestion_control":"bbr",
+	  "udp_relay_mode":"native","tls":{"server_name":"tuic.example.com","alpn":["h3"]}}`)
+	checkOutbound(t, byTag["HU-upgrade"], `{"transport":{"type":"httpupgrade","path":"/hu","host":"hu.example.com"},"tls":{"server_name":"hu.example.com"}}`)
+
+	reasons := map[string]string{}
+	for _, sk := range skipped {
+		reasons[sk.Name] = sk.Reason
+		if !russian(sk.Reason) || strings.Contains(sk.Reason, testSecret) {
+			t.Errorf("reason %q", sk.Reason)
+		}
+	}
+	if len(skipped) != 3 || !strings.Contains(reasons["XH-xhttp"], "XHTTP") || !strings.Contains(reasons["WG"], "WireGuard") ||
+		!strings.Contains(reasons["SS-ws"], "транспорт «ws» для Shadowsocks") {
+		t.Fatalf("skipped = %+v", skipped)
+	}
+}
+
+// clashCase is a proxy entry that must be converted; want is a JSON subset
+// of the outbound (null: the key must be absent)
+type clashCase struct {
+	name, entry, want string
+}
+
+// acceptedClash: what each entry means in mihomo, as the links say it.
+// Shapes after mihomo's docs/config.yaml and 3x-ui's generator.
+var acceptedClash = []clashCase{
+	{"vless REALITY with an unquoted short-id", `
+  - name: R
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    flow: xtls-rprx-vision-udp443
+    servername: www.example.com
+    reality-opts:
+      public-key: ` + testPBK + `
+      short-id: 2351e1`,
+		`{"type":"vless","tag":"R","flow":"xtls-rprx-vision","tls":{"server_name":"www.example.com",
+		  "utls":{"enabled":true,"fingerprint":"chrome"},"reality":{"enabled":true,"short_id":"2351e1"}}}`},
+	{"vless without tls is plain", `
+  - name: plain
+    type: vless
+    server: 192.0.2.10
+    port: 80
+    uuid: ` + testUUID + `
+    servername: ignored.example.com`,
+		`{"tls":null,"transport":null}`},
+	{"vless ws: the Host header is the server name, early data with its header", `
+  - name: ws
+    type: vless
+    server: 192.0.2.11
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    network: ws
+    alpn: [h2, http/1.1]
+    ws-opts:
+      path: /ws
+      headers:
+        Host: cdn.example.com
+        User-Agent: x
+      max-early-data: 2048
+      early-data-header-name: Sec-WebSocket-Protocol`,
+		`{"tls":{"server_name":"cdn.example.com","alpn":null,"utls":{"fingerprint":"chrome"}},
+		  "transport":{"type":"ws","path":"/ws","headers":{"Host":"cdn.example.com","User-Agent":null},
+		  "max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}}`},
+	{"ws early data without a header name is left out", `
+  - name: ws-ed
+    type: vless
+    server: 192.0.2.11
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: example.com
+    client-fingerprint: none
+    network: ws
+    ws-opts:
+      path: /ws
+      max-early-data: 2048`,
+		`{"tls":{"server_name":"example.com","utls":null},"transport":{"type":"ws","path":"/ws","max_early_data":null,"early_data_header_name":null}}`},
+	{"ws with v2ray-http-upgrade is HTTPUpgrade", `
+  - name: hu
+    type: vless
+    server: 192.0.2.12
+    port: 80
+    uuid: ` + testUUID + `
+    network: ws
+    ws-opts:
+      path: /hu
+      headers: {host: example.com}
+      v2ray-http-upgrade: true`,
+		`{"tls":null,"transport":{"type":"httpupgrade","path":"/hu","host":"example.com"}}`},
+	{"vmess grpc with alterId and skip-cert-verify", `
+  - name: vm-grpc
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    alterId: 64
+    cipher: auto
+    network: grpc
+    tls: true
+    servername: example.com
+    skip-cert-verify: true
+    grpc-opts:
+      grpc-service-name: svc`,
+		`{"type":"vmess","tag":"vm-grpc","alter_id":64,"security":"auto","tls":{"server_name":"example.com","insecure":true},
+		  "transport":{"type":"grpc","service_name":"svc"}}`},
+	{"vmess ws early data travels in the path of the JSON form", `
+  - name: vm-ws
+    type: vmess
+    server: 192.0.2.20
+    port: 80
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: chacha20-poly1305
+    network: ws
+    ws-opts:
+      path: /vm
+      headers:
+        Host: v.example.com
+      max-early-data: 2048
+      early-data-header-name: Sec-WebSocket-Protocol`,
+		`{"security":"chacha20-poly1305","tls":null,"transport":{"type":"ws","path":"/vm","headers":{"Host":"v.example.com"},
+		  "max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}}`},
+	{"vmess h2: the server, not the h2 host, is the server name", `
+  - name: vm-h2
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: h2
+    tls: true
+    h2-opts:
+      host:
+        - a.example.com
+        - b.example.com
+      path: /h2`,
+		`{"tls":{"server_name":"192.0.2.20"},"transport":{"type":"http","host":["a.example.com","b.example.com"],"path":"/h2"}}`},
+	{"vmess http: TCP with the HTTP header", `
+  - name: vm-http
+    type: vmess
+    server: 192.0.2.20
+    port: 80
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: http
+    http-opts:
+      method: GET
+      path:
+        - /
+        - /video
+      headers:
+        Host: [h.example.com]
+        Connection:
+          - keep-alive`,
+		`{"tls":null,"transport":{"type":"http","method":"GET","path":"/","host":["h.example.com"]}}`},
+	{"vmess before ws-opts: ws-path and ws-headers", `
+  - name: vm-old
+    type: vmess
+    server: 192.0.2.20
+    port: 80
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: ws
+    ws-path: /old
+    ws-headers:
+      Host: old.example.com`,
+		`{"transport":{"type":"ws","path":"/old","headers":{"Host":"old.example.com"}}}`},
+	{"trojan grpc", `
+  - name: tr-grpc
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    network: grpc
+    sni: example.com
+    udp: true
+    grpc-opts:
+      grpc-service-name: example`,
+		`{"type":"trojan","tag":"tr-grpc","password":"example","tls":{"enabled":true,"server_name":"example.com","utls":{"fingerprint":"chrome"}},
+		  "transport":{"type":"grpc","service_name":"example"}}`},
+	{"trojan ws: its sni or the server, never the Host header", `
+  - name: tr-ws
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    network: ws
+    ws-opts:
+      headers:
+        Host: cdn.example.com`,
+		`{"tls":{"server_name":"192.0.2.30"},"transport":{"type":"ws","headers":{"Host":"cdn.example.com"}}}`},
+	{"trojan with tls false (3x-ui's plain trojan)", `
+  - name: tr-plain
+    server: 192.0.2.30
+    port: 80
+    type: trojan
+    password: example
+    tls: false`,
+		`{"type":"trojan","tls":null}`},
+	{"trojan REALITY", `
+  - name: tr-reality
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    sni: www.example.com
+    client-fingerprint: safari
+    reality-opts:
+      public-key: ` + testPBK + `
+      short-id: 6ba85179`,
+		`{"tls":{"server_name":"www.example.com","utls":{"fingerprint":"safari"},"reality":{"public_key":"` + testPBK + `","short_id":"6ba85179"}}}`},
+	{"ss with an unquoted all-digit password", `
+  - name: ss-digits
+    type: ss
+    server: 192.0.2.40
+    port: 8388
+    cipher: aes-256-gcm
+    password: 0123`,
+		`{"type":"shadowsocks","method":"aes-256-gcm","password":"0123"}`},
+	{"ss obfs: mihomo's default host", `
+  - name: ss-obfs
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: password
+    plugin: obfs
+    plugin-opts:
+      mode: tls`,
+		`{"plugin":"obfs-local","plugin_opts":"obfs=tls;obfs-host=bing.com"}`},
+	{"ss v2ray-plugin with mux off", `
+  - name: ss-v2ray
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: password
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket
+      tls: true
+      host: example.com
+      path: /v2
+      mux: false`,
+		`{"plugin":"v2ray-plugin","plugin_opts":"mode=websocket;host=example.com;path=/v2;tls;mux=0"}`},
+	{"ss v2ray-plugin defaults: bing.com, mux on", `
+  - name: ss-v2ray-default
+    type: ss
+    server: 192.0.2.40
+    port: 80
+    cipher: chacha20-ietf-poly1305
+    password: password
+    plugin: v2ray-plugin
+    plugin-opts:
+      mode: websocket`,
+		`{"plugin":"v2ray-plugin","plugin_opts":"mode=websocket;host=bing.com;mux=1"}`},
+	{"hysteria2 with hopping ports in mihomo's '/' form", `
+  - name: hy2
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    ports: 20000-30000/40000
+    hop-interval: 15
+    password: pw
+    sni: hy.example.com
+    obfs: gecko
+    obfs-password: obfs-pw
+    obfs-min-packet-size: 512
+    alpn: [h3]`,
+		`{"type":"hysteria2","server_port":443,"server_ports":["20000:30000","40000:40000"],"hop_interval":"15s",
+		  "obfs":{"type":"gecko","password":"obfs-pw"},"tls":{"server_name":"hy.example.com","alpn":["h3"]}}`},
+	{"hysteria2 with ports and no port", `
+  - name: hy2-ports
+    type: hysteria2
+    server: 192.0.2.50
+    ports: 20000-30000
+    password: pw`,
+		`{"server_port":20000,"server_ports":["20000:30000"],"tls":{"server_name":"192.0.2.50"}}`},
+	{"hysteria v1", `
+  - name: hy1
+    type: hysteria
+    server: 192.0.2.70
+    port: 443
+    auth-str: yourpassword
+    obfs: obfs_str
+    protocol: udp
+    up: "30 Mbps"
+    down: 200
+    sni: hy1.example.com`,
+		`{"type":"hysteria","up_mbps":30,"down_mbps":200,"auth_str":"yourpassword","obfs":"obfs_str","tls":{"server_name":"hy1.example.com"}}`},
+	{"hysteria v1: bytes per second, Stash's speed, base64 auth", `
+  - name: hy1-units
+    type: hysteria
+    server: 192.0.2.70
+    port: 443
+    auth: c2VjcmV0
+    auth-str: ignored
+    up: 10 MBps
+    down: 1 Mbps
+    down-speed: 100`,
+		`{"up_mbps":80,"down_mbps":100,"auth_str":"secret"}`},
+	{"tuic", `
+  - name: tuic
+    server: tuic.example.com
+    port: 10443
+    type: tuic
+    uuid: ` + testUUID + `
+    password: PASSWORD_1
+    disable-sni: true
+    reduce-rtt: true
+    udp-relay-mode: quic
+    congestion-controller: new_reno`,
+		`{"type":"tuic","server":"tuic.example.com","uuid":"` + testUUID + `","password":"PASSWORD_1","udp_relay_mode":"quic",
+		  "congestion_control":"new_reno","tls":{"server_name":"tuic.example.com","disable_sni":true,"alpn":["h3"],"insecure":null}}`},
+	{"tuic dials ip, the server stays the server name", `
+  - name: tuic-ip
+    server: tuic.example.com
+    ip: 192.0.2.61
+    port: 10443
+    type: tuic
+    uuid: ` + testUUID + `
+    password: pw`,
+		`{"server":"192.0.2.61","tls":{"server_name":"tuic.example.com"}}`},
+	{"anytls", `
+  - name: anytls
+    type: anytls
+    server: 192.0.2.62
+    port: 443
+    password: "<your password>"
+    sni: a.example.com
+    client-fingerprint: firefox
+    skip-cert-verify: true
+    udp: true`,
+		`{"type":"anytls","password":"<your password>","tls":{"server_name":"a.example.com","insecure":true,"utls":{"fingerprint":"firefox"}}}`},
+	{"socks5", `
+  - name: socks
+    type: socks5
+    server: 192.0.2.80
+    port: 1080
+    username: user
+    password: pass`,
+		`{"type":"socks","server":"192.0.2.80","server_port":1080,"username":"user","password":"pass"}`},
+	{"socks5 without a user name has no credentials", `
+  - name: socks-anon
+    type: socks5
+    server: 192.0.2.80
+    port: 1080
+    password: pass`,
+		`{"username":null,"password":null}`},
+	// mihomo's decoder: keys case-insensitively, '_' for '-'; numbers and
+	// booleans as strings; an IPv6 address bare or bracketed
+	{"keys and values as mihomo's decoder reads them", `
+  - Name: K
+    TYPE: vless
+    Server: "[2001:db8::1]"
+    PORT: "443"
+    UUID: ` + testUUID + `
+    TLS: 1
+    Network: ws
+    Ws_Opts:
+      Path: /k
+    Skip_Cert_Verify: "true"
+    SERVERNAME: k.example.com`,
+		`{"type":"vless","tag":"K","server":"2001:db8::1","server_port":443,"tls":{"server_name":"k.example.com","insecure":true},
+		  "transport":{"type":"ws","path":"/k"}}`},
+	// A pin alone is dropped as on the links (the chain is checked), a
+	// name-cert-verify for the server name is the ordinary check
+	{"pin alone and name-cert-verify of the server name", `
+  - name: pinned
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: example.com
+    fingerprint: AB:CD:EF
+    name-cert-verify: example.com`,
+		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	// YAML merge keys: the entry's own keys win
+	{"merge keys", `
+  - &base
+    name: base
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: base-pw
+    sni: base.example.com
+  - <<: *base
+    name: merged
+    sni: merged.example.com`,
+		`{"tag":"merged","password":"base-pw","tls":{"server_name":"merged.example.com"}}`},
+}
+
+func TestClashAccepted(t *testing.T) {
+	for _, c := range acceptedClash {
+		t.Run(c.name, func(t *testing.T) {
+			outbounds, skipped, err := ParseAllReport(clashProxyList(c.entry))
+			if err != nil || len(skipped) != 0 {
+				t.Fatalf("ParseAllReport: %v, skipped %+v", err, skipped)
+			}
+			checkOutbound(t, outbounds[len(outbounds)-1], c.want)
+		})
+	}
+}
+
+// clashRefusal is an entry that must be left out, the reason naming why
+type clashRefusal struct {
+	name, entry, reason string
+}
+
+var refusedClash = []clashRefusal{
+	{"xhttp", `
+  - name: xhttp
+    type: vless
+    server: 192.0.2.11
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    network: xhttp
+    xhttp-opts: {path: /` + testSecret + `}`, "XHTTP"},
+	{"mkcp", `
+  - name: mkcp
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: mkcp
+    mkcp-opts: {seed: ` + testSecret + `}`, "mKCP"},
+	{"vless-encryption", `
+  - name: vless-encryption
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    encryption: "mlkem768x25519plus.native.0rtt.` + testSecret + `"`, "mlkem768x25519plus"},
+	{"reality-no-tls", `
+  - name: reality-no-tls
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    reality-opts:
+      public-key: ` + testPBK, "REALITY (reality-opts) указан без tls: true"},
+	{"bad-pbk", `
+  - name: bad-pbk
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    reality-opts:
+      public-key: ` + testSecret, "публичный ключ REALITY"},
+	{"shadow-tls", `
+  - name: shadow-tls
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    shadow-tls-opts:
+      version: 3
+      password: ` + testSecret, "ShadowTLS (shadow-tls-opts)"},
+	{"restls", `
+  - name: restls
+    type: anytls
+    server: 192.0.2.62
+    port: 443
+    password: pw
+    restls-opts: {password: ` + testSecret + `, version-hint: tls13}`, "Restls (restls-opts)"},
+	{"client-cert", `
+  - name: client-cert
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    certificate: ./client.crt
+    private-key: ./` + testSecret + `.key`, "клиентский сертификат"},
+	{"ech", `
+  - name: ech
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    password: pw
+    ech-opts:
+      enable: true
+      config: ` + testSecret, "ECH (ech-opts)"},
+	{"pin-insecure", `
+  - name: pin-insecure
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    skip-cert-verify: true
+    fingerprint: ` + testSecret, "закрепление сертификата"},
+	{"pin-list-insecure", `
+  - name: pin-list-insecure
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    skip-cert-verify: true
+    pin-sha256: [` + testSecret + `]`, "закрепление сертификата"},
+	{"name-cert-other", `
+  - name: name-cert-other
+    type: tuic
+    server: 192.0.2.60
+    port: 443
+    uuid: ` + testUUID + `
+    password: pw
+    sni: decoy.example
+    name-cert-verify: real.example`, "по другому имени"},
+	{"h2c", `
+  - name: h2c
+    type: vmess
+    server: 192.0.2.20
+    port: 80
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    network: h2`, "h2 без TLS"},
+	{"http-header-tls", `
+  - name: http-header-tls
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    network: http`, "HTTP-маскировкой"},
+	{"grpc-custom-path", `
+  - name: grpc-custom-path
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    network: grpc
+    grpc-opts: {grpc-service-name: /a/b}`, "собственный путь gRPC"},
+	{"flow-direct", `
+  - name: flow-direct
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    flow: xtls-rprx-direct`, "flow «xtls-rprx-direct»"},
+	{"vmess-cipher", `
+  - name: vmess-cipher
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: aes-128-ctr`, "шифрование VMess «aes-128-ctr»"},
+	{"trojan-ss-opts", `
+  - name: trojan-ss-opts
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    ss-opts:
+      enabled: true
+      method: aes-128-gcm
+      password: ` + testSecret, "ss-opts"},
+	{"ss-shadow-tls", `
+  - name: ss-shadow-tls
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: shadow-tls
+    plugin-opts:
+      host: cloud.example.com
+      password: ` + testSecret + `
+      version: 2`, "плагин «shadow-tls»"},
+	{"ss-kcptun", `
+  - name: ss-kcptun
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: kcptun
+    plugin-opts: {key: ` + testSecret + `}`, "плагин «kcptun»"},
+	{"ss-v2ray-insecure", `
+  - name: ss-v2ray-insecure
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: v2ray-plugin
+    plugin-opts: {mode: websocket, tls: true, skip-cert-verify: true}`, "skip-cert-verify"},
+	{"ss-v2ray-quic", `
+  - name: ss-v2ray-quic
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: v2ray-plugin
+    plugin-opts: {mode: quic}`, "QUIC"},
+	{"ss-v2ray-upgrade", `
+  - name: ss-v2ray-upgrade
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: v2ray-plugin
+    plugin-opts: {mode: websocket, v2ray-http-upgrade: true}`, "v2ray-http-upgrade"},
+	{"ss-obfs-no-mode", `
+  - name: ss-obfs-no-mode
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: pw
+    plugin: obfs`, "режим obfs"},
+	{"ss-tls", `
+  - name: ss-tls
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: chacha20-ietf-poly1305
+    password: ` + testSecret + `
+    tls: true`, "режим защиты «tls» для Shadowsocks"},
+	{"ss-cipher", `
+  - name: ss-cipher
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: aes-128-ccm
+    password: ` + testSecret, "метод шифрования"},
+	{"ss-no-password", `
+  - name: ss-no-password
+    type: ss
+    server: 192.0.2.40
+    port: 443
+    cipher: aes-256-gcm`, "не указан пароль"},
+	{"hy2-realm", `
+  - name: hy2-realm
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    password: pw
+    realm-opts:
+      enable: true
+      token: ` + testSecret, "realm"},
+	{"hy2-obfs-nopw", `
+  - name: hy2-obfs-nopw
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    password: pw
+    obfs: salamander`, "obfs-password"},
+	{"hy2-bad-ports", `
+  - name: hy2-bad-ports
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    ports: 30000-20000
+    password: pw`, "список портов"},
+	{"hy1-faketcp", `
+  - name: hy1-faketcp
+    type: hysteria
+    server: 192.0.2.70
+    port: 443
+    protocol: faketcp
+    up: 10
+    down: 10`, "faketcp"},
+	{"hy1-no-speed", `
+  - name: hy1-no-speed
+    type: hysteria
+    server: 192.0.2.70
+    port: 443
+    auth-str: ` + testSecret, "скорость канала"},
+	{"hy1-auth", `
+  - name: hy1-auth
+    type: hysteria
+    server: 192.0.2.70
+    port: 443
+    auth: "` + testSecret + `!"
+    up: 10
+    down: 10`, "«auth»"},
+	{"tuic-v4", `
+  - name: tuic-v4
+    server: 192.0.2.60
+    port: 10443
+    type: tuic
+    token: ` + testSecret + `
+    uuid: ` + testUUID + `
+    password: pw`, "TUIC v4"},
+	{"tuic-no-password", `
+  - name: tuic-no-password
+    server: 192.0.2.60
+    port: 10443
+    type: tuic
+    uuid: ` + testUUID, "не указан пароль"},
+	{"socks-tls", `
+  - name: socks-tls
+    type: socks5
+    server: 192.0.2.80
+    port: 443
+    tls: true`, "SOCKS поверх TLS"},
+	{"wg", `
+  - name: wg
+    type: wireguard
+    server: 192.0.2.90
+    port: 51820
+    private-key: ` + testSecret, "WireGuard"},
+	{"ssr", `
+  - name: ssr
+    type: ssr
+    server: 192.0.2.91
+    port: 443
+    cipher: chacha20-ietf
+    password: ` + testSecret, "ShadowsocksR"},
+	{"http", `
+  - name: http
+    type: http
+    server: 192.0.2.92
+    port: 443
+    password: ` + testSecret, "HTTP-прокси"},
+	{"snell", `
+  - name: snell
+    type: snell
+    server: 192.0.2.93
+    port: 44046
+    psk: ` + testSecret, "тип «snell»"},
+	{"узел 2", `
+  - type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: ` + testSecret, "нет имени (name)"},
+	{"no-type", `
+  - name: no-type
+    server: 192.0.2.30
+    port: 443`, "не указан тип (type)"},
+	{"no-server", `
+  - name: no-server
+    type: trojan
+    port: 443
+    password: ` + testSecret, "не указан адрес сервера"},
+	{"bad-server", `
+  - name: bad-server
+    type: trojan
+    server: "evil.example/x?security=none#"
+    port: 443
+    password: ` + testSecret, "неверный адрес сервера"},
+	{"bad-port", `
+  - name: bad-port
+    type: trojan
+    server: 192.0.2.30
+    port: 70000
+    password: ` + testSecret, "неверный порт"},
+	{"no-port", `
+  - name: no-port
+    type: vless
+    server: 192.0.2.10
+    uuid: ` + testUUID, "не указан порт"},
+	{"list-port", `
+  - name: list-port
+    type: trojan
+    server: 192.0.2.30
+    port: [443]
+    password: ` + testSecret, "поле «port» повреждено"},
+	{"bad-opts", `
+  - name: bad-opts
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    network: ws
+    ws-opts: /ws`, "поле «ws-opts» повреждено"},
+	{"bad-flag", `
+  - name: bad-flag
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: maybe`, "поле «tls» повреждено"},
+	// mihomo's decoder takes one of them by chance
+	{"twice", `
+  - name: twice
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: ` + testSecret + `
+    skip-cert-verify: false
+    Skip_Cert_Verify: true`, "«skip-cert-verify» указан в узле дважды"},
+	{"no-uuid", `
+  - name: no-uuid
+    type: vless
+    server: 192.0.2.10
+    port: 443`, "не указан uuid"},
+}
+
+func TestClashRefused(t *testing.T) {
+	ok := `
+  - name: ok
+    type: trojan
+    server: 192.0.2.31
+    port: 443
+    password: pw`
+	for _, c := range refusedClash {
+		t.Run(c.name, func(t *testing.T) {
+			outbounds, skipped, err := ParseAllReport(clashProxyList(ok, c.entry))
+			if err != nil {
+				t.Fatalf("ParseAllReport: %v", err)
+			}
+			if len(outbounds) != 1 || outbounds[0].Tag() != "ok" {
+				t.Errorf("imported %v", outbounds)
+			}
+			if len(skipped) != 1 || skipped[0].Name != c.name || !strings.Contains(skipped[0].Reason, c.reason) {
+				t.Fatalf("skipped = %+v, want %q: %q", skipped, c.name, c.reason)
+			}
+			reason := skipped[0].Reason
+			if !russian(reason) || strings.Contains(reason, testSecret) || strings.Contains(reason, testUUID) {
+				t.Errorf("reason %q", reason)
+			}
+		})
+	}
+}
+
+func TestClashProfileShapes(t *testing.T) {
+	entry := `
+  - name: DE
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw`
+	imported := []string{
+		clashProxyList(entry),
+		b64(clashProxyList(entry)),
+		// JSON is YAML too
+		`{"proxies": [{"name": "DE", "type": "trojan", "server": "192.0.2.30", "port": 443, "password": "pw"}]}`,
+		// A link in a comment or a name is no node of the profile
+		"# from trojan://other@192.0.2.99:443#other\n" + clashProxyList(entry),
+		// Clash's plumbing among the proxies
+		clashProxyList("  - {name: dns-out, type: dns}\n  - {name: en1, type: direct}", entry),
+	}
+	for _, text := range imported {
+		outbounds, skipped, err := ParseAllReport(text)
+		if err != nil || len(outbounds) != 1 || outbounds[0].Tag() != "DE" || len(skipped) != 0 {
+			t.Errorf("%.50q: %v, %+v, %v", text, outbounds, skipped, err)
+		}
+	}
+
+	refused := []struct {
+		text string
+		want error
+	}{
+		{"mixed-port: 7890\nproxies:\n  - name: DE\n   type: trojan\n", errClashBroken},
+		{"proxies:\nproxy-providers:\n  sub:\n    type: http\n    url: https://example.com/" + testSecret + "\n", errClashProviders},
+		{"proxies: []\nrules: [MATCH,DIRECT]\n", errEmptyProfile},
+		{clashProxyList("  - {name: dns-out, type: dns}"), errEmptyProfile},
+		{"proxies: {name: DE}\n", errClashBroken},
+		{"proxies: []\nproxies: []\n", errClashBroken},
+	}
+	for _, c := range refused {
+		_, _, err := ParseAllReport(c.text)
+		if !errors.Is(err, c.want) || !russian(err.Error()) || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("%.50q: error %v, want %v", c.text, err, c.want)
+		}
+	}
+	// The parser's message quotes the text: only the line is passed on
+	_, _, err := ParseAllReport("proxies:\n  - name: \"" + testSecret + "\n    type: [trojan\n")
+	if !errors.Is(err, errClashBroken) || !strings.Contains(err.Error(), "строка") || strings.Contains(err.Error(), testSecret) {
+		t.Errorf("broken YAML: %v", err)
+	}
+
+	// No Clash profile: read as before
+	if _, _, err := ParseAllReport("proxies are not here"); !errors.Is(err, errNoLinks) {
+		t.Errorf("plain text: %v", err)
+	}
+	if outbounds, err := ParseAll("trojan://pw@192.0.2.30:443#proxies"); err != nil || len(outbounds) != 1 {
+		t.Errorf("a link named proxies: %v, %v", outbounds, err)
+	}
+	if outbounds, err := ParseAll("proxies: 2\ntrojan://pw@192.0.2.30:443#a\ntrojan://pw@192.0.2.31:443#b\n"); err != nil || len(outbounds) != 2 {
+		t.Errorf("links under a proxies: line: %v, %v", outbounds, err)
+	}
+}
+
+// dialer-proxy is a detour: kept when it names another imported node, the
+// node left out when it names a group or a node that is not imported
+func TestClashDialerProxy(t *testing.T) {
+	text := clashProxyList(`
+  - name: relay
+    type: ss
+    server: 192.0.2.40
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+  - name: chained
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    dialer-proxy: relay
+  - name: via-direct
+    type: trojan
+    server: 192.0.2.31
+    port: 443
+    password: pw
+    dialer-proxy: DIRECT
+  - name: via-group
+    type: trojan
+    server: 192.0.2.32
+    port: 443
+    password: pw
+    dialer-proxy: PROXY
+  - name: ring-a
+    type: trojan
+    server: 192.0.2.33
+    port: 443
+    password: pw
+    dialer-proxy: ring-b
+  - name: ring-b
+    type: trojan
+    server: 192.0.2.34
+    port: 443
+    password: pw
+    dialer-proxy: ring-a`)
+	outbounds, skipped, err := ParseAllReport(text)
+	if err != nil {
+		t.Fatalf("ParseAllReport: %v", err)
+	}
+	byTag := map[string]Outbound{}
+	for _, o := range outbounds {
+		byTag[o.Tag()] = o
+	}
+	if len(outbounds) != 3 || byTag["relay"] == nil {
+		t.Fatalf("imported %v", outbounds)
+	}
+	checkOutbound(t, byTag["chained"], `{"detour":"relay"}`)
+	checkOutbound(t, byTag["via-direct"], `{"detour":null}`)
+	reasons := map[string]string{}
+	for _, sk := range skipped {
+		reasons[sk.Name] = sk.Reason
+	}
+	if len(skipped) != 3 || !strings.Contains(reasons["via-group"], "«PROXY»") ||
+		!strings.Contains(reasons["ring-a"], "кольцо") || !strings.Contains(reasons["ring-b"], "кольцо") {
+		t.Fatalf("skipped = %+v", skipped)
+	}
+}
+
+// Values go into the links escaped: a credential with the characters of a
+// URL stays itself, and no value adds a parameter to its link (an sni
+// spelling out security=none leaves the TLS on)
+func TestClashValuesStayValues(t *testing.T) {
+	pw := `p@ss:w/r?d#1&x=y+z %41`
+	q := strconv.Quote(pw) // a YAML double-quoted scalar too
+	text := clashProxyList(
+		"  - {name: trojan, type: trojan, server: 192.0.2.30, port: 443, password: "+q+`, sni: "a.example&security=none#x"}`,
+		"  - {name: hy2, type: hysteria2, server: 192.0.2.50, port: 443, password: "+q+"}",
+		"  - {name: tuic, type: tuic, server: 192.0.2.60, port: 443, uuid: "+testUUID+", password: "+q+"}",
+		"  - {name: ss, type: ss, server: 192.0.2.40, port: 8388, cipher: aes-256-gcm, password: "+q+"}",
+		"  - {name: anytls, type: anytls, server: 192.0.2.62, port: 443, password: "+q+"}",
+		"  - {name: socks, type: socks5, server: 192.0.2.80, port: 1080, username: "+q+", password: "+q+"}",
+		"  - {name: hy1, type: hysteria, server: 192.0.2.70, port: 443, auth-str: "+q+", up: 10, down: 10}",
+		`  - {name: "DE #1 & co?", type: trojan, server: 192.0.2.31, port: 443, password: pw}`,
+	)
+	outbounds, skipped, err := ParseAllReport(text)
+	if err != nil || len(outbounds) != 8 || len(skipped) != 0 {
+		t.Fatalf("got %v, %+v, %v", outbounds, skipped, err)
+	}
+	for _, o := range outbounds[:6] {
+		if o["password"] != pw {
+			t.Errorf("%s: password %q", o.Tag(), o["password"])
+		}
+	}
+	checkOutbound(t, outbounds[0], `{"tls":{"enabled":true,"server_name":"a.example&security=none#x"}}`)
+	if outbounds[5]["username"] != pw || outbounds[6]["auth_str"] != pw || outbounds[7].Tag() != "DE #1 & co?" {
+		t.Errorf("socks %v, hysteria %v, tag %q", outbounds[5], outbounds[6], outbounds[7].Tag())
+	}
+}
+
+// Repeated names get a suffix, as the nodes of any import
+func TestClashRepeatedNames(t *testing.T) {
+	entry := "  - {name: DE, type: trojan, server: 192.0.2.30, port: 443, password: pw}"
+	outbounds, _, err := ParseAllReport(clashProxyList(entry, entry))
+	if err != nil || len(outbounds) != 2 || outbounds[0].Tag() != "DE" || outbounds[1].Tag() != "DE (2)" {
+		t.Fatalf("got %v, %v", outbounds, err)
+	}
+}
+
+// Anchors: a few lines can stand for a value far larger than the text (each
+// node is converted once), and an alias pointing back into its own anchor
+// is refused instead of followed forever
+func TestClashAnchors(t *testing.T) {
+	// a30 stands for 10^31 scalars
+	var b strings.Builder
+	b.WriteString("bomb:\n  - &a0 [x, x, x, x, x, x, x, x, x, x]\n")
+	for i := 1; i <= 30; i++ {
+		prev := "*a" + strconv.Itoa(i-1)
+		fmt.Fprintf(&b, "  - &a%d [%s%s]\n", i, strings.Repeat(prev+", ", 9), prev)
+	}
+	b.WriteString(clashProxyList(`
+  - name: bomb
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    ws-opts: {headers: {x: *a30}}
+    alpn: *a30
+  - name: cycle
+    type: trojan
+    server: 192.0.2.31
+    port: 443
+    password: pw
+    extra: &self {inner: *self}
+  - name: ok
+    type: trojan
+    server: 192.0.2.32
+    port: 443
+    password: pw`))
+	done := make(chan struct{})
+	var skipped []string
+	var imported []string
+	go func() {
+		defer close(done)
+		outbounds, sk, err := ParseAllReport(b.String())
+		if err != nil {
+			t.Errorf("ParseAllReport: %v", err)
+		}
+		for _, o := range outbounds {
+			imported = append(imported, o.Tag())
+		}
+		for _, s := range sk {
+			skipped = append(skipped, s.Name+": "+s.Reason)
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the anchors were expanded")
+	}
+	if strings.Join(imported, ",") != "ok" || len(skipped) != 2 || skipped[0] != "bomb: поле «alpn» повреждено" ||
+		skipped[1] != "cycle: запись узла повреждена" {
+		t.Fatalf("imported %q, skipped %q", imported, skipped)
+	}
+}
