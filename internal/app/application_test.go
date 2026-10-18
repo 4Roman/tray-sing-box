@@ -80,7 +80,9 @@ func (latencySource) ProbePlan() (*domain.ProbePlan, error) {
 	return &domain.ProbePlan{Candidates: []domain.LatencyCandidate{{Tag: "a", Type: "vless", Testable: true, Eligible: true}}}, nil
 }
 
-func (latencySource) RoutingTarget() (domain.RoutingTarget, error) { return domain.RoutingTarget{}, nil }
+func (latencySource) RoutingTarget() (domain.RoutingTarget, error) {
+	return domain.RoutingTarget{}, nil
+}
 
 func (latencySource) DetourTargets(string) ([]string, error) { return nil, nil }
 
