@@ -685,7 +685,7 @@ func clashV2Ray(m clashMap, typ, server string) (url.Values, error) {
 		// (an http/1.1 the server picks would end the transport)
 		q.Del("alpn")
 	}
-	setIf(q, "fp", m.str("client-fingerprint"))
+	setIf(q, "fp", clashClientFingerprint(m))
 	sni := trojanSNI
 	if typ != "trojan" {
 		if sni = clashFirst(m, "servername", "sni"); sni == "" {
@@ -840,10 +840,11 @@ func clashTLSAddons(m clashMap) error {
 
 // clashCertificate sets the certificate check of a TLS entry in the link's
 // query, where certificateCheck decides it as for the links:
-// skip-cert-verify, the pin (fingerprint, or the pin-sha256 list 3x-ui
-// writes) and name-cert-verify (Xray's vcn). A client certificate no link
-// carries, and the server refuses the node without it; nor ECH, which is
-// there to hide the server name from the network.
+// skip-cert-verify, the pin (fingerprint unless it is a browser's name, or
+// the pin-sha256 list 3x-ui writes) and name-cert-verify (Xray's vcn). A
+// client certificate no link carries, and the server refuses the node
+// without it; nor ECH, which is there to hide the server name from the
+// network.
 func clashCertificate(m clashMap, q url.Values) error {
 	if m.str("certificate") != "" || m.str("private-key") != "" {
 		return errors.New("клиентский сертификат (certificate, private-key) приложение не импортирует")
@@ -855,6 +856,10 @@ func clashCertificate(m clashMap, q url.Values) error {
 		q.Set("insecure", "1")
 	}
 	pin := m.str("fingerprint")
+	if clashBrowserFingerprint(m) != "" {
+		log.Printf("Clash profile: a node's fingerprint is a browser name, the value of client-fingerprint: read as that, no pin")
+		pin = ""
+	}
 	if pins := m.list("pin-sha256"); pin == "" && len(pins) > 0 {
 		pin = pins[0]
 	}
@@ -862,6 +867,27 @@ func clashCertificate(m clashMap, q url.Values) error {
 	setIf(q, "vcn", m.str("name-cert-verify"))
 	setIf(q, "alpn", strings.Join(m.list("alpn"), ","))
 	return nil
+}
+
+// clashBrowserFingerprint is the fingerprint of an entry when it holds a
+// browser's name (one of uTLS's, as mihomo lists them), lowercased:
+// converters write client-fingerprint's value under the key of the
+// certificate pin. mihomo refuses it as a pin, so no such node runs there;
+// the generator meant the client fingerprint.
+func clashBrowserFingerprint(m clashMap) string {
+	if fp := strings.ToLower(strings.TrimSpace(m.str("fingerprint"))); utlsNames[fp] {
+		return fp
+	}
+	return ""
+}
+
+// clashClientFingerprint is the uTLS fingerprint of an entry:
+// client-fingerprint, else a browser's name written as fingerprint
+func clashClientFingerprint(m clashMap) string {
+	if fp := strings.TrimSpace(m.str("client-fingerprint")); fp != "" {
+		return fp
+	}
+	return clashBrowserFingerprint(m)
 }
 
 func clashShadowsocks(m clashMap) (string, error) {
@@ -1169,7 +1195,7 @@ func clashAnyTLS(m clashMap) (string, error) {
 		return "", err
 	}
 	setIf(q, "sni", m.str("sni"))
-	setIf(q, "fp", m.str("client-fingerprint"))
+	setIf(q, "fp", clashClientFingerprint(m))
 	return "anytls://" + url.User(password).String() + "@" + net.JoinHostPort(server, strconv.Itoa(port)) + "/?" + q.Encode(), nil
 }
 

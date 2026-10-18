@@ -3,6 +3,7 @@ package sharelink
 import (
 	"errors"
 	"fmt"
+	"log"
 	"runtime"
 	"strconv"
 	"strings"
@@ -758,6 +759,46 @@ var acceptedClash = []clashCase{
     fingerprint: AB:CD:EF
     name-cert-verify: example.com`,
 		`{"tls":{"server_name":"example.com","insecure":null}}`},
+	// A browser's name under fingerprint, the pin's key, is what
+	// client-fingerprint means (mihomo refuses it as a pin): no pin, so
+	// skip-cert-verify is no pin with an insecure flag either
+	{"fingerprint holding a browser name is the client fingerprint", `
+  - name: fp-browser
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: example.com
+    skip-cert-verify: true
+    fingerprint: Firefox`,
+		`{"tls":{"server_name":"example.com","insecure":true,"utls":{"enabled":true,"fingerprint":"firefox"}}}`},
+	{"client-fingerprint over a browser name in fingerprint", `
+  - name: fp-both
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    client-fingerprint: safari
+    fingerprint: edge`,
+		`{"tls":{"utls":{"fingerprint":"safari"}}}`},
+	{"anytls with a browser name in fingerprint", `
+  - name: fp-anytls
+    type: anytls
+    server: 192.0.2.62
+    port: 443
+    password: pw
+    fingerprint: ios`,
+		`{"tls":{"utls":{"fingerprint":"ios"}}}`},
+	{"hysteria2 with a browser name in fingerprint and skip-cert-verify", `
+  - name: fp-hy2
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    password: pw
+    skip-cert-verify: true
+    fingerprint: chrome`,
+		`{"tls":{"insecure":true,"utls":null}}`},
 	// YAML merge keys: the entry's own keys win
 	{"merge keys", `
   - &base
@@ -782,6 +823,25 @@ func TestClashAccepted(t *testing.T) {
 			}
 			checkOutbound(t, outbounds[len(outbounds)-1], c.want)
 		})
+	}
+}
+
+// A browser's name in fingerprint is not logged as a certificate pin left
+// out; a pin is
+func TestClashBrowserFingerprintLog(t *testing.T) {
+	var logged strings.Builder
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
+	for fp, pin := range map[string]bool{"chrome": false, "AB:CD:EF": true} {
+		logged.Reset()
+		outbounds, _, err := ParseAllReport(clashProxyList("  - {name: n, type: trojan, server: 192.0.2.30, port: 443, password: pw, fingerprint: " + fp + "}"))
+		if err != nil || len(outbounds) != 1 {
+			t.Fatalf("%s: imported %v, error %v", fp, outbounds, err)
+		}
+		if strings.Contains(logged.String(), "certificate pin (pinSHA256) is dropped") != pin ||
+			strings.Contains(logged.String(), "fingerprint is a browser name") == pin {
+			t.Errorf("%s: logged %q", fp, logged.String())
+		}
 	}
 }
 
