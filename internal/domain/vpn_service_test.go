@@ -18,6 +18,23 @@ type fakeProcessManager struct {
 	// When set, decides every Start instead of startErr (e.g. by the binary
 	// a fake repository has installed)
 	startHook func() error
+	lastExit  error // why the process last died on its own (die)
+}
+
+// LastExit makes the fake an exitReporter, as the real manager is
+func (f *fakeProcessManager) LastExit() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastExit
+}
+
+// die ends the process on its own, with the reason the real manager would
+// keep for LastExit
+func (f *fakeProcessManager) die(reason error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.running = false
+	f.lastExit = reason
 }
 
 func (f *fakeProcessManager) Start() error {

@@ -179,7 +179,8 @@ type SwapOutcome struct {
 
 // WithStoppedOrUndo is WithStopped for a change that can be taken back (the
 // binary swap): when fn succeeded but the process that was running does not
-// start after it, undo reverts fn and the process is started once more. All
+// start after it — twice, or does not keep running for a while (startToKeep)
+// — undo reverts fn and the process is started once more. All
 // of it under the one hold of lifeMu: the crash monitor never retries the
 // change that does not start, nor sees the state half way back. The error is
 // WithStopped's (a failed start included, also when the undo brought the
@@ -209,7 +210,11 @@ func (s *VPNService) WithStoppedOrUndo(fn, undo func() error) (outcome SwapOutco
 		return outcome, fnErr
 	}
 
-	if outcome.StartErr = s.processManager.Start(); outcome.StartErr != nil {
+	start := s.processManager.Start
+	if fnErr == nil && undo != nil {
+		start = s.startToKeep
+	}
+	if outcome.StartErr = start(); outcome.StartErr != nil {
 		log.Printf("Failed to start VPN again: %v", outcome.StartErr)
 		// Only a change that went through is taken back: a failed fn has
 		// put things back itself, and the start then failed on what ran before
@@ -228,9 +233,60 @@ func (s *VPNService) WithStoppedOrUndo(fn, undo func() error) (outcome SwapOutco
 	return outcome, fnErr
 }
 
+// The checks of a start after a change that can be taken back (startToKeep).
+// Variables: the tests shorten them.
+var (
+	swapSurvival   = time.Duration(config.SwapSurvivalSeconds) * time.Second
+	swapRetryDelay = time.Duration(config.RestoreRetryDelay) * time.Second
+	swapPoll       = 250 * time.Millisecond
+)
+
+// startToKeep starts the process after a change that can be taken back and
+// tells whether the change may stay. Start alone answers only for the
+// start grace, while a new sing-box typically fails a few seconds in (TUN
+// and route setup): the process must also keep running for swapSurvival —
+// otherwise the change would stay and the monitor retry it until it gives
+// up. A failed attempt gets one more after a pause: the TUN adapter of the
+// process just stopped may not be released yet, and that passing failure
+// must not cost a working change. Called with lifeMu held.
+func (s *VPNService) startToKeep() error {
+	var err error
+	for attempt := 1; attempt <= 2; attempt++ {
+		if attempt > 1 {
+			log.Printf("Start after the change failed (%v), trying once more", err)
+			time.Sleep(swapRetryDelay)
+		}
+		if err = s.processManager.Start(); err != nil {
+			continue
+		}
+		if err = s.keepsRunning(swapSurvival); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// keepsRunning watches the started process for d: nil when it is still
+// running, otherwise why it ended (the process manager's LastExit when it
+// knows)
+func (s *VPNService) keepsRunning(d time.Duration) error {
+	started := time.Now()
+	for elapsed := time.Duration(0); elapsed < d; elapsed = time.Since(started) {
+		time.Sleep(min(swapPoll, d-elapsed))
+		if !s.processManager.IsRunning() {
+			if exit := s.lastProcessExit(); exit != nil {
+				return exit
+			}
+			return fmt.Errorf("sing-box exited %s after start", time.Since(started).Round(time.Second))
+		}
+	}
+	return nil
+}
+
 // undoAndStart takes back a change the process did not start after, and
 // starts it again unless the undo failed (a half-restored state is left to
-// the monitor). Called with lifeMu held.
+// the monitor). The start waits a moment first: the process that just failed
+// may still hold the TUN adapter. Called with lifeMu held.
 func (s *VPNService) undoAndStart(undo func() error, outcome *SwapOutcome) {
 	log.Printf("Taking the change back")
 	if outcome.UndoErr = undo(); outcome.UndoErr != nil {
@@ -238,6 +294,7 @@ func (s *VPNService) undoAndStart(undo func() error, outcome *SwapOutcome) {
 		return
 	}
 	outcome.Undone = true
+	time.Sleep(swapRetryDelay)
 	if outcome.RestartErr = s.processManager.Start(); outcome.RestartErr != nil {
 		log.Printf("Failed to start VPN after taking the change back: %v", outcome.RestartErr)
 	}

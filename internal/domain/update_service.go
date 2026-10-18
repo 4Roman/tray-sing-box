@@ -138,17 +138,26 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 // checkConfig checks the current config with the downloaded binary. The
 // latest release may be several minor versions ahead, and sing-box
 // regularly drops deprecated options: a binary that refuses the config would
-// leave the VPN down. The update is refused only when the installed binary
-// accepts the config — when it refuses it too (or there is none), the new
-// version may be exactly what the config needs (written for a newer
-// sing-box).
+// leave the VPN down. The update is refused when the installed binary
+// accepts the config. When it refuses it too (or there is none) the config
+// is broken for both, and the update goes on only while the VPN is down:
+// nothing is lost then, and the new binary is in place for a fixed config.
+// A running VPN still works with the config it read earlier — stopping it
+// for the swap would leave it down on either version.
 func (s *UpdateService) checkConfig(staged, current, latest string) error {
 	stagedErr := s.repo.CheckConfig(staged)
 	if stagedErr == nil {
 		return nil
 	}
 	if installedErr := s.repo.CheckConfig(""); installedErr != nil {
-		log.Printf("Update: sing-box %s refuses the config (%v), and so does the installed binary (%v): updating anyway", latest, stagedErr, installedErr)
+		if s.vpn.GetStatus() == VPNStatusRunning {
+			log.Printf("Update: sing-box %s and the installed binary both refuse the config (%v; %v), the VPN runs: update cancelled", latest, stagedErr, installedErr)
+			return fmt.Errorf("текущий config.json не принимают ни sing-box %s, ни установленная версия%s:\n%w\n\n"+
+				"VPN работает с конфигом, прочитанным раньше, поэтому обновление отменено: после остановки он не запустился бы ни на одной версии. "+
+				"Исправьте config.json, затем обновите снова.",
+				latest, versionSuffix(current), stagedErr)
+		}
+		log.Printf("Update: sing-box %s refuses the config (%v), and so does the installed binary (%v), the VPN is down: updating anyway", latest, stagedErr, installedErr)
 		return nil
 	}
 	log.Printf("Update: sing-box %s refuses the config the installed binary accepts, update cancelled: %v", latest, stagedErr)

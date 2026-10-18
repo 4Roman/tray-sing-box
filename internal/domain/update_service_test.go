@@ -5,7 +5,23 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The checks after a binary swap run in milliseconds here, not seconds; a
+// test that needs a longer watch sets swapSurvival itself (withSurvival)
+func init() {
+	swapSurvival = 20 * time.Millisecond
+	swapRetryDelay = time.Millisecond
+	swapPoll = time.Millisecond
+}
+
+// withSurvival watches a swapped process for d in this test
+func withSurvival(t *testing.T, d time.Duration) {
+	old := swapSurvival
+	swapSurvival = d
+	t.Cleanup(func() { swapSurvival = old })
+}
 
 func TestCompareVersions(t *testing.T) {
 	cases := []struct {
@@ -167,8 +183,8 @@ func TestUpdateFailedRestartKeepsIntentAndReports(t *testing.T) {
 	if !errors.Is(err, newErr) || !errors.Is(err, oldErr) || !strings.Contains(err.Error(), "но и она не запустилась") {
 		t.Fatalf("error = %v, want both start failures", err)
 	}
-	if pm.startCount() != 2 || pm.IsRunning() {
-		t.Fatalf("starts = %d, running = %v, want the new and the old version tried once each", pm.startCount(), pm.IsRunning())
+	if pm.startCount() != 3 || pm.IsRunning() {
+		t.Fatalf("starts = %d, running = %v, want the new version tried twice, the old one once", pm.startCount(), pm.IsRunning())
 	}
 	if state, saves := st.snapshot(); !state || saves != 0 {
 		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
@@ -294,8 +310,8 @@ func TestUpdateRollsBackANewVersionThatDoesNotStart(t *testing.T) {
 	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe", "rollback") {
 		t.Fatalf("calls = %v", repo.calls)
 	}
-	if pm.startCount() != 2 || !pm.IsRunning() {
-		t.Fatalf("starts = %d, running = %v, want the new version tried, then the old one running", pm.startCount(), pm.IsRunning())
+	if pm.startCount() != 3 || !pm.IsRunning() {
+		t.Fatalf("starts = %d, running = %v, want the new version tried twice, then the old one running", pm.startCount(), pm.IsRunning())
 	}
 	if state, saves := st.snapshot(); !state || saves != 0 {
 		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
@@ -323,8 +339,8 @@ func TestUpdateRollbackFailure(t *testing.T) {
 	if result.RolledBack || result.Restarted || !result.Updated {
 		t.Fatalf("result = %+v", result)
 	}
-	if pm.startCount() != 1 {
-		t.Fatalf("starts = %d, want only the new version's", pm.startCount())
+	if pm.startCount() != 2 {
+		t.Fatalf("starts = %d, want only the new version's two", pm.startCount())
 	}
 	if state, saves := st.snapshot(); !state || saves != 0 {
 		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
@@ -348,6 +364,114 @@ func TestUpdateNoRollbackWhenTheVPNWasNotRunning(t *testing.T) {
 	}
 	if pm.startCount() != 0 || repo.rolledBack {
 		t.Fatalf("starts = %d, rolled back = %v", pm.startCount(), repo.rolledBack)
+	}
+}
+
+// A new version that starts but dies a few seconds in (TUN or route setup,
+// after the start grace) does not start either: it is tried twice and rolled
+// back, with the reason the process manager kept for the death
+func TestUpdateRollsBackANewVersionThatDiesAfterTheStart(t *testing.T) {
+	withSurvival(t, 5*time.Second)
+	repo := &fakeRepo{current: "1.11.4", latest: ReleaseInfo{Version: "1.14.2", AssetURL: "url"}}
+	died := errors.New("sing-box (PID 4242) exited: exit status 1: FATAL start inbound/tun[tun-in]: configure tun interface")
+	pm := &fakeProcessManager{running: true}
+	pm.startHook = func() error {
+		if repo.installed && !repo.rolledBack {
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				pm.die(died)
+			}()
+		}
+		return nil
+	}
+	st := &fakeStorage{state: true}
+	svc := NewUpdateService(repo, NewVPNService(pm, st))
+
+	started := time.Now()
+	result, err := svc.Update()
+	if !errors.Is(err, died) || !strings.Contains(err.Error(), "Возвращена прежняя версия 1.11.4") {
+		t.Fatalf("error = %v, want the death's reason and the rollback", err)
+	}
+	if elapsed := time.Since(started); elapsed > 3*time.Second {
+		t.Fatalf("Update took %v: the death was not noticed before the watch ended", elapsed)
+	}
+	if !result.RolledBack || result.Updated || !result.Restarted {
+		t.Fatalf("result = %+v, want rolled back and restarted", result)
+	}
+	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe", "rollback") {
+		t.Fatalf("calls = %v", repo.calls)
+	}
+	if pm.startCount() != 3 || !pm.IsRunning() {
+		t.Fatalf("starts = %d, running = %v, want the new version tried twice, then the old one running", pm.startCount(), pm.IsRunning())
+	}
+	if state, saves := st.snapshot(); !state || saves != 0 {
+		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
+	}
+}
+
+// One failed start right after the swap may be the stopped process still
+// holding the TUN adapter: the new version gets a second try and is kept
+// when that one works
+func TestUpdateKeepsANewVersionAfterAPassingStartFailure(t *testing.T) {
+	repo := &fakeRepo{current: "1.11.4", latest: ReleaseInfo{Version: "1.14.2", AssetURL: "url"}}
+	pm := &fakeProcessManager{running: true}
+	failures := 1
+	pm.startHook = func() error {
+		if failures > 0 {
+			failures--
+			return errors.New("sing-box exited right after start: open tun: the adapter is in use")
+		}
+		return nil
+	}
+	svc := NewUpdateService(repo, NewVPNService(pm, &fakeStorage{state: true}))
+
+	result, err := svc.Update()
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !result.Updated || result.RolledBack || !result.Restarted {
+		t.Fatalf("result = %+v, want the new version kept and running", result)
+	}
+	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe") || pm.startCount() != 2 || !pm.IsRunning() {
+		t.Fatalf("calls = %v, starts = %d, running = %v", repo.calls, pm.startCount(), pm.IsRunning())
+	}
+}
+
+// A config both versions refuse cannot be what the running VPN started
+// with: it read an earlier one. Stopping it for the swap would leave it down
+// on either version, so the update is called off before anything is stopped
+func TestUpdateRefusedWhenBothVersionsRejectTheConfigAndTheVPNRuns(t *testing.T) {
+	stagedErr := errors.New("FATAL[0000] decode config at config.json: dns.servers[0]: unknown field \"address\"")
+	repo := &fakeRepo{
+		current:           "1.11.4",
+		latest:            ReleaseInfo{Version: "1.14.2", AssetURL: "url"},
+		stagedCheckErr:    stagedErr,
+		installedCheckErr: errors.New("FATAL[0000] decode config at config.json: invalid character '}'"),
+	}
+	pm := &fakeProcessManager{running: true}
+	st := &fakeStorage{state: true}
+	svc := NewUpdateService(repo, NewVPNService(pm, st))
+
+	result, err := svc.Update()
+	if !errors.Is(err, stagedErr) {
+		t.Fatalf("error = %v, want the new version's refusal in it", err)
+	}
+	for _, want := range []string{"1.14.2", "1.11.4", "обновление отменено", "Исправьте config.json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q in it", err, want)
+		}
+	}
+	if !result.ConfigRejected || result.Updated || result.Restarted {
+		t.Fatalf("result = %+v", result)
+	}
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "discard staged.exe") {
+		t.Fatalf("calls = %v, want both checks and the download discarded, nothing installed", repo.calls)
+	}
+	if !pm.IsRunning() || pm.startCount() != 0 {
+		t.Fatalf("the VPN was touched: running=%v starts=%d", pm.IsRunning(), pm.startCount())
+	}
+	if state, saves := st.snapshot(); !state || saves != 0 {
+		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
 	}
 }
 

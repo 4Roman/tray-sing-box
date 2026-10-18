@@ -41,6 +41,11 @@ const (
 	StartErrorTailBytes = 2000 // how much of sing-box's output goes into that error
 	StopWaitTimeout     = 5    // seconds to wait for the killed process to disappear
 
+	// sing-box binary update: the new version must keep running this long
+	// after the swap, or the previous one is put back (TUN and route setup
+	// fail a few seconds in, after StartGraceMs)
+	SwapSurvivalSeconds = 10
+
 	// sing-box stdout/stderr capture, next to the exe. Bounded by LogMaxSizeMB:
 	// rotated when sing-box is started, trimmed in place while it keeps running
 	SingBoxConsoleLog     = "sing-box-console.log"
