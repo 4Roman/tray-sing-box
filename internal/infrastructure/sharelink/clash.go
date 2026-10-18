@@ -45,7 +45,25 @@ var (
 	errClashBroken    = errors.New("профиль Clash/mihomo (YAML) повреждён")
 	errClashProviders = errors.New("в профиле Clash/mihomo нет самих серверов, только ссылки на внешние списки (proxy-providers), " +
 		"а их приложение не загружает: нужна ссылка на подписку, которая отдаёт серверы")
-	errClashEntry = errors.New("запись узла повреждена")
+	errClashEntry     = errors.New("запись узла повреждена")
+	errClashExpansion = fmt.Errorf("%w: якоря и ссылки YAML (&, *, <<) разворачивают его в слишком большой объём", errClashBroken)
+)
+
+// How far the aliases of a profile may expand it. Each repetition of an
+// entry is translated again (a link, an outbound) and a merge key copies
+// the fields it merges, so a few lines of anchors can stand for gigabytes,
+// and the app does not survive running out of memory. The entries with
+// every alias and merge expanded (clashValue.size, about their bytes) may
+// come to twice the text and clashExpansionAllowance on top, and the merges
+// may copy half as many fields as the text has bytes and
+// clashMergeAllowance on top. A provider merging a common block into its
+// entries stays far below; yaml.v3's own check (mihomo's "excessive
+// aliasing") is not used: it does not see one large value repeated, and it
+// does not run inside a mapping with a repeated key.
+const (
+	clashExpansionAllowance = 4 << 20
+	clashMergeAllowance     = 1 << 20
+	clashSizeCap            = 1 << 50 // where a size stops counting: aliases nest exponentially
 )
 
 // clash reads text as a Clash/mihomo YAML profile. ok is false when it is
@@ -104,14 +122,25 @@ func (c *collector) clash(text string) (ok bool, err error) {
 		return true, errClashProviders
 	}
 
+	// The entries are read first: a profile that expands too far is refused
+	// before anything of it is translated
+	r := newYAMLReader(len(text))
+	values := make([]*clashValue, len(items))
+	errs := make([]error, len(items))
+	for i, item := range items {
+		values[i], errs[i] = r.value(item)
+		if errors.Is(errs[i], errClashExpansion) || errs[i] == nil && !r.entry(values[i]) {
+			return true, errClashExpansion
+		}
+	}
+
 	// The outbounds then go the way of a sing-box profile's: a dialer-proxy
 	// is a detour, kept only when it names another node that is imported
 	// and not in a ring (sing-box does not start otherwise, and sing-box
 	// check does not notice); the tags are made unique there
-	r := yamlReader{done: map[*yaml.Node]yamlResult{}, active: map[*yaml.Node]bool{}}
 	var outbounds []any
 	for i, item := range items {
-		v, err := r.value(item)
+		v, err := values[i], errs[i]
 		if err == nil && v.kind != yaml.MappingNode {
 			err = errClashEntry
 		}
@@ -894,6 +923,14 @@ type clashValue struct {
 	tag    string // YAML's type of the scalar: !!str, !!int, !!bool, !!null, …
 	fields map[string]*clashValue
 	items  []*clashValue
+	// size is the value with its aliases expanded, about its bytes: what
+	// reading and translating it may cost (capped at clashSizeCap)
+	size int64
+}
+
+// sizeAdd adds sizes, the sum capped at clashSizeCap (both are)
+func sizeAdd(a, b int64) int64 {
+	return min(a+b, clashSizeCap)
 }
 
 // field is the value of a mapping's key, nil when the key is absent or null
@@ -1069,15 +1106,37 @@ func (m clashMap) set(key string) bool {
 // yamlReader converts YAML nodes into clashValues. Each node is converted
 // once however often aliases repeat it (a few lines of anchors can stand
 // for billions of values), and an alias pointing back into the node that
-// holds it is refused.
+// holds it is refused. What the expanded values may cost is budgeted (see
+// clashExpansionAllowance).
 type yamlReader struct {
 	done   map[*yaml.Node]yamlResult
 	active map[*yaml.Node]bool
+	// expansion is what the entries may still come to (entry), merges the
+	// fields merge keys may still copy
+	expansion int64
+	merges    int
 }
 
 type yamlResult struct {
 	v   *clashValue
 	err error
+}
+
+// newYAMLReader is a reader for a profile text of the given length
+func newYAMLReader(textLen int) *yamlReader {
+	return &yamlReader{
+		done:      map[*yaml.Node]yamlResult{},
+		active:    map[*yaml.Node]bool{},
+		expansion: 2*int64(textLen) + clashExpansionAllowance,
+		merges:    textLen/2 + clashMergeAllowance,
+	}
+}
+
+// entry charges an entry of the profile, converted, to the expansion: false
+// once the entries come to more than the profile may expand to
+func (r *yamlReader) entry(v *clashValue) bool {
+	r.expansion -= v.size
+	return r.expansion >= 0
 }
 
 func (r *yamlReader) value(n *yaml.Node) (*clashValue, error) {
@@ -1103,15 +1162,16 @@ func (r *yamlReader) value(n *yaml.Node) (*clashValue, error) {
 func (r *yamlReader) convert(n *yaml.Node) (*clashValue, error) {
 	switch n.Kind {
 	case yaml.ScalarNode:
-		return &clashValue{kind: yaml.ScalarNode, text: n.Value, tag: n.ShortTag()}, nil
+		return &clashValue{kind: yaml.ScalarNode, text: n.Value, tag: n.ShortTag(), size: 1 + int64(len(n.Value))}, nil
 	case yaml.SequenceNode:
-		v := &clashValue{kind: yaml.SequenceNode, items: make([]*clashValue, 0, len(n.Content))}
+		v := &clashValue{kind: yaml.SequenceNode, items: make([]*clashValue, 0, len(n.Content)), size: 1}
 		for _, item := range n.Content {
 			iv, err := r.value(item)
 			if err != nil {
 				return nil, err
 			}
 			v.items = append(v.items, iv)
+			v.size = sizeAdd(v.size, iv.size)
 		}
 		return v, nil
 	case yaml.MappingNode:
@@ -1159,12 +1219,19 @@ func (r *yamlReader) mapping(n *yaml.Node) (*clashValue, error) {
 			if sv.kind != yaml.MappingNode {
 				return nil, errClashEntry
 			}
+			if r.merges -= len(sv.fields); r.merges < 0 {
+				return nil, errClashExpansion
+			}
 			for key, fv := range sv.fields {
 				if _, set := v.fields[key]; !set {
 					v.fields[key] = fv
 				}
 			}
 		}
+	}
+	v.size = 1
+	for key, fv := range v.fields {
+		v.size = sizeAdd(v.size, sizeAdd(int64(len(key)), fv.size))
 	}
 	return v, nil
 }

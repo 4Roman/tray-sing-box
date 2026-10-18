@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"tray-sing-box/internal/domain"
 )
 
 // clashProxyList is a Clash profile of nothing but the given proxy entries
@@ -1220,45 +1222,17 @@ func TestClashRepeatedNames(t *testing.T) {
 	}
 }
 
-// Anchors: a few lines can stand for a value far larger than the text (each
-// node is converted once), and an alias pointing back into its own anchor
-// is refused instead of followed forever
-func TestClashAnchors(t *testing.T) {
-	// a30 stands for 10^31 scalars
-	var b strings.Builder
-	b.WriteString("bomb:\n  - &a0 [x, x, x, x, x, x, x, x, x, x]\n")
-	for i := 1; i <= 30; i++ {
-		prev := "*a" + strconv.Itoa(i-1)
-		fmt.Fprintf(&b, "  - &a%d [%s%s]\n", i, strings.Repeat(prev+", ", 9), prev)
-	}
-	b.WriteString(clashProxyList(`
-  - name: bomb
-    type: trojan
-    server: 192.0.2.30
-    port: 443
-    password: pw
-    ws-opts: {headers: {x: *a30}}
-    alpn: *a30
-  - name: cycle
-    type: trojan
-    server: 192.0.2.31
-    port: 443
-    password: pw
-    extra: &self {inner: *self}
-  - name: ok
-    type: trojan
-    server: 192.0.2.32
-    port: 443
-    password: pw`))
+// parseQuickly is ParseAllReport with the skipped nodes as "name: reason",
+// failing the test when it takes long: an expanded alias costs minutes and
+// gigabytes
+func parseQuickly(t *testing.T, text string) (imported, skipped []string, err error) {
+	t.Helper()
 	done := make(chan struct{})
-	var skipped []string
-	var imported []string
 	go func() {
 		defer close(done)
-		outbounds, sk, err := ParseAllReport(b.String())
-		if err != nil {
-			t.Errorf("ParseAllReport: %v", err)
-		}
+		var outbounds []Outbound
+		var sk []domain.SkippedNode
+		outbounds, sk, err = ParseAllReport(text)
 		for _, o := range outbounds {
 			imported = append(imported, o.Tag())
 		}
@@ -1269,10 +1243,111 @@ func TestClashAnchors(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the anchors were expanded")
+		t.Fatal("the aliases were expanded")
 	}
-	if strings.Join(imported, ",") != "ok" || len(skipped) != 2 || skipped[0] != "bomb: поле «alpn» повреждено" ||
-		skipped[1] != "cycle: запись узла повреждена" {
-		t.Fatalf("imported %q, skipped %q", imported, skipped)
+	return imported, skipped, err
+}
+
+// Anchors: a few lines can stand for a value far larger than the text. Such
+// a profile is refused as a whole, as mihomo refuses it, instead of being
+// expanded; an alias pointing back into its own anchor is refused instead of
+// followed forever
+func TestClashAnchors(t *testing.T) {
+	// a30 stands for 10^31 scalars
+	var b strings.Builder
+	b.WriteString("bomb:\n  - &a0 [x, x, x, x, x, x, x, x, x, x]\n")
+	for i := 1; i <= 30; i++ {
+		prev := "*a" + strconv.Itoa(i-1)
+		fmt.Fprintf(&b, "  - &a%d [%s%s]\n", i, strings.Repeat(prev+", ", 9), prev)
+	}
+	ok := `
+  - name: ok
+    type: trojan
+    server: 192.0.2.32
+    port: 443
+    password: pw`
+	b.WriteString(clashProxyList(`
+  - name: bomb
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    ws-opts: {headers: {x: *a30}}
+    alpn: *a30`, ok))
+	if imported, skipped, err := parseQuickly(t, b.String()); !errors.Is(err, errClashBroken) || imported != nil || skipped != nil {
+		t.Fatalf("bomb: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+
+	imported, skipped, err := parseQuickly(t, clashProxyList(`
+  - name: cycle
+    type: trojan
+    server: 192.0.2.31
+    port: 443
+    password: pw
+    extra: &self {inner: *self}`, ok))
+	if err != nil || strings.Join(imported, ",") != "ok" || len(skipped) != 1 || skipped[0] != "cycle: запись узла повреждена" {
+		t.Fatalf("cycle: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+}
+
+// Aliases and merge keys may not make the entries much larger than the
+// text: each repetition is translated again (a link, an outbound), and a
+// merge copies the fields. Within the 8 MB of a subscription body such a
+// profile grows into gigabytes, and the app does not survive running out of
+// memory. A profile that merges a common block into its entries is imported.
+func TestClashAliasExpansion(t *testing.T) {
+	var merged strings.Builder // every entry merges a mapping of 2000 keys
+	merged.WriteString("x-base: &b {")
+	for i := range 2000 {
+		fmt.Fprintf(&merged, "k%d: %d, ", i, i)
+	}
+	merged.WriteString("type: trojan}\nproxies:\n")
+	for range 2000 {
+		merged.WriteString("  - <<: *b\n")
+	}
+
+	var chain strings.Builder // each level merges the one before it
+	chain.WriteString("x0: &l0 {type: trojan}\n")
+	for i := 1; i <= 2000; i++ {
+		fmt.Fprintf(&chain, "x%d: &l%d {<<: *l%d, k%d: %d}\n", i, i, i-1, i, i)
+	}
+	chain.WriteString("proxies:\n")
+	// One entry of 2000 keys, two million copied by the merges
+	chainEntry := chain.String() + "  - {<<: *l2000, name: x, server: 192.0.2.30, port: 443, password: pw}\n"
+	for i := 0; i <= 2000; i++ {
+		fmt.Fprintf(&chain, "  - *l%d\n", i)
+	}
+	chainEntries := chain.String()
+
+	password := strings.Repeat("a", 256<<10)
+	var repeated strings.Builder // one node of 256 KB, repeated
+	repeated.WriteString("proxies:\n  - &n {name: x, type: ss, server: 192.0.2.40, port: 8388, cipher: aes-128-gcm, password: " + password + "}\n")
+	repeated.WriteString(strings.Repeat("  - *n\n", 100))
+
+	var field strings.Builder // a password of 256 KB in every node
+	field.WriteString("x-pw: &pw " + password + "\nproxies:\n")
+	for i := range 100 {
+		fmt.Fprintf(&field, "  - {name: n%d, type: ss, server: 192.0.2.40, port: 8388, cipher: aes-128-gcm, password: *pw}\n", i)
+	}
+
+	for name, text := range map[string]string{
+		"merge": merged.String(), "merge chain": chainEntries, "merged chain": chainEntry,
+		"alias": repeated.String(), "aliased field": field.String(),
+	} {
+		imported, skipped, err := parseQuickly(t, text)
+		if !errors.Is(err, errClashBroken) || !russian(err.Error()) || len(imported) != 0 || len(skipped) != 0 {
+			t.Errorf("%s: imported %d, skipped %d, error %v", name, len(imported), len(skipped), err)
+		}
+	}
+
+	var common strings.Builder
+	common.WriteString("x-common: &c {type: trojan, port: 443, password: pw, sni: example.com, udp: true, " +
+		"skip-cert-verify: false, client-fingerprint: chrome, network: tcp}\nproxies:\n")
+	for i := range 3000 {
+		fmt.Fprintf(&common, "  - {<<: *c, name: n%d, server: 192.0.2.%d}\n", i, i%250+1)
+	}
+	imported, skipped, err := parseQuickly(t, common.String())
+	if err != nil || len(imported) != 3000 || len(skipped) != 0 {
+		t.Fatalf("common block: imported %d, skipped %q, error %v", len(imported), skipped, err)
 	}
 }
