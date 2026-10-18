@@ -249,7 +249,26 @@ func walkRisky(v any, parentKey string, items map[string]string) {
 						risky()
 						continue
 					}
+					// On the loopback the clash API is every local program's,
+					// non-elevated ones included: without a secret (sing-box
+					// then checks nothing, nor the Host header) — or with one
+					// short enough to guess over the loopback, nothing limits
+					// the tries — they switch selectors, close connections and
+					// read every connection's destination and program. Its own
+					// item, so a listener an administrator wrote without one
+					// stays allowed
+					if s, ok := child.(string); parentKey == "clash_api" && ok && strings.TrimSpace(s) != "" && apiSecretLength(x) < minAPISecret {
+						items[fmt.Sprintf("clash_api.external_controller=%s without secret", canonical(child))] =
+							fmt.Sprintf("clash_api.external_controller (или задайте ему secret не короче %d символов)", minAPISecret)
+					}
 				}
+			case k == "access_control_allow_private_network":
+				// The clash API answering Private Network Access preflights:
+				// a public web page may then call it
+				if child != false {
+					risky()
+				}
+				continue
 			}
 			walkRisky(child, k, items)
 		}
@@ -258,6 +277,26 @@ func walkRisky(v any, parentKey string, items map[string]string) {
 			walkRisky(child, parentKey, items)
 		}
 	}
+}
+
+// minAPISecret is the shortest clash API secret a save may add
+const minAPISecret = 16
+
+// apiSecretLength is the length of the clash API's secret — the shortest of
+// its spellings (sing-box takes the later one in the text, whose order is
+// not kept here), 0 without one
+func apiSecretLength(api map[string]any) int {
+	length, found := 0, false
+	for key, v := range api {
+		if foldKey(key) != "secret" {
+			continue
+		}
+		s, _ := v.(string)
+		if n := len(strings.TrimSpace(s)); !found || n < length {
+			length, found = n, true
+		}
+	}
+	return length
 }
 
 // urlServer: a DNS server whose path is a URL path (https, h3), not a file

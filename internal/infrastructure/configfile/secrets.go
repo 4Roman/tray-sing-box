@@ -49,6 +49,7 @@ var secretKeys = map[string]bool{
 	"auth": true, "auth_str": true, "private_key_passphrase": true,
 	"client_key": true, "authorization": true, "proxy-authorization": true,
 	"username": true, "short_id": true, "token": true,
+	"secret": true, // the clash API's: whoever has it controls sing-box
 }
 
 // isSecret reports whether value, found under key, is a credential: a string

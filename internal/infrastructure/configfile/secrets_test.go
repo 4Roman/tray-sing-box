@@ -506,3 +506,16 @@ func TestWriteSectionObjectSectionPlaceholder(t *testing.T) {
 		t.Fatal("config changed")
 	}
 }
+
+// The clash API's secret is a credential: whoever has it controls sing-box,
+// so it never reaches the page or a refusal quoting sing-box
+func TestClashAPISecretIsMasked(t *testing.T) {
+	const secret = "f3c9a1e07b2d4c58e6"
+	if !isSecret("Secret", secret) {
+		t.Fatal("the clash API secret is not a secret")
+	}
+	cfg := map[string]any{"experimental": map[string]any{"clash_api": map[string]any{"external_controller": "127.0.0.1:9090", "secret": secret}}}
+	if got := redactSecrets("decode config: secret "+secret+" rejected", cfg); strings.Contains(got, secret) {
+		t.Fatalf("the secret is quoted: %s", got)
+	}
+}

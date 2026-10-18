@@ -120,16 +120,23 @@ func TestCreateConfigRefusesWhatTheGuardRefuses(t *testing.T) {
 		"inbound on a LAN IP": `{"inbounds":[{"type":"http","tag":"in","listen":"192.168.1.5","listen_port":8080}]}`,
 		"clash api on all":    `{"experimental":{"clash_api":{"external_controller":"0.0.0.0:9090"}}}`,
 		"clash api no host":   `{"experimental":{"clash_api":{"external_controller":":9090"}}}`,
-		"v2ray api on all":    `{"experimental":{"v2ray_api":{"listen":"0.0.0.0:8080"}}}`,
-		"debug listener":      `{"experimental":{"debug":{"listen":"127.0.0.1:6060"}}}`,
-		"service on all":      `{"services":[{"type":"ssm-api","tag":"s","listen":"0.0.0.0","listen_port":8080}]}`,
-		"capitalised Listen":  `{"inbounds":[{"type":"mixed","tag":"in","Listen":"0.0.0.0","listen_port":2080}]}`,
-		"listen not a string": `{"inbounds":[{"type":"mixed","tag":"in","listen":0,"listen_port":2080}]}`,
-		"not an object":       `[{"type":"direct"}]`,
-		"trailing data":       `{"outbounds":[]} {"outbounds":[]}`,
-		"not json":            `outbounds: []`,
-		"null":                `null`,
-		"comments":            "{\n// sing-box itself allows these\n\"outbounds\":[]}",
+		// On the loopback every local program reaches it: a secret it cannot
+		// guess, and no Private Network Access for public pages
+		"clash api no secret":    `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}}}`,
+		"clash api empty secret": `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":""}}}`,
+		"clash api short secret": `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"x"}}}`,
+		"clash api two secrets":  `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"0123456789abcdef","SECRET":"x"}}}`,
+		"private network access": `{"experimental":{"clash_api":{"access_control_allow_private_network":true}}}`,
+		"v2ray api on all":       `{"experimental":{"v2ray_api":{"listen":"0.0.0.0:8080"}}}`,
+		"debug listener":         `{"experimental":{"debug":{"listen":"127.0.0.1:6060"}}}`,
+		"service on all":         `{"services":[{"type":"ssm-api","tag":"s","listen":"0.0.0.0","listen_port":8080}]}`,
+		"capitalised Listen":     `{"inbounds":[{"type":"mixed","tag":"in","Listen":"0.0.0.0","listen_port":2080}]}`,
+		"listen not a string":    `{"inbounds":[{"type":"mixed","tag":"in","listen":0,"listen_port":2080}]}`,
+		"not an object":          `[{"type":"direct"}]`,
+		"trailing data":          `{"outbounds":[]} {"outbounds":[]}`,
+		"not json":               `outbounds: []`,
+		"null":                   `null`,
+		"comments":               "{\n// sing-box itself allows these\n\"outbounds\":[]}",
 		// Allow-lists: sections, inbound and endpoint types
 		"services section":     `{"services":[{"type":"resolved","tag":"r"}]}`,
 		"server inbound":       `{"inbounds":[{"type":"shadowsocks","tag":"ss","listen":"127.0.0.1","listen_port":8388,"method":"aes-128-gcm","password":"x"}]}`,
@@ -162,8 +169,8 @@ func TestCreateConfigRefusesWhatTheGuardRefuses(t *testing.T) {
 		"ipv6 loopback":       `{"inbounds":[{"type":"mixed","tag":"in","listen":"::1","listen_port":2080}]}`,
 		"localhost":           `{"inbounds":[{"type":"mixed","tag":"in","listen":"localhost","listen_port":2080}]}`,
 		"tun":                 `{"inbounds":[{"type":"tun","tag":"tun","address":["172.19.0.1/30"],"auto_route":true}]}`,
-		"clash api loopback":  `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"x"}}}`,
-		"clash api ipv6 loop": `{"experimental":{"clash_api":{"external_controller":"[::1]:9090"}}}`,
+		"clash api loopback":  `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"0123456789abcdef"}}}`,
+		"clash api ipv6 loop": `{"experimental":{"clash_api":{"external_controller":"[::1]:9090","Secret":"a long enough secret"}}}`,
 		"cache file, no path": `{"experimental":{"cache_file":{"enabled":true}}}`,
 		"remote rule set":     `{"route":{"rule_set":[{"type":"remote","tag":"r","url":"https://x/r.srs"}]}}`,
 		// No false refusals of what a client config commonly holds
@@ -189,7 +196,7 @@ func TestCreateConfigRefusesWhatTheGuardRefuses(t *testing.T) {
 			"route": {"rule_set": [{"type": "remote", "tag": "geosite-ru", "format": "binary", "url": "https://x/ru.srs", "download_detour": "p1"}],
 			          "rules": [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}, {"rule_set": "geosite-ru", "outbound": "direct"}],
 			          "final": "p1", "auto_detect_interface": true},
-			"experimental": {"cache_file": {"enabled": true}, "clash_api": {"external_controller": "127.0.0.1:9090", "secret": "s"}}
+			"experimental": {"cache_file": {"enabled": true}, "clash_api": {"external_controller": "127.0.0.1:9090", "secret": "f3c9a1e07b2d4c58"}}
 		}`,
 	}
 	for name, cfg := range allowed {

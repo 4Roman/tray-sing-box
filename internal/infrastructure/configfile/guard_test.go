@@ -123,3 +123,30 @@ func TestWriteSectionRefusesATorOutbound(t *testing.T) {
 		t.Fatalf("config changed: %s", data)
 	}
 }
+
+// A clash API on the loopback is every local program's: one added through
+// the app must carry a secret they cannot guess; one an administrator wrote
+// without stays, moving it is adding it
+func TestGuardClashAPISecret(t *testing.T) {
+	empty := []byte(`{"outbounds":[]}`)
+	open := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090"}},"outbounds":[]}`
+	if err := checkNoNewRisky([]byte(open), decode(t, open)); err != nil {
+		t.Errorf("kept: %v", err)
+	}
+	if err := checkNoNewRisky(empty, decode(t, open)); err == nil {
+		t.Error("added without a secret: accepted")
+	}
+	moved := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9191"}},"outbounds":[]}`
+	if err := checkNoNewRisky([]byte(open), decode(t, moved)); err == nil {
+		t.Error("moved without a secret: accepted")
+	}
+	strong := `{"experimental":{"Clash_API":{"external_controller":"127.0.0.1:9090","Secret":"0123456789abcdef"}},"outbounds":[]}`
+	if err := checkNoNewRisky(empty, decode(t, strong)); err != nil {
+		t.Errorf("with a secret: %v", err)
+	}
+	// The secret never appears in the refusal
+	weak := `{"experimental":{"clash_api":{"external_controller":"127.0.0.1:9090","secret":"hunter2"}},"outbounds":[]}`
+	if err := checkNoNewRisky(empty, decode(t, weak)); err == nil || strings.Contains(err.Error(), "hunter2") {
+		t.Errorf("short secret: %v", err)
+	}
+}
