@@ -677,6 +677,12 @@ func clashV2Ray(m clashMap, typ, server string) (url.Values, error) {
 	if err := clashCertificate(m, q); err != nil {
 		return nil, err
 	}
+	if network := q.Get("type"); network == "grpc" || network == "http" {
+		// gRPC and h2 (the link's http) are HTTP/2: mihomo offers h2 alone
+		// there whatever alpn says, and so does sing-box when it has none
+		// (an http/1.1 the server picks would end the transport)
+		q.Del("alpn")
+	}
 	setIf(q, "fp", m.str("client-fingerprint"))
 	sni := trojanSNI
 	if typ != "trojan" {

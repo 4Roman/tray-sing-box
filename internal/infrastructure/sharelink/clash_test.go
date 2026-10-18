@@ -344,6 +344,54 @@ var acceptedClash = []clashCase{
         - b.example.com
       path: /h2`,
 		`{"tls":{"server_name":"192.0.2.20"},"transport":{"type":"http","host":["a.example.com","b.example.com"],"path":"/h2"}}`},
+	// mihomo offers h2 alone over gRPC and h2 (a host's alpn that Marzban
+	// writes on every node does not reach them): sing-box offers h2 there
+	// only when tls.alpn is empty
+	{"vless grpc: h2 whatever alpn says", `
+  - name: vl-grpc-alpn
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: my.example.com
+    alpn: [http/1.1]
+    network: grpc
+    grpc-opts:
+      grpc-service-name: svc`,
+		`{"tls":{"server_name":"my.example.com","alpn":null},"transport":{"type":"grpc","service_name":"svc"}}`},
+	{"vmess h2: h2 whatever alpn says", `
+  - name: vm-h2-alpn
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    alterId: 0
+    cipher: auto
+    tls: true
+    alpn: [http/1.1]
+    network: h2
+    h2-opts:
+      path: /h2`,
+		`{"tls":{"alpn":null},"transport":{"type":"http","path":"/h2"}}`},
+	{"trojan grpc: h2 whatever alpn says", `
+  - name: tr-grpc-alpn
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    alpn: [http/1.1]
+    network: grpc`,
+		`{"tls":{"alpn":null},"transport":{"type":"grpc"}}`},
+	{"vless over TCP keeps its alpn", `
+  - name: vl-tcp-alpn
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    alpn: [http/1.1]`,
+		`{"tls":{"alpn":["http/1.1"]},"transport":null}`},
 	{"vmess http: TCP with the HTTP header", `
   - name: vm-http
     type: vmess
