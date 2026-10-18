@@ -271,7 +271,7 @@ func TestUpdateChecksTheConfigBeforeTheSwap(t *testing.T) {
 	if _, err := svc.Update(); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe") {
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "install staged.exe") {
 		t.Fatalf("calls = %v", repo.calls)
 	}
 }
@@ -307,7 +307,7 @@ func TestUpdateRollsBackANewVersionThatDoesNotStart(t *testing.T) {
 	if !result.RolledBack || result.Updated || !result.Restarted {
 		t.Fatalf("result = %+v, want rolled back and restarted", result)
 	}
-	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe", "rollback") {
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "install staged.exe", "rollback") {
 		t.Fatalf("calls = %v", repo.calls)
 	}
 	if pm.startCount() != 3 || !pm.IsRunning() {
@@ -398,7 +398,7 @@ func TestUpdateRollsBackANewVersionThatDiesAfterTheStart(t *testing.T) {
 	if !result.RolledBack || result.Updated || !result.Restarted {
 		t.Fatalf("result = %+v, want rolled back and restarted", result)
 	}
-	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe", "rollback") {
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "install staged.exe", "rollback") {
 		t.Fatalf("calls = %v", repo.calls)
 	}
 	if pm.startCount() != 3 || !pm.IsRunning() {
@@ -432,8 +432,42 @@ func TestUpdateKeepsANewVersionAfterAPassingStartFailure(t *testing.T) {
 	if !result.Updated || result.RolledBack || !result.Restarted {
 		t.Fatalf("result = %+v, want the new version kept and running", result)
 	}
-	if !sameCalls(repo.calls, "check staged.exe", "install staged.exe") || pm.startCount() != 2 || !pm.IsRunning() {
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "install staged.exe") || pm.startCount() != 2 || !pm.IsRunning() {
 		t.Fatalf("calls = %v, starts = %d, running = %v", repo.calls, pm.startCount(), pm.IsRunning())
+	}
+}
+
+// A config already rewritten for the new version (the advice of a refused
+// update) is one the previous version refuses: when the new one then does
+// not start, putting the old one back would be sure to fail — the new one
+// stays for the monitor, and the message says why
+func TestUpdateKeepsTheNewVersionWhenThePreviousOneRefusesTheConfig(t *testing.T) {
+	repo := &fakeRepo{
+		current:           "1.10.7",
+		latest:            ReleaseInfo{Version: "1.14.2", AssetURL: "url"},
+		installedCheckErr: errors.New("FATAL[0000] decode config at config.json: route.rules[0]: unknown field \"action\""),
+	}
+	startErr := errors.New("sing-box exited right after start: configure tun interface")
+	pm := &fakeProcessManager{running: true}
+	pm.startHook = repo.startHook(startErr, errors.New("unknown field \"action\""))
+	st := &fakeStorage{state: true}
+	svc := NewUpdateService(repo, NewVPNService(pm, st))
+
+	result, err := svc.Update()
+	if !errors.Is(err, startErr) || !strings.Contains(err.Error(), "Прежняя версия 1.10.7 текущий config.json не принимает") {
+		t.Fatalf("error = %v, want the start error and why the old version was not put back", err)
+	}
+	if !result.Updated || result.RolledBack || result.Restarted {
+		t.Fatalf("result = %+v, want the new version kept", result)
+	}
+	if !sameCalls(repo.calls, "check staged.exe", "check installed", "install staged.exe") {
+		t.Fatalf("calls = %v, want no rollback", repo.calls)
+	}
+	if pm.startCount() != 1 {
+		t.Fatalf("starts = %d, want the new version once (the monitor tries again)", pm.startCount())
+	}
+	if state, saves := st.snapshot(); !state || saves != 0 {
+		t.Fatalf("update touched the intent: state=%v saves=%d", state, saves)
 	}
 }
 

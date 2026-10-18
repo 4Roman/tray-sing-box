@@ -92,7 +92,8 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 
 	// Before anything is stopped: a version that would not run the config is
 	// not installed at all
-	if err := s.checkConfig(staged, current, latest.Version); err != nil {
+	previousRuns, err := s.checkConfig(staged, current, latest.Version)
+	if err != nil {
 		result.ConfigRejected = true
 		if discardErr := s.repo.Discard(staged); discardErr != nil {
 			log.Printf("Update: failed to remove the download: %v", discardErr)
@@ -107,7 +108,14 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 	// outcome: on failure Install restores the previous binary, so it comes
 	// back on the old version. A new version that installs but does not start
 	// is rolled back and the old one started — otherwise the monitor would
-	// retry the new one until it gives up, and the VPN would stay down.
+	// retry the new one until it gives up, and the VPN would stay down. Unless
+	// the old one cannot run the config either (rewritten for the new version
+	// after a refused update): putting it back would be sure to leave the VPN
+	// down, the new one stays for the monitor.
+	var rollback func() error
+	if previousRuns {
+		rollback = s.repo.Rollback
+	}
 	installed := false
 	outcome, err := s.vpn.WithStoppedOrUndo(func() error {
 		if err := s.repo.Install(staged); err != nil {
@@ -115,12 +123,12 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 		}
 		installed = true
 		return nil
-	}, s.repo.Rollback)
+	}, rollback)
 	result.Restarted = outcome.Restarted
 	result.RolledBack = outcome.Undone
 	result.Updated = installed && !outcome.Undone
 	if installed && outcome.StartErr != nil {
-		err := notStartedError(latest.Version, current, outcome)
+		err := notStartedError(latest.Version, current, outcome, previousRuns)
 		log.Printf("Update: %v", err)
 		return result, err
 	}
@@ -143,35 +151,46 @@ func (s *UpdateService) Update() (*UpdateResult, error) {
 // is broken for both, and the update goes on only while the VPN is down:
 // nothing is lost then, and the new binary is in place for a fixed config.
 // A running VPN still works with the config it read earlier — stopping it
-// for the swap would leave it down on either version.
-func (s *UpdateService) checkConfig(staged, current, latest string) error {
+// for the swap would leave it down on either version. previousRuns tells
+// whether the installed binary accepts the config: only then is it worth
+// putting back when the new one does not start.
+func (s *UpdateService) checkConfig(staged, current, latest string) (previousRuns bool, err error) {
 	stagedErr := s.repo.CheckConfig(staged)
-	if stagedErr == nil {
-		return nil
+	installedErr := s.repo.CheckConfig("")
+	if installedErr != nil {
+		log.Printf("Update: the installed binary refuses the config: %v", installedErr)
 	}
-	if installedErr := s.repo.CheckConfig(""); installedErr != nil {
+	if stagedErr == nil {
+		return installedErr == nil, nil
+	}
+	if installedErr != nil {
 		if s.vpn.GetStatus() == VPNStatusRunning {
-			log.Printf("Update: sing-box %s and the installed binary both refuse the config (%v; %v), the VPN runs: update cancelled", latest, stagedErr, installedErr)
-			return fmt.Errorf("текущий config.json не принимают ни sing-box %s, ни установленная версия%s:\n%w\n\n"+
+			log.Printf("Update: sing-box %s and the installed binary both refuse the config (%v), the VPN runs: update cancelled", latest, stagedErr)
+			return false, fmt.Errorf("текущий config.json не принимают ни sing-box %s, ни установленная версия%s:\n%w\n\n"+
 				"VPN работает с конфигом, прочитанным раньше, поэтому обновление отменено: после остановки он не запустился бы ни на одной версии. "+
 				"Исправьте config.json, затем обновите снова.",
 				latest, versionSuffix(current), stagedErr)
 		}
-		log.Printf("Update: sing-box %s refuses the config (%v), and so does the installed binary (%v), the VPN is down: updating anyway", latest, stagedErr, installedErr)
-		return nil
+		log.Printf("Update: sing-box %s refuses the config (%v), and so does the installed binary, the VPN is down: updating anyway", latest, stagedErr)
+		return false, nil
 	}
 	log.Printf("Update: sing-box %s refuses the config the installed binary accepts, update cancelled: %v", latest, stagedErr)
-	return fmt.Errorf("sing-box %s не принимает текущий конфиг:\n%w\n\n"+
+	return true, fmt.Errorf("sing-box %s не принимает текущий конфиг:\n%w\n\n"+
 		"Обновление отменено, продолжает работать установленная версия%s. "+
 		"Сначала измените config.json под новую версию (что в ней убрано или переименовано — в списке изменений sing-box), затем обновите снова.",
 		latest, stagedErr, versionSuffix(current))
 }
 
 // notStartedError tells the user that the new version did not start and what
-// became of the rollback
-func notStartedError(latest, current string, outcome SwapOutcome) error {
+// became of the rollback (none when the previous version does not run the
+// config: previousRuns false)
+func notStartedError(latest, current string, outcome SwapOutcome, previousRuns bool) error {
 	old := versionSuffix(current)
 	switch {
+	case !previousRuns:
+		return fmt.Errorf("sing-box %s установлен, но не запустился:\n%w\n\n"+
+			"Прежняя версия%s текущий config.json не принимает, поэтому она не возвращена: попытки запустить новую продолжатся автоматически.",
+			latest, outcome.StartErr, old)
 	case outcome.UndoErr != nil:
 		return fmt.Errorf("sing-box %s не запустился:\n%w\n\nВернуть прежнюю версию%s не удалось: %w",
 			latest, outcome.StartErr, old, outcome.UndoErr)
