@@ -816,11 +816,9 @@ func streamQuery(st *xrayStream, address string) (url.Values, map[string]string,
 			}
 			headers[key] = value
 		}
-		// Xray's Host: host, else the TLS server name, else the address; a
-		// sing-box WebSocket sends the address unless told otherwise
-		if host == "" && tls != nil && network != "httpupgrade" {
-			host = strings.TrimSpace(tls.ServerName)
-		}
+		// Xray's Host: host, else the TLS server name, else the address —
+		// without a host the link parser writes the server name, as for any
+		// link (fitTLSToTransport)
 		setIf(q, "host", host)
 		setIf(q, "path", ws.Path)
 	case "grpc":
