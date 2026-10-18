@@ -1117,6 +1117,27 @@ func TestClashProfileShapes(t *testing.T) {
 	if outbounds, err := ParseAll("proxies: 2\ntrojan://pw@192.0.2.30:443#a\ntrojan://pw@192.0.2.31:443#b\n"); err != nil || len(outbounds) != 2 {
 		t.Errorf("links under a proxies: line: %v, %v", outbounds, err)
 	}
+	// Links that YAML reads, as a list or as one text: no node entry (a
+	// mapping) among them, so no profile
+	for _, text := range []string{
+		"proxies:\n- trojan://pw@192.0.2.30:443#a\n- trojan://pw@192.0.2.31:443#b\n",
+		"proxies:\n  trojan://pw@192.0.2.30:443#a\n  trojan://pw@192.0.2.31:443#b\n",
+		"proxies: trojan://pw@192.0.2.30:443#a trojan://pw@192.0.2.31:443#b\n",
+	} {
+		if imported, skipped, err := parseQuickly(t, text); err != nil || strings.Join(imported, ",") != "a,b" || len(skipped) != 0 {
+			t.Errorf("%q: imported %q, skipped %q, error %v", text, imported, skipped, err)
+		}
+	}
+	// A profile with an entry stays one: a link among its entries is none
+	imported, skipped, err := parseQuickly(t, "proxies:\n  - trojan://pw@192.0.2.30:443#a"+entry)
+	if err != nil || strings.Join(imported, ",") != "DE" || strings.Join(skipped, ",") != "узел 1: запись узла повреждена" {
+		t.Errorf("a link among the entries: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+	imported, skipped, err = parseQuickly(t, "# trojan://other@192.0.2.99:443#other\n"+
+		"x-de: &de {name: DE, type: trojan, server: 192.0.2.30, port: 443, password: pw}\nproxies:\n  - *de\n")
+	if err != nil || strings.Join(imported, ",") != "DE" || len(skipped) != 0 {
+		t.Errorf("an aliased entry: imported %q, skipped %q, error %v", imported, skipped, err)
+	}
 }
 
 // dialer-proxy is a detour: kept when it names another imported node, the

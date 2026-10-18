@@ -110,6 +110,11 @@ func (c *collector) clash(text string) (ok bool, err error) {
 	if proxies.Kind == yaml.AliasNode && proxies.Alias != nil {
 		proxies = proxies.Alias
 	}
+	// Share links under a "proxies:" line may be YAML as well, a list or a
+	// text: the entries of a profile are mappings
+	if !holdsMapping(proxies) && len(extractLinks(text)) > 0 {
+		return false, nil
+	}
 	var items []*yaml.Node
 	switch {
 	case proxies.Kind == yaml.SequenceNode:
@@ -160,6 +165,23 @@ func (c *collector) clash(text string) (ok bool, err error) {
 	}
 	c.singBox(outbounds)
 	return true, errEmptyProfileIfNone(c)
+}
+
+// holdsMapping reports whether a YAML list holds a mapping, what the entry
+// of a node is
+func holdsMapping(list *yaml.Node) bool {
+	if list.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, item := range list.Content {
+		if item.Kind == yaml.AliasNode && item.Alias != nil {
+			item = item.Alias
+		}
+		if item.Kind == yaml.MappingNode {
+			return true
+		}
+	}
+	return false
 }
 
 // clashName is what an entry is called in the report: its name on one
