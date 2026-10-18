@@ -83,13 +83,16 @@ const (
 	RoutingNode     = "node"     // a proxy server
 	RoutingSelector = "selector" // a selector group: its choice is the user's
 	RoutingURLTest  = "urltest"  // a urltest group: it picks the fastest member itself
+	RoutingEndpoint = "endpoint" // an endpoint (WireGuard): the test does not measure it
 )
 
 // RoutingTarget is where the routing of config.json sends the traffic: the
 // first route rule naming a proxy or a group, otherwise route.final, otherwise
-// the first outbound (sing-box's default when route.final is not set)
+// the first outbound (sing-box's default when route.final is not set); an
+// endpoint when the routing names neither (next to a proxy or a group it
+// takes what its rules send it, like direct: SwitchOutbound leaves it)
 type RoutingTarget struct {
-	Kind string // RoutingNode, RoutingSelector, RoutingURLTest, or "" (no proxy, no group)
+	Kind string // RoutingNode, RoutingSelector, RoutingURLTest, RoutingEndpoint, or "" (none of them)
 	Tag  string
 	// ProxyRefs are the distinct proxy servers the rules and route.final
 	// (or the default outbound) send traffic to, in order: switching the

@@ -104,6 +104,14 @@ func TestChooseFastest(t *testing.T) {
 				Message: "Выбран самый быстрый — «c» (100 мс; был «a» — 300 мс)."}},
 		{"nothing went through a server", latencyReport(okResult("b", 100)), RoutingTarget{Final: "direct"}, false,
 			FastestOutcome{Tag: "b", DelayMs: 100, Switched: true, Message: "Выбран самый быстрый — «b» (100 мс)."}},
+		// A WireGuard endpoint takes the traffic: the switch would move all of
+		// it off a tunnel the check never measured
+		{"an endpoint carries the traffic", latencyReport(okResult("b", 100)), RoutingTarget{Kind: RoutingEndpoint, Tag: "wg", Final: "wg"}, true,
+			FastestOutcome{Previous: "wg", Message: "Трафик идёт через endpoint «wg» — проверка его не измеряет; выберите сервер вручную."}},
+		{"an endpoint by a rule", latencyReport(okResult("b", 100)), RoutingTarget{Kind: RoutingEndpoint, Tag: "warp\nWARP", Final: "direct", InRules: true}, false,
+			FastestOutcome{Previous: "warp\nWARP", Message: "Трафик идёт через endpoint «warp WARP» — проверка его не измеряет; выберите сервер вручную."}},
+		{"nobody answered, an endpoint carries the traffic", latencyReport(timeout), RoutingTarget{Kind: RoutingEndpoint, Tag: "wg", Final: "wg"}, false,
+			FastestOutcome{Previous: "wg", Message: "Трафик идёт через endpoint «wg» — проверка его не измеряет; выберите сервер вручную."}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

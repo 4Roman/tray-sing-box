@@ -1021,7 +1021,7 @@ func TestProbeExclude(t *testing.T) {
 
 // Where the traffic goes first, and the proxies a switch would repoint
 func TestRoutingTarget(t *testing.T) {
-	const outbounds = `"outbounds": [
+	const outbounds = `"endpoints": [{"type": "wireguard", "tag": "wg"}], "outbounds": [
 	  {"type": "selector", "tag": "proxy", "outbounds": ["a", "b"]},
 	  {"type": "urltest", "tag": "auto", "outbounds": ["a", "b"]},
 	  {"type": "vless", "tag": "a"},
@@ -1053,6 +1053,19 @@ func TestRoutingTarget(t *testing.T) {
 			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "b", ProxyRefs: []string{"b", "a"}, Final: "a", InRules: true}},
 		{"without final the first outbound is the default", `{"rules": [{"outbound": "direct"}]}`,
 			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy"}},
+		// An endpoint (a WireGuard one, WARP) takes the traffic no server or
+		// group takes: SwitchOutbound would move route.final off it
+		{"an endpoint as final", `{"rules": [{"domain": ["x"], "outbound": "direct"}], "final": "wg"}`,
+			domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "wg", Final: "wg"}},
+		{"an endpoint by a rule, no server", `{"rules": [{"domain": ["x"], "outbound": "wg"}], "final": "direct"}`,
+			domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "wg", Final: "direct", InRules: true}},
+		// ... and none next to one: SwitchOutbound repoints no rule to it
+		{"a rule to an endpoint, a server as final", `{"rules": [{"domain": ["x"], "outbound": "wg"}], "final": "a"}`,
+			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}},
+		{"a server by a rule, an endpoint as final", `{"rules": [{"domain": ["x"], "outbound": "a"}], "final": "wg"}`,
+			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "wg", InRules: true}},
+		{"a rule to an endpoint, a group as final", `{"rules": [{"outbound": "wg"}], "final": "proxy"}`,
+			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1066,5 +1079,17 @@ func TestRoutingTarget(t *testing.T) {
 	got := routingTarget(probeConfig(t, `{"outbounds": [{"type": "vless", "tag": "a"}, {"type": "direct", "tag": "direct"}]}`))
 	if want := (domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}); !reflect.DeepEqual(got, want) {
 		t.Errorf("routingTarget without route = %+v, want %+v", got, want)
+	}
+	// The endpoints in any spelling; an outbound of the same tag is the one
+	// the routing finds
+	got = routingTarget(probeConfig(t, `{"Endpoints": [{"Type": "wireguard", "TAG": "warp"}, {"type": "wireguard", "tag": "a"}],
+	  "outbounds": [{"type": "vless", "tag": "a"}, {"type": "direct", "tag": "direct"}], "route": {"final": "warp"}}`))
+	if want := (domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "warp", Final: "warp"}); !reflect.DeepEqual(got, want) {
+		t.Errorf("routingTarget with folded endpoints = %+v, want %+v", got, want)
+	}
+	got = routingTarget(probeConfig(t, `{"endpoints": [{"type": "wireguard", "tag": "a"}],
+	  "outbounds": [{"type": "vless", "tag": "a"}], "route": {"final": "a"}}`))
+	if want := (domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}); !reflect.DeepEqual(got, want) {
+		t.Errorf("routingTarget with an endpoint of an outbound's tag = %+v, want %+v", got, want)
 	}
 }

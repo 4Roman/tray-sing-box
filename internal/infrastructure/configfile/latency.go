@@ -873,7 +873,11 @@ func excludedReason(message string) string {
 // route rule naming a proxy or a group, then route.final — or, without it,
 // the first outbound, sing-box's default then. ProxyRefs are the distinct
 // proxies among all of them, the ones SwitchOutbound would repoint, Groups
-// the distinct groups, which it leaves where they are.
+// the distinct groups, which it leaves where they are. An endpoint (a
+// WireGuard one) is the target when no proxy or group is: SwitchOutbound
+// repoints no rule to one, but with no proxy referenced it sets
+// route.final — and so would move the traffic off it. Next to a proxy or a
+// group it stays where it is, like direct: no split routing.
 func routingTarget(cfg map[string]any) domain.RoutingTarget {
 	kinds := map[string]string{} // tag -> kind, "" for direct/block/dns and relays
 	first, firstSeen := "", false
@@ -894,6 +898,15 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 			kinds[tag] = domain.RoutingNode
 		default:
 			kinds[tag] = ""
+		}
+	})
+	// sing-box finds an outbound before an endpoint of the same tag
+	// (adapter/outbound/manager.go)
+	each(cfg, "endpoints", func(e map[string]any) {
+		if tag := foldedString(e, "tag"); tag != "" {
+			if _, known := kinds[tag]; !known {
+				kinds[tag] = domain.RoutingEndpoint
+			}
 		}
 	})
 
@@ -917,9 +930,13 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 
 	rt := domain.RoutingTarget{Final: final}
 	seen := map[string]bool{}
+	endpoint := ""
 	for _, ref := range refs {
 		kind := kinds[ref]
-		if kind == "" {
+		if kind == domain.RoutingEndpoint && endpoint == "" {
+			endpoint = ref
+		}
+		if kind == "" || kind == domain.RoutingEndpoint {
 			continue
 		}
 		if rt.Kind == "" {
@@ -934,6 +951,9 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 		} else {
 			rt.Groups = append(rt.Groups, ref)
 		}
+	}
+	if rt.Kind == "" && endpoint != "" {
+		rt.Kind, rt.Tag = domain.RoutingEndpoint, endpoint
 	}
 	rt.InRules = rt.Tag != "" && slices.Contains(refs[:ruleRefs], rt.Tag)
 	return rt

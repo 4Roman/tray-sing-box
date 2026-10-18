@@ -595,8 +595,8 @@ async function latencyRun(body) {
     showLatency(d.report);
     let text = latencySummary(d.report);
     if (f) text += '\n' + f.message;
-    // Kept or switched: done; refused (urltest, split routing, none
-    // answered): a reason to read
+    // Kept or switched: done; refused (urltest, an endpoint, split
+    // routing, none answered): a reason to read
     show(!f || f.tag ? 'ok' : 'warn', text, !!f);
     if (f && f.switched) await refresh();
   } catch (e) {

@@ -18,6 +18,7 @@ const (
 	msgFastestNone         = "Ни один сервер не ответил — активный сервер не изменён."
 	msgFastestNoneEligible = "Ответили только серверы, которые не выбираются самыми быстрыми (обход DPI, промежуточные узлы цепочек) — активный сервер не изменён."
 	msgFastestURLTest      = "Трафик идёт через группу urltest «%s» — она сама выбирает самый быстрый сервер. Ничего не изменено."
+	msgFastestEndpoint     = "Трафик идёт через endpoint «%s» — проверка его не измеряет; выберите сервер вручную."
 	msgFastestSplit        = "Правила маршрутизации ведут трафик на разные серверы (%s) — «самый быстрый» направил бы всё на один. Выберите сервер вручную."
 	msgFastestPartial      = "Через группу «%s» идёт только трафик по правилам маршрутизации, остальной идёт мимо неё (route.final — «%s») — «самый быстрый» направил бы через сервер и его. Ничего не изменено."
 	msgFastestConfirm      = "Сейчас трафик идёт через группу «%s». «Выбрать самый быстрый», как и выбор вручную, направит его прямо на «%s» (группа останется в конфиге). Продолжить?"
@@ -33,7 +34,9 @@ const splitNamesLimit = 5
 // the routing as it is (rt). In this order:
 //
 //  1. the traffic goes through a urltest group: it picks the fastest itself
-//     — refused;
+//     — refused; through an endpoint (a WireGuard one, no proxy or group
+//     named): the check does not measure it, and the switch would move all
+//     of it to the server — refused;
 //  2. the routing sends traffic to two or more servers or groups: switching
 //     would send all of it to one (SwitchOutbound repoints every proxy and
 //     leaves the groups) — refused;
@@ -53,8 +56,11 @@ const splitNamesLimit = 5
 // Tag is the fastest server (empty when refused), Previous what the traffic
 // goes through now.
 func ChooseFastest(r *LatencyReport, rt RoutingTarget, confirm bool) FastestOutcome {
-	if rt.Kind == RoutingURLTest {
+	switch rt.Kind {
+	case RoutingURLTest:
 		return FastestOutcome{Previous: rt.Tag, Message: fmt.Sprintf(msgFastestURLTest, DisplayName(rt.Tag))}
+	case RoutingEndpoint:
+		return FastestOutcome{Previous: rt.Tag, Message: fmt.Sprintf(msgFastestEndpoint, DisplayName(rt.Tag))}
 	}
 	if dest := destinations(rt); len(dest) >= 2 {
 		return FastestOutcome{Message: fmt.Sprintf(msgFastestSplit, nameList(dest))}

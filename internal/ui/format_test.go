@@ -276,6 +276,14 @@ func TestFastestMessage(t *testing.T) {
 		t.Errorf("a selector:\n%s\nwant\n%s", got, want)
 	}
 
+	// The traffic goes through an endpoint: the refusal as ChooseFastest words it
+	outcome := domain.ChooseFastest(report, domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "warp", Final: "warp"}, false)
+	got = FastestMessage(report, &outcome)
+	want = "Проверено в 12:30:05: ответили 2 из 3. Быстрее всех — «nl-2» (40 мс).\n\nТрафик идёт через endpoint «warp» — проверка его не измеряет; выберите сервер вручную."
+	if got != want || outcome.Switched {
+		t.Errorf("an endpoint:\n%s\nwant\n%s", got, want)
+	}
+
 	none := &domain.LatencyReport{Tested: tested, Total: 1, Results: []domain.LatencyResult{{Tag: "dead", Status: domain.LatencyTimeout, Eligible: true}}}
 	got = FastestMessage(none, &domain.FastestOutcome{Message: "Ни один сервер не ответил — активный сервер не изменён."})
 	if want := "Проверено в 12:30:05: ответили 0 из 1.\n\nНи один сервер не ответил — активный сервер не изменён."; got != want {

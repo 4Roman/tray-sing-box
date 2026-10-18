@@ -75,8 +75,14 @@ func (f *fakeProber) callCount() int {
 // switch through SettingsService.UseOutbound under the server's op lock)
 func newLatencyServer(t *testing.T, prober *fakeProber, withLatency bool) (*Server, string, string) {
 	t.Helper()
+	return newLatencyServerWith(t, prober, withLatency, latencyConfig)
+}
+
+// newLatencyServerWith is newLatencyServer over another config
+func newLatencyServerWith(t *testing.T, prober *fakeProber, withLatency bool, cfg string) (*Server, string, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(latencyConfig), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
 		t.Fatal(err)
 	}
 	editor := configfile.New(path)
@@ -218,6 +224,35 @@ func TestLatencySelectFastest(t *testing.T) {
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Fatalf("no backup: %v", err)
+	}
+}
+
+// The traffic goes through a WireGuard endpoint: "select the fastest" moves
+// nothing off it — the answer is the refusal the page shows as a warning
+// (no tag), config.json stays as it was
+func TestLatencySelectFastestKeepsAnEndpoint(t *testing.T) {
+	cfg := strings.Replace(latencyConfig, `"route": {"final": "de-1"}`,
+		`"endpoints": [{"type": "wireguard", "tag": "warp"}], "route": {"rules": [{"domain": ["intranet.example"], "outbound": "direct"}], "final": "warp"}`, 1)
+	server, base, path := newLatencyServerWith(t, twoDelays(), true, cfg)
+	session := login(t, server)
+
+	before, _ := os.ReadFile(path)
+	status, body := callRaw(t, http.MethodPost, base+"/api/latency", session, map[string]any{"select": true, "confirm": true})
+	if status != http.StatusOK {
+		t.Fatalf("POST: %d %s", status, body)
+	}
+	var resp struct {
+		Fastest domain.FastestOutcome `json:"fastest"`
+	}
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatal(err)
+	}
+	want := domain.FastestOutcome{Previous: "warp", Message: "Трафик идёт через endpoint «warp» — проверка его не измеряет; выберите сервер вручную."}
+	if resp.Fastest != want {
+		t.Fatalf("outcome: %s", body)
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(after, before) {
+		t.Fatal("config.json changed")
 	}
 }
 
