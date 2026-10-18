@@ -73,8 +73,12 @@ const xray3xui = `[
 {"remarks": "JP-hy2", ` + xrayTemplate + `,
   "outbounds": [
     {"protocol": "hysteria", "tag": "proxy", "settings": {"version": 2, "address": "203.0.113.60", "port": 443},
-     "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "` + testSecret + `"},
-       "tlsSettings": {"serverName": "jp.example.com"}}},
+     "streamSettings": {"network": "hysteria", "security": "tls",
+       "hysteriaSettings": {"version": 2, "auth": "` + testSecret + `", "udpIdleTimeout": 60, "masquerade": {"type": "proxy", "url": "https://www.example.com"}},
+       "tlsSettings": {"serverName": "jp.example.com", "alpn": ["h3"], "fingerprint": "chrome"},
+       "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "obfs-pw"}},
+                             {"type": "udphop", "settings": {"mode": "intervalRemote", "remotePorts": "20000-30000", "interval": "10-20"}}],
+                     "quicParams": {"congestion": "bbr", "brutalUp": "100 mbps"}}}},
     ` + xrayDefaultOutbounds + `]},
 {"remarks": "⏳ 12 дней · 30 GB", ` + xrayTemplate + `,
   "outbounds": [
@@ -196,6 +200,7 @@ var xraySamples = map[string]string{
 	"xray 3x-ui":          xray3xui,
 	"xray 3x-ui fragment": xray3xuiFragment,
 	"xray config":         xrayConfig,
+	"xray hysteria2":      xrayHysteria2Profile,
 }
 
 // The Xray samples join the profiles check_windows_test.go runs through the
@@ -254,7 +259,7 @@ func checkReasons(t *testing.T, reasons, want map[string]string) {
 // suffixed), each translated as its share link would be
 func TestXray3xuiSubscription(t *testing.T) {
 	byTag, tags, reasons := parseXray(t, xray3xui)
-	want := []string{"🇩🇪 DE-alice", "NL-ws", "FI-grpc", "SE-ss2022", "⏳ 12 дней · 30 GB", "🇩🇪 DE-alice (2)"}
+	want := []string{"🇩🇪 DE-alice", "NL-ws", "FI-grpc", "SE-ss2022", "JP-hy2", "⏳ 12 дней · 30 GB", "🇩🇪 DE-alice (2)"}
 	if strings.Join(tags, "|") != strings.Join(want, "|") {
 		t.Fatalf("imported %q", tags)
 	}
@@ -272,6 +277,10 @@ func TestXray3xuiSubscription(t *testing.T) {
 	  "transport":{"type":"grpc","service_name":"svc"}}`)
 	checkOutbound(t, byTag["SE-ss2022"], `{"type":"shadowsocks","server":"203.0.113.40","server_port":8388,
 	  "method":"2022-blake3-aes-128-gcm","password":"MDEyMzQ1Njc4OWFiY2RlZg==:ZmVkY2JhOTg3NjU0MzIxMA==","plugin":null}`)
+	// Hysteria 2 as 3x-ui's hysteria2:// link of the same inbound says it
+	checkOutbound(t, byTag["JP-hy2"], `{"type":"hysteria2","server":"203.0.113.60","server_port":443,"password":"`+testSecret+`",
+	  "tls":{"enabled":true,"server_name":"jp.example.com","alpn":["h3"],"utls":null},
+	  "obfs":{"type":"salamander","password":"obfs-pw"},"server_ports":["20000:30000"],"hop_interval":"10s"}`)
 	// The info node is imported as the SOCKS proxy it is; the subscription
 	// sync leaves it out (domain: withoutInfoNodes)
 	checkOutbound(t, byTag["⏳ 12 дней · 30 GB"], `{"type":"socks","server":"127.0.0.1","server_port":1080,"username":null}`)
@@ -281,11 +290,10 @@ func TestXray3xuiSubscription(t *testing.T) {
 
 	checkReasons(t, reasons, map[string]string{
 		"PL-xhttp": "транспорт XHTTP не поддерживается sing-box",
-		"JP-hy2":   "hysteria2://",
 	})
 
 	// The same subscription served in base64
-	if outbounds, skipped, err := ParseAllReport(b64(xray3xui)); err != nil || len(outbounds) != len(want) || len(skipped) != 2 {
+	if outbounds, skipped, err := ParseAllReport(b64(xray3xui)); err != nil || len(outbounds) != len(want) || len(skipped) != 1 {
 		t.Errorf("base64: %d outbounds, %+v, %v", len(outbounds), skipped, err)
 	}
 }
@@ -313,6 +321,96 @@ func TestXray3xuiBalancer(t *testing.T) {
 		t.Fatalf("imported %q, skipped %v", tags, reasons)
 	}
 	checkOutbound(t, byTag["bal-1-vless"], `{"server":"203.0.113.3"}`)
+}
+
+// xrayHysteria2Node is an Xray Hysteria 2 outbound as 3x-ui's genHy writes
+// it, with stream settings of the case's
+func xrayHysteria2Node(tag, version, stream string) string {
+	return `{"protocol": "hysteria", "tag": "` + tag + `", "settings": {"version": ` + version + `, "address": "203.0.113.61", "port": 8443},
+	  "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "pw"},
+	    "tlsSettings": {"serverName": "hy.example.com"}` + stream + `}}`
+}
+
+// xrayHysteria2Profile holds Hysteria 2 nodes of Xray that import
+var xrayHysteria2Profile = `{"outbounds": [
+  {"protocol": "hysteria", "tag": "plain", "settings": {"version": 2, "address": "203.0.113.61", "port": 8443},
+    "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "pw"}}},
+  {"protocol": "hysteria", "tag": "gecko", "settings": {"version": 2, "address": "203.0.113.62", "port": 443},
+    "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": "2", "auth": "p@ss:w/rd"},
+      "tlsSettings": {"serverName": "hy.example.com", "allowInsecure": true, "echConfigList": "` + testECH + `"},
+      "finalmask": {"udp": [{"type": "Salamander", "settings": {"password": "obfs-pw", "packetSize": "512-1200"}},
+                            {"type": "udphop", "settings": {"mode": "intervalRemote", "remotePorts": 20000}}]}}},
+  {"protocol": "hysteria", "tag": "pinned", "settings": {"version": 2, "address": "203.0.113.63", "port": 443},
+    "streamSettings": {"network": "hysteria", "security": "tls", "hysteriaSettings": {"version": 2, "auth": "pw"},
+      "tlsSettings": {"serverName": "hy.example.com", "pinnedPeerCertSha256": "ab12cd", "verifyPeerCertByName": "hy.example.com"},
+      "finalmask": {"tcp": [{"type": "fragment"}], "udp": [{"type": "udphop", "settings": {"remotePorts": "443,20000-30000", "interval": 3}}]}}}
+]}`
+
+// Xray's Hysteria 2 is the hysteria2:// link 3x-ui writes for the same
+// inbound: auth, TLS, salamander (gecko with a packetSize), port hopping;
+// what sing-box cannot do as Xray does is refused by name
+func TestXrayHysteria2(t *testing.T) {
+	byTag, tags, reasons := parseXray(t, xrayHysteria2Profile)
+	if strings.Join(tags, "|") != "plain|gecko|pinned" || len(reasons) != 0 {
+		t.Fatalf("imported %q, skipped %v", tags, reasons)
+	}
+	checkOutbound(t, byTag["plain"], `{"type":"hysteria2","server":"203.0.113.61","server_port":8443,"password":"pw",
+	  "tls":{"enabled":true,"server_name":"203.0.113.61"},"obfs":null,"server_ports":null}`)
+	checkOutbound(t, byTag["gecko"], `{"password":"p@ss:w/rd","obfs":{"type":"gecko","password":"obfs-pw"},
+	  "server_ports":["20000:20000"],"hop_interval":null,
+	  "tls":{"server_name":"hy.example.com","insecure":true,"ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","`+testECH+`","-----END ECH CONFIGS-----"]}}}`)
+	// The pin is dropped (sing-box checks the chain), vcn for the server
+	// name is the ordinary check; a hop interval under 5 s is sing-box's 30 s
+	checkOutbound(t, byTag["pinned"], `{"tls":{"server_name":"hy.example.com","insecure":null},
+	  "server_ports":["443:443","20000:30000"],"hop_interval":null}`)
+
+	refused := map[string]string{
+		"version 1":      xrayHysteria2Node("n", "1", ""),
+		"over tcp":       strings.Replace(xrayHysteria2Node("n", "2", ""), `"network": "hysteria"`, `"network": "tcp"`, 1),
+		"no tls":         strings.Replace(xrayHysteria2Node("n", "2", ""), `"security": "tls"`, `"security": "none"`, 1),
+		"no settings":    strings.Replace(xrayHysteria2Node("n", "2", ""), `"hysteriaSettings": {"version": 2, "auth": "pw"},`, ``, 1),
+		"noise mask":     xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "noise", "settings": {"password": "`+testSecret+`"}}]}`),
+		"realm":          xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "realm", "settings": {"token": "`+testSecret+`"}}]}`),
+		"two salamander": xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "a"}}, {"type": "salamander", "settings": {"password": "b"}}]}`),
+		"gecko too big":  xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander", "settings": {"password": "a", "packetSize": "512-4096"}}]}`),
+		"no obfs pw":     xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "salamander"}]}`),
+		"bad hop ports":  xrayHysteria2Node("n", "2", `, "finalmask": {"udp": [{"type": "udphop", "settings": {"remotePorts": "env:`+testSecret+`"}}]}`),
+		"ech dns":        strings.Replace(xrayHysteria2Node("n", "2", ""), `"serverName": "hy.example.com"`, `"serverName": "hy.example.com", "echConfigList": "udp://1.1.1.1"`, 1),
+	}
+	wants := map[string]string{
+		"version 1":      "Hysteria версии «1» в профиле Xray не поддерживается",
+		"over tcp":       "транспорт «tcp» для Hysteria 2 не поддерживается",
+		"no tls":         "Hysteria 2 работает только с TLS",
+		"no settings":    "нет настроек транспорта (hysteriaSettings)",
+		"noise mask":     "маскировка finalmask «noise» для Hysteria 2",
+		"realm":          "режим realm Hysteria 2",
+		"two salamander": "две маскировки salamander",
+		"gecko too big":  "запись outbound повреждена",
+		"no obfs pw":     "не указан пароль обфускации",
+		"bad hop ports":  "список портов не распознан",
+		"ech dns":        "поверх QUIC не поддерживает",
+	}
+	for name, node := range refused {
+		_, _, err := ParseAllReport(`{"outbounds": [` + node + `]}`)
+		if err == nil || !strings.Contains(err.Error(), wants[name]) || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("%s: error %v, want it to say %q", name, err, wants[name])
+		}
+	}
+
+	// QUIC through a freedom: its fragmentation is dropped, its UDP masks
+	// refuse the node
+	viaFreedom := func(freedom string) string {
+		return `{"outbounds": [` + xrayHysteria2Node("n", "2", `, "sockopt": {"dialerProxy": "f"}`) + `, {"protocol": "freedom", "tag": "f", ` + freedom + `}]}`
+	}
+	byTag, _, reasons = parseXray(t, viaFreedom(`"settings": {"fragment": {"packets": "tlshello", "length": "100-200", "interval": "10"}}`))
+	if len(reasons) != 0 {
+		t.Fatalf("skipped %v", reasons)
+	}
+	checkOutbound(t, byTag["n"], `{"type":"hysteria2","detour":null,"tls":{"fragment":null,"record_fragment":null}}`)
+	if _, _, err := ParseAllReport(viaFreedom(`"streamSettings": {"finalmask": {"udp": [{"type": "noise"}]}}`)); err == nil ||
+		!strings.Contains(err.Error(), "с маскировкой finalmask «noise»") {
+		t.Errorf("error %v", err)
+	}
 }
 
 // A balancer's copy of a node another document refused is not reported a

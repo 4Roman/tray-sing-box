@@ -17,9 +17,9 @@ import (
 // Xray JSON profiles: one Xray configuration, or 3x-ui's JSON subscription —
 // an array of whole configurations, one node each, named by its "remarks".
 // Each proxy outbound is translated into the share link that says the same
-// (vless://, vmess://, trojan://, ss://, socks5://) and that link goes
-// through the link parsers: what they map or refuse, they map or refuse here
-// too. Checked here is what a link cannot say: the chain of a dialer proxy
+// (vless://, vmess://, trojan://, ss://, socks5://, hysteria2://) and that
+// link goes through the link parsers: what they map or refuse, they map or
+// refuse here too. Checked here is what a link cannot say: the chain of a dialer proxy
 // (sockopt.dialerProxy, sing-box's detour), the HTTP proxy outbound (there is
 // no link for it), and what would make the node connect elsewhere than, or
 // not as, Xray connects.
@@ -110,6 +110,7 @@ type xraySettings struct {
 	Vnext   []xrayServer      `json:"vnext"`
 	Servers []xrayServer      `json:"servers"`
 	Headers map[string]string `json:"headers"`
+	Version json.RawMessage   `json:"version"` // Hysteria's
 }
 
 // server is the outbound's server: the settings themselves in Xray's flat
@@ -160,6 +161,7 @@ type xrayStream struct {
 	GRPCSettings        *xrayGRPC       `json:"grpcSettings"`
 	HTTPSettings        *xrayH2         `json:"httpSettings"`
 	QUICSettings        *xrayQUIC       `json:"quicSettings"`
+	HysteriaSettings    *xrayHysteria   `json:"hysteriaSettings"`
 	Sockopt             *xraySockopt    `json:"sockopt"`
 }
 
@@ -216,6 +218,13 @@ type xrayQUIC struct {
 	Header   struct {
 		Type string `json:"type"`
 	} `json:"header"`
+}
+
+// xrayHysteria are the settings of the Hysteria transport; udpIdleTimeout
+// is the client's own, masquerade the server's
+type xrayHysteria struct {
+	Version json.RawMessage `json:"version"`
+	Auth    string          `json:"auth"`
 }
 
 type xraySockopt struct {
@@ -577,15 +586,11 @@ func (f xrayFreedom) dial(outbound Outbound, dialer string) string {
 // made through (sockopt.dialerProxy), "" for the direct one
 func xrayNode(raw json.RawMessage, protocol string) (Outbound, string, error) {
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "socks", "http":
+	case "vless", "vmess", "trojan", "shadowsocks", "socks", "http", "hysteria":
 	case "":
 		return nil, "", errors.New("в записи outbound не указан протокол (protocol)")
 	case "wireguard":
 		return nil, "", errors.New("WireGuard в sing-box — это endpoint, а не outbound; такой узел приложение не импортирует")
-	case "hysteria":
-		// Xray's Hysteria 2 keeps its speed, congestion control and port
-		// hopping in the transport and the finalmask, in a model of its own
-		return nil, "", errors.New("Hysteria 2 из профиля Xray приложение не переносит — нужна ссылка hysteria2://")
 	default:
 		return nil, "", fmt.Errorf("протокол «%s» не поддерживается", token(protocol))
 	}
@@ -631,6 +636,10 @@ func xrayNode(raw json.RawMessage, protocol string) (Outbound, string, error) {
 		return nil, "", errors.New("неверный порт")
 	}
 	hostPort := net.JoinHostPort(address, strconv.Itoa(port))
+	if protocol == "hysteria" {
+		outbound, err := xrayHysteria2(s, st, hostPort, address)
+		return outbound, dialer, err
+	}
 
 	q, headers, err := streamQuery(st, address)
 	if err != nil {
@@ -735,14 +744,7 @@ func xraySSMethod(raw string) string {
 // transport's headers besides Host, which a link has no place for.
 func streamQuery(st *xrayStream, address string) (url.Values, map[string]string, error) {
 	q := url.Values{}
-	network := "tcp" // Xray's default; "method" is its newer name for "network"
-	if st.Network != nil {
-		network = *st.Network
-	}
-	if st.Method != nil {
-		network = *st.Method
-	}
-	network = strings.ToLower(strings.TrimSpace(network))
+	network := xrayNetwork(st)
 
 	var tls *xrayTLS
 	security := strings.ToLower(strings.TrimSpace(st.Security))
@@ -861,6 +863,19 @@ func streamQuery(st *xrayStream, address string) (url.Values, map[string]string,
 	return q, headers, nil
 }
 
+// xrayNetwork is the transport of a stream, in lower case: "network", or
+// "method", its newer name, which wins; Xray's default is TCP
+func xrayNetwork(st *xrayStream) string {
+	network := "tcp"
+	if st.Network != nil {
+		network = *st.Network
+	}
+	if st.Method != nil {
+		network = *st.Method
+	}
+	return strings.ToLower(strings.TrimSpace(network))
+}
+
 // tlsQuery sets the TLS parameters of a link. The server name is the
 // address when none is given, as Xray has it (a link would take the ws
 // host). The certificate checks become the link's pcs and vcn, so that
@@ -938,6 +953,115 @@ func addHeaders(outbound Outbound, headers map[string]string) {
 		}
 		transport["headers"] = all
 	}
+}
+
+// xrayHysteria2 translates Xray's Hysteria 2 — the "hysteria" protocol over
+// the transport of the same name, as 3x-ui's genHy writes it — into the
+// hysteria2:// link 3x-ui derives from the same inbound (genHysteriaLink),
+// for the link parser: Xray speaks the official protocol (HTTP/3 with the
+// auth header), as sing-box does. hysteriaSettings.auth is the password,
+// the TLS settings are a link's; of the finalmask's udp layer, salamander is
+// the obfuscation (gecko with a packetSize: Xray's GeckoConfig — the sizes
+// pad what each end sends, they need not match the server's) and udphop the
+// port hopping (its interval's lower end: sing-box hops at a fixed one).
+// Xray's other UDP masks transform the packets on both ends, sing-box has
+// none of them; quicParams (congestion control, Brutal's speeds, windows)
+// tunes the client only and is dropped, as a Clash profile's speeds are.
+// The tcp layer touches nothing of a node that runs over QUIC.
+func xrayHysteria2(s xraySettings, st *xrayStream, hostPort, address string) (Outbound, error) {
+	version := func(raw json.RawMessage) error {
+		// Xray runs Hysteria 2 only, and refuses another version
+		if v, err := rawInt(raw); err != nil || v != 2 {
+			return fmt.Errorf("Hysteria версии «%s» в профиле Xray не поддерживается (только 2)", token(strings.Trim(string(bytes.TrimSpace(raw)), `"`)))
+		}
+		return nil
+	}
+	if err := version(s.Version); err != nil {
+		return nil, err
+	}
+	if network := xrayNetwork(st); network != "hysteria" {
+		return nil, fmt.Errorf("транспорт «%s» для Hysteria 2 не поддерживается", token(network))
+	}
+	h := st.HysteriaSettings
+	if h == nil {
+		return nil, errors.New("у узла Hysteria 2 нет настроек транспорта (hysteriaSettings)")
+	}
+	if err := version(h.Version); err != nil {
+		return nil, err
+	}
+	if security := strings.ToLower(strings.TrimSpace(st.Security)); security != "tls" {
+		return nil, fmt.Errorf("Hysteria 2 работает только с TLS, а в профиле режим «%s»", token(firstNonEmpty(security, "none")))
+	}
+	tls := st.TLSSettings
+	if tls == nil {
+		tls = &xrayTLS{}
+	}
+	q := url.Values{}
+	if err := tlsQuery(q, "tls", tls, address); err != nil {
+		return nil, err
+	}
+
+	var fm struct {
+		UDP        []xrayMask      `json:"udp"`
+		QuicParams json.RawMessage `json:"quicParams"`
+	}
+	if present(st.FinalMask) && json.Unmarshal(st.FinalMask, &fm) != nil {
+		return nil, errXrayBroken
+	}
+	for _, mask := range fm.UDP {
+		switch kind := mask.kind(); kind {
+		case "salamander":
+			if q.Get("obfs") != "" {
+				return nil, errors.New("две маскировки salamander подряд не поддерживаются sing-box")
+			}
+			var salamander struct {
+				Password   string    `json:"password"`
+				PacketSize xrayRange `json:"packetSize"`
+			}
+			if present(mask.Settings) && json.Unmarshal(mask.Settings, &salamander) != nil {
+				return nil, errXrayBroken
+			}
+			obfs := "salamander"
+			if size := salamander.PacketSize; size.to > 0 {
+				if size.from <= 0 || size.to > 2048 {
+					return nil, errXrayBroken // Xray refuses it too
+				}
+				obfs = "gecko"
+			}
+			q.Set("obfs", obfs)
+			q.Set("obfs-password", salamander.Password)
+		case "udphop":
+			var hop struct {
+				Interval    xrayRange       `json:"interval"`
+				RemotePorts json.RawMessage `json:"remotePorts"`
+			}
+			if present(mask.Settings) && json.Unmarshal(mask.Settings, &hop) != nil {
+				return nil, errXrayBroken
+			}
+			// Xray's PortList: "443,20000-30000", or one port as a number
+			var ports string
+			if json.Unmarshal(hop.RemotePorts, &ports) != nil {
+				ports = string(bytes.TrimSpace(hop.RemotePorts))
+			}
+			setIf(q, "mport", ports)
+			if hop.Interval.from > 0 {
+				q.Set("mportHopInt", strconv.Itoa(hop.Interval.from))
+			}
+		case "realm":
+			return nil, errors.New("режим realm Hysteria 2 приложение не импортирует")
+		default:
+			return nil, fmt.Errorf("маскировка finalmask «%s» для Hysteria 2 не поддерживается sing-box", token(kind))
+		}
+	}
+	if present(fm.QuicParams) {
+		log.Printf("Xray profile: the QUIC parameters of a Hysteria 2 node are dropped (congestion control, speeds: the client's own)")
+	}
+
+	userinfo := ""
+	if h.Auth != "" {
+		userinfo = url.User(h.Auth).String() + "@"
+	}
+	return parseLink("hysteria2://" + userinfo + hostPort + "/?" + q.Encode())
 }
 
 // xrayPlainProxy builds a SOCKS or HTTP proxy outbound. SOCKS goes through
