@@ -138,15 +138,10 @@ func TestSIP008(t *testing.T) {
 }
 
 func TestForeignProfilesAreNamed(t *testing.T) {
-	xray := `{"outbounds": [{"protocol": "vless", "tag": "proxy", "settings": {"vnext": [{"address": "192.0.2.10", "port": 443,
-	  "users": [{"id": "` + testUUID + `", "encryption": "none"}]}]}}, {"protocol": "freedom", "tag": "direct"}]}`
-	xrayArray := `[{"remarks": "DE", "outbounds": [{"protocol": "vless", "settings": {}}]}]`
 	cases := []struct {
 		text string
 		want error
 	}{
-		{xray, errXrayProfile},
-		{xrayArray, errXrayProfile},
 		{`{"outbounds": [{"type": "direct", "tag": "direct"}]}`, errEmptyProfile},
 		{`{"hello": "world"}`, errNoLinks},
 	}

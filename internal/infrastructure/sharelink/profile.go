@@ -11,10 +11,9 @@ import (
 
 // Subscription bodies that are a whole profile rather than share links: a
 // sing-box configuration (what Marzban, Remnawave and the like serve at their
-// "sing-box" URLs) or its bare outbounds array, and SIP008 (the shadowsocks
-// online config JSON). Clash/mihomo YAML is read in clash.go. Xray JSON is
-// recognized and refused with a hint: reading it would need a converter of
-// Xray's whole config model.
+// "sing-box" URLs) or its bare outbounds array, SIP008 (the shadowsocks
+// online config JSON) and Xray JSON (xray.go). Clash/mihomo YAML is read in
+// clash.go.
 
 // profileProxyTypes are the outbound types taken from a sing-box profile;
 // the provider's structural ones (profileStructural) are its own plumbing
@@ -29,8 +28,6 @@ var profileStructural = map[string]bool{
 }
 
 var (
-	errXrayProfile = errors.New("провайдер прислал профиль Xray (JSON), приложение его не читает: " +
-		"нужна ссылка на подписку в формате v2rayN (список ссылок или base64) или sing-box")
 	errEmptyProfile = errors.New("в профиле нет серверов, которые приложение может импортировать")
 )
 
@@ -61,7 +58,8 @@ func (c *collector) profile(text string) (ok bool, err error) {
 			return false, nil
 		}
 		if xrayOutbounds(list) {
-			return true, errXrayProfile
+			c.xray(text)
+			return true, errEmptyProfileIfNone(c)
 		}
 		// A whole sing-box config
 		c.singBox(list)
@@ -81,9 +79,6 @@ func (c *collector) profile(text string) (ok bool, err error) {
 		for _, e := range r {
 			if m, isMap := e.(map[string]any); isMap {
 				if nested, isList := m["outbounds"].([]any); isList {
-					if xrayOutbounds(nested) {
-						return true, errXrayProfile
-					}
 					entries = append(entries, nested...)
 					continue
 				}
@@ -94,7 +89,8 @@ func (c *collector) profile(text string) (ok bool, err error) {
 		return false, nil
 	}
 	if xrayOutbounds(entries) {
-		return true, errXrayProfile
+		c.xray(text)
+		return true, errEmptyProfileIfNone(c)
 	}
 	if !singBoxOutbounds(entries) {
 		return false, nil
@@ -151,10 +147,6 @@ func singBoxOutbounds(entries []any) bool {
 // imported, and not in a ring: sing-box does not start with either, and
 // sing-box check does not notice.
 func (c *collector) singBox(entries []any) {
-	type candidate struct {
-		outbound Outbound
-		name     string
-	}
 	var candidates []candidate
 	direct := map[string]bool{}
 	for i, e := range entries {
@@ -203,9 +195,32 @@ func (c *collector) singBox(entries []any) {
 		candidates = append(candidates, candidate{outbound, name})
 	}
 
-	// Detours: kept inside the profile, dropped when they only say "direct",
-	// otherwise the node cannot work as the provider meant it. Repeated, as
-	// leaving out one node breaks the chains through it.
+	// A repeated tag keeps its name on the first node that has it, the later
+	// ones get a suffix (add): a detour naming a repeated tag means the first
+	// kept node of that name. The ring walk of keepChains follows one detour
+	// per name and can be wrong for repeated tags; a profile sing-box itself
+	// runs has none, and a ring that gets through is refused by the config
+	// editor's dependency check.
+	kept := c.keepChains(candidates, direct)
+	for i, cand := range candidates {
+		if kept[i] {
+			c.add(cand.outbound)
+		}
+	}
+}
+
+// candidate is a node of a profile, converted, before its detour is checked
+type candidate struct {
+	outbound Outbound
+	name     string
+}
+
+// keepChains decides which candidates are kept for their detours (a tag
+// among the candidates'): kept inside the profile, dropped when they only
+// say "direct" (a tag in direct), otherwise the node cannot work as the
+// provider meant it and is skipped. Repeated, as leaving out one node breaks
+// the chains through it.
+func (c *collector) keepChains(candidates []candidate, direct map[string]bool) []bool {
 	kept := make([]bool, len(candidates))
 	for i := range kept {
 		kept[i] = true
@@ -256,23 +271,15 @@ func (c *collector) singBox(entries []any) {
 			for steps := 0; at != "" && at != tag && steps < len(candidates); steps++ {
 				at = next[at]
 			}
-			if at == tag {
+			// No chain comes back to a node without a tag (Xray's may have
+			// none): nothing can name it
+			if at == tag && tag != "" {
 				kept[i], changed = false, true
 				c.skip(cand.name, "цепочка detour узла замыкается в кольцо — с ней sing-box не запустится")
 			}
 		}
 	}
-	// A repeated tag keeps its name on the first node that has it, the later
-	// ones get a suffix (add): a detour naming a repeated tag means the first
-	// kept node of that name. The ring walk above follows one detour per name
-	// and can be wrong for repeated tags; a profile sing-box itself runs has
-	// none, and a ring that gets through is refused by the config editor's
-	// dependency check.
-	for i, cand := range candidates {
-		if kept[i] {
-			c.add(cand.outbound)
-		}
-	}
+	return kept
 }
 
 // quotedName is a node's tag as a reason may quote it: shortened, "…" when

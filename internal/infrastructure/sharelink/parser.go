@@ -1,9 +1,9 @@
 // Package sharelink converts proxy share links (vless://, vmess://, trojan://,
 // ss://, hysteria2://, hysteria://, tuic://, anytls://, socks://) and
-// subscription bodies (lists of such links, base64 blobs, sing-box and SIP008
-// JSON profiles, Clash/mihomo YAML profiles) into sing-box outbound JSON
-// objects. sing-box core has no native share-link import, so the conversion
-// is implemented here.
+// subscription bodies (lists of such links, base64 blobs, sing-box, SIP008
+// and Xray JSON profiles, Clash/mihomo YAML profiles) into sing-box outbound
+// JSON objects. sing-box core has no native share-link import, so the
+// conversion is implemented here.
 //
 // A link sing-box cannot run as it is meant (an Xray-only transport, VLESS
 // Encryption, a plugin sing-box does not have, ...) is refused, not imported
@@ -106,7 +106,7 @@ var allSchemes = func() []string {
 
 // errNoLinks: the text holds nothing the app can read
 var errNoLinks = errors.New("в тексте нет ссылок на серверы (приложение понимает vless://, vmess://, trojan://, ss://, " +
-	"hysteria2://, hysteria://, tuic://, anytls://, socks://, их списки и подписки в base64, профили sing-box, Clash/mihomo и SIP008)")
+	"hysteria2://, hysteria://, tuic://, anytls://, socks://, их списки и подписки в base64, профили sing-box, Xray, Clash/mihomo и SIP008)")
 
 // nodeError is the refusal of one link: the reason, for the user in Russian,
 // and the node's name when the link has one
@@ -287,9 +287,9 @@ func ParseAny(text string) (Outbound, error) {
 // ParseAll extracts and parses every supported share link in text. If the
 // text contains no links directly, it is treated as a base64 subscription
 // blob (a base64-encoded list of links, the common subscription format) or
-// a JSON profile (sing-box, SIP008). Links that fail to parse are skipped as
-// long as at least one succeeds. Duplicate tags get a numeric suffix so each
-// outbound stays addressable.
+// a JSON profile (sing-box, SIP008, Xray). Links that fail to parse are
+// skipped as long as at least one succeeds. Duplicate tags get a numeric
+// suffix so each outbound stays addressable.
 func ParseAll(text string) ([]Outbound, error) {
 	outbounds, _, err := ParseAllReport(text)
 	return outbounds, err
