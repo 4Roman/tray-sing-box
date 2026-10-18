@@ -134,14 +134,26 @@ var acceptedLinks = []linkCase{
 		"vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=svc&security=tls&alpn=h2&sni=example.com#grpc-alpn",
 		`{"tls":{"alpn":["h2"]},"transport":{"type":"grpc"}}`},
 
-	// Xray's finalmask: the client-only fragment is dropped
+	// Xray's finalmask: the client-only fragment becomes sing-box's
+	// fragmentation of the ClientHello, as an Xray profile's does
+	// (TestXrayFragmentDialer): records for "tlshello", TCP segments when
+	// Xray pauses between them or segments TCP
 	{"finalmask with only fragment",
 		"vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=example.com&fm=" +
 			url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200","delay":"10-20"}}]}`) + "#fm-fragment",
-		`{"fm":null,"tls":{"enabled":true},"transport":null}`},
+		`{"fm":null,"tls":{"enabled":true,"record_fragment":true,"fragment":true},"transport":null}`},
+	{"finalmask fragment without a pause",
+		"trojan://secret@192.0.2.30:443?sni=example.com&fm=" +
+			url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200"}}]}`) + "#fm-fragment-merged",
+		`{"tls":{"record_fragment":true,"fragment":null}}`},
 	{"vmess finalmask with only fragment",
 		vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"tcp","tls":"tls","fm":"{\"tcp\":[{\"type\":\"fragment\"}]}"}`),
-		`{"fm":null,"tls":{"enabled":true}}`},
+		`{"fm":null,"tls":{"enabled":true,"record_fragment":null,"fragment":true}}`},
+	// sing-box's REALITY client fragments nothing: dropped there
+	{"finalmask fragment over REALITY",
+		"vless://" + testUUID + "@192.0.2.10:443?security=reality&sni=www.example.com&pbk=" + testPBK + "&fm=" +
+			url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200","delay":"10-20"}}]}`) + "#fm-fragment-reality",
+		`{"tls":{"reality":{"enabled":true},"record_fragment":null,"fragment":null}}`},
 	// The udp layer's masks: Xray applies them to UDP only, never to these
 	// TCP transports
 	{"finalmask udp masks leave a TCP stream alone",

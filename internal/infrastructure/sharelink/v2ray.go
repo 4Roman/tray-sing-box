@@ -362,7 +362,8 @@ func parseVLESS(link string) (Outbound, error) {
 // outbound from the link's query
 func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 	quic := strings.EqualFold(strings.TrimSpace(q.Get("type")), "quic")
-	if err := finalMask(q.Get("fm"), quic); err != nil {
+	fragment, err := finalMask(q.Get("fm"), quic)
+	if err != nil {
 		return err
 	}
 	tls, err := tlsConfig(q, host)
@@ -382,6 +383,7 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 	if transport != nil {
 		outbound["transport"] = transport
 	}
+	fragmentTLS(outbound, fragment)
 	return nil
 }
 
@@ -390,18 +392,18 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 // "udp"). Its masks — header-custom, sudoku, xmc, the UDP headers and
 // obfuscations — transform the stream on both ends: a server with one drops
 // a client that does not apply it, and sing-box has none of them. Only
-// "fragment" is the client's own business (it splits the TLS ClientHello)
-// and is dropped. Only the layer the stream travels on counts: Xray applies
-// the "udp" masks to what it sends over UDP (mKCP, hysteria, the UDP
-// dialer), never to the TCP transports of these links, so they are ignored
-// like the other settings — except under sing-box's QUIC transport, which
-// runs over UDP (overUDP). The layers are read as Xray reads them
-// (encoding/json: a key in any case). Just the mask's type is named: its
-// settings carry passwords.
-func finalMask(raw string, overUDP bool) error {
+// "fragment" is the client's own business (it splits the TLS ClientHello):
+// it comes back for fragmentTLS. Only the layer the stream travels on
+// counts: Xray applies the "udp" masks to what it sends over UDP (mKCP,
+// hysteria, the UDP dialer), never to the TCP transports of these links, so
+// they are ignored like the other settings — except under sing-box's QUIC
+// transport, which runs over UDP (overUDP). The layers are read as Xray
+// reads them (encoding/json: a key in any case). Just the mask's type is
+// named: its settings carry passwords.
+func finalMask(raw string, overUDP bool) (*xrayFragment, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	broken := errors.New("параметр fm (finalmask) в ссылке повреждён")
 	var layers struct {
@@ -409,26 +411,224 @@ func finalMask(raw string, overUDP bool) error {
 		UDP json.RawMessage `json:"udp"`
 	}
 	if json.Unmarshal([]byte(raw), &layers) != nil {
-		return broken
+		return nil, broken
 	}
-	lists := []json.RawMessage{layers.TCP}
+	fragment, other, err := tcpMasks(layers.TCP)
+	if err != nil {
+		return nil, broken // no list of masks: Xray refuses such a stream too
+	}
+	if other != "" {
+		return nil, fmt.Errorf("маскировка finalmask «%s» не поддерживается sing-box", token(other))
+	}
 	if overUDP {
-		lists = append(lists, layers.UDP)
-	}
-	for _, list := range lists {
-		var masks []struct {
-			Type string `json:"type"`
-		}
-		if len(list) > 0 && json.Unmarshal(list, &masks) != nil {
-			return broken // no list of masks: Xray refuses such a stream too
+		var masks []xrayMask
+		if len(layers.UDP) > 0 && json.Unmarshal(layers.UDP, &masks) != nil {
+			return nil, broken
 		}
 		for _, mask := range masks {
-			if kind := strings.ToLower(strings.TrimSpace(mask.Type)); kind != "fragment" {
-				return fmt.Errorf("маскировка finalmask «%s» не поддерживается sing-box", token(kind))
+			if kind := mask.kind(); kind != "fragment" {
+				return nil, fmt.Errorf("маскировка finalmask «%s» не поддерживается sing-box", token(kind))
 			}
 		}
 	}
+	return fragment, nil
+}
+
+// xrayMask is a mask of a finalmask layer
+type xrayMask struct {
+	Type     string          `json:"type"`
+	Settings json.RawMessage `json:"settings"`
+}
+
+// kind is the mask's type as Xray looks it up: in lower case
+func (m xrayMask) kind() string {
+	return strings.ToLower(strings.TrimSpace(m.Type))
+}
+
+// tcpMasks reads the "tcp" layer of a finalmask: the fragmentation its
+// "fragment" masks make (nil without one), and the type of the first other
+// mask, "" when there is none. An error: no list of masks, or a
+// fragmentation Xray would not read.
+func tcpMasks(list json.RawMessage) (fragment *xrayFragment, other string, err error) {
+	var masks []xrayMask
+	if len(list) > 0 && json.Unmarshal(list, &masks) != nil {
+		return nil, "", errXrayBroken
+	}
+	for _, mask := range masks {
+		kind := mask.kind()
+		if kind != "fragment" {
+			if other == "" {
+				other = kind
+			}
+			continue
+		}
+		f, err := fragmentOf(mask.Settings, true)
+		if err != nil {
+			return nil, "", err
+		}
+		fragment = fragment.with(f)
+	}
+	return fragment, other, nil
+}
+
+// xrayFragment is Xray's fragmentation of a connection, as far as it touches
+// a TLS ClientHello: split into TLS records ("tlshello"), sent in TCP
+// segments of their own (pauses between the pieces, or Xray's TCP
+// segmentation of the first packets). Both have a sing-box equivalent for
+// TLS: tls.record_fragment and tls.fragment.
+type xrayFragment struct {
+	records  bool
+	segments bool
+}
+
+// with is the fragmentation of both, f applied after x
+func (x *xrayFragment) with(f xrayFragment) *xrayFragment {
+	if x != nil {
+		f.records, f.segments = f.records || x.records, f.segments || x.segments
+	}
+	return &f
+}
+
+// fragmentOf reads one fragmentation: a "fragment" mask's settings (mask),
+// or a freedom's settings.fragment — Xray pauses after each piece of the
+// hello by the mask's delay or delays, by the freedom's interval. Unless it
+// pauses, Xray sends the records of "tlshello" in one write; its TCP
+// segmentation (packets "" for all, "from-to" for a range) writes every
+// piece on its own. A range past the first packet leaves the hello whole.
+func fragmentOf(raw json.RawMessage, mask bool) (xrayFragment, error) {
+	var settings struct {
+		Packets string `json:"packets"`
+	}
+	var pauses bool
+	if mask {
+		var m struct {
+			Delay  xrayRange   `json:"delay"`
+			Delays []xrayRange `json:"delays"`
+		}
+		if present(raw) && (json.Unmarshal(raw, &settings) != nil || json.Unmarshal(raw, &m) != nil) {
+			return xrayFragment{}, errXrayBroken
+		}
+		delays := m.Delays
+		if len(delays) == 0 {
+			delays = []xrayRange{m.Delay}
+		}
+		// Xray merges the records only for a single delay of 0
+		pauses = len(delays) != 1 || delays[0].to > 0
+	} else {
+		var f struct {
+			Interval xrayRange `json:"interval"`
+		}
+		if present(raw) && (json.Unmarshal(raw, &settings) != nil || json.Unmarshal(raw, &f) != nil) {
+			return xrayFragment{}, errXrayBroken
+		}
+		pauses = f.Interval.to > 0
+	}
+	switch packets := strings.ToLower(settings.Packets); packets {
+	case "tlshello":
+		return xrayFragment{records: true, segments: pauses}, nil
+	case "":
+		return xrayFragment{segments: true}, nil
+	default:
+		from, _, err := parseXrayRange(packets)
+		if err != nil {
+			return xrayFragment{}, errXrayBroken
+		}
+		return xrayFragment{segments: from <= 1}, nil
+	}
+}
+
+// xrayRange is Xray's Int32Range: a number, or a string with one ("10") or
+// a range ("10-20"); from is the smaller end
+type xrayRange struct {
+	from, to int
+}
+
+func (r *xrayRange) UnmarshalJSON(data []byte) error {
+	var s string
+	if json.Unmarshal(data, &s) == nil {
+		from, to, err := parseXrayRange(s)
+		if err != nil {
+			return err
+		}
+		r.from, r.to = min(from, to), max(from, to)
+		return nil
+	}
+	var n int32
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	r.from, r.to = int(n), int(n)
 	return nil
+}
+
+// parseXrayRange reads a range as Xray's ParseRangeString does: "" is 0, a
+// number is itself, else two numbers around a '-' (the first one may be
+// negative)
+func parseXrayRange(s string) (from, to int, err error) {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n, n, nil
+	}
+	if s == "" {
+		return 0, 0, nil
+	}
+	cut := strings.Index(s, "-")
+	if strings.HasPrefix(s, "-") {
+		cut = strings.Index(s[1:], "-") + 1
+	}
+	if cut <= 0 {
+		return 0, 0, errXrayBroken
+	}
+	from, errFrom := strconv.Atoi(s[:cut])
+	to, errTo := strconv.Atoi(s[cut+1:])
+	if errFrom != nil || errTo != nil {
+		return 0, 0, errXrayBroken
+	}
+	return from, to, nil
+}
+
+// fragmentTLS carries Xray's fragmentation of a node's connection over to
+// the node's TLS: "tlshello" becomes tls.record_fragment, pieces in TCP
+// segments of their own tls.fragment. sing-box splits the hello at the
+// labels of the server name where Xray splits at random lengths — what a
+// filter matching the name sees is cut either way. Over REALITY (sing-box's
+// client fragments nothing there), QUIC or without TLS (Xray's tlshello
+// leaves such a connection alone) sing-box has no equivalent: the
+// fragmentation is dropped, and the server takes the node all the same.
+func fragmentTLS(outbound Outbound, f *xrayFragment) {
+	if f == nil {
+		return
+	}
+	tls, _ := outbound["tls"].(map[string]any)
+	_, reality := tls["reality"]
+	switch {
+	case tls == nil:
+		log.Printf("Xray fragmentation dropped: the node has no TLS, sing-box splits a TLS ClientHello only")
+	case reality:
+		log.Printf("Xray fragmentation dropped: sing-box fragments nothing over REALITY")
+	case overQUIC(outbound):
+		log.Printf("Xray fragmentation dropped: the node runs over QUIC")
+	case !f.records && !f.segments:
+		log.Printf("Xray fragmentation dropped: it leaves the ClientHello whole")
+	default:
+		if f.records {
+			tls["record_fragment"] = true
+		}
+		if f.segments {
+			tls["fragment"] = true
+		}
+		log.Printf("Xray fragmentation carried over as tls.record_fragment=%t, tls.fragment=%t (split at the server name)", f.records, f.segments)
+	}
+}
+
+// overQUIC: the node's connection is QUIC (its outbound type, or the QUIC
+// transport), it sends nothing over TCP
+func overQUIC(outbound Outbound) bool {
+	switch outbound["type"] {
+	case "hysteria", "hysteria2", "tuic":
+		return true
+	}
+	transport, _ := outbound["transport"].(map[string]any)
+	return transport["type"] == "quic"
 }
 
 // fitTLSToTransport adjusts the tls object to the transport it carries.
@@ -548,7 +748,8 @@ func parseVMess(link string) (Outbound, error) {
 	if json.Unmarshal(v.Fm, &fm) != nil {
 		fm = string(v.Fm) // an object, not a string holding one
 	}
-	if err := finalMask(fm, quic); err != nil {
+	fragment, err := finalMask(fm, quic)
+	if err != nil {
 		return nil, err
 	}
 
@@ -644,6 +845,7 @@ func parseVMess(link string) (Outbound, error) {
 	if transport != nil {
 		outbound["transport"] = transport
 	}
+	fragmentTLS(outbound, fragment)
 	return outbound, nil
 }
 

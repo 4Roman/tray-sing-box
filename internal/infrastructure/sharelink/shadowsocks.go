@@ -117,12 +117,14 @@ func parseShadowsocks(link string) (Outbound, error) {
 	// UDP one breaks only what the node carries over UDP, so that stays off
 	// (network "tcp": sing-box then sends no UDP through the node) and the
 	// rest works as meant
-	if err := finalMask(q.Get("fm"), false); err != nil {
+	fragment, err := finalMask(q.Get("fm"), false)
+	if err != nil {
 		return nil, err
 	}
-	if finalMask(q.Get("fm"), true) != nil {
+	if _, err := finalMask(q.Get("fm"), true); err != nil {
 		outbound["network"] = "tcp"
 	}
+	fragmentTLS(outbound, fragment) // no TLS here: dropped
 	// 3x-ui runs Shadowsocks over any Xray transport and TLS too, and writes
 	// them into the query as on the other links (type=ws&path=…,
 	// security=tls&sni=…). sing-box's shadowsocks has neither: imported

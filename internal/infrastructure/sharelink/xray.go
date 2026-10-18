@@ -321,7 +321,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 		n        int
 	}
 	var entries []entry
-	freedoms := map[string]string{} // a freedom's tag -> what makes it more than direct ("" when nothing)
+	freedoms := map[string]xrayFreedom{} // a freedom's tag -> what it does besides the direct connection
 	for _, raw := range p.outbounds {
 		if trimmed := bytes.TrimSpace(raw); len(trimmed) == 0 || trimmed[0] != '{' {
 			continue // no outbound at all, as in a sing-box profile
@@ -331,7 +331,7 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 		e.broken = json.Unmarshal(raw, &e.head) != nil
 		e.protocol = strings.ToLower(strings.TrimSpace(e.head.Protocol))
 		if e.protocol == "freedom" && !e.broken {
-			freedoms[strings.TrimSpace(e.head.Tag)] = freedomExtra(raw)
+			freedoms[strings.TrimSpace(e.head.Tag)] = freedomOf(raw)
 		}
 		entries = append(entries, e)
 	}
@@ -367,15 +367,16 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 			continue
 		}
 		if dialer != "" {
-			extra, isFreedom := freedoms[dialer]
-			if reason := dialerProblem(dialer, extra, isFreedom); reason != "" {
-				c.skip(name, reason)
-				continue
-			}
-			if !isFreedom {
+			if freedom, isFreedom := freedoms[dialer]; isFreedom {
+				// The direct connection sing-box makes anyway, with what the
+				// freedom adds to it
+				if reason := freedom.dial(outbound, dialer); reason != "" {
+					c.skip(name, reason)
+					continue
+				}
+			} else {
 				outbound["detour"] = dialer // checked by keepChains
 			}
-			// A plain freedom is the direct connection sing-box makes anyway
 		}
 		if tag == "" {
 			tag = outbound.Tag() // the link parser's own
@@ -416,10 +417,25 @@ func (c *collector) xrayConfig(p xrayProfile, counter *int, taken map[string]str
 	}
 }
 
-// freedomExtra names what makes a freedom outbound more than the direct
-// connection, "" when nothing: "fragment" (Xray's fragmentation, in either
-// of its spellings), "broken", or the key of the setting
-func freedomExtra(raw json.RawMessage) string {
+// xrayFreedom is what a freedom outbound does to the connections it makes
+// besides connecting directly: a node dialing through it (its dialerProxy)
+// is the direct node with that
+type xrayFreedom struct {
+	// extra is what sing-box cannot do as Xray does it: "broken", the key of
+	// the setting, a mask by its type; "" when nothing
+	extra string
+	// fragment is Xray's fragmentation of its TCP connections (in either of
+	// Xray's spellings: settings.fragment, a "fragment" mask of its
+	// finalmask)
+	fragment *xrayFragment
+	// udpMask is the type of the first mask of its finalmask's "udp" layer,
+	// which Xray applies to what it sends over UDP only
+	udpMask string
+}
+
+// freedomOf reads a freedom outbound
+func freedomOf(raw json.RawMessage) xrayFreedom {
+	broken := xrayFreedom{extra: "broken"}
 	var f struct {
 		Settings struct {
 			Redirect      string          `json:"redirect"`
@@ -429,75 +445,94 @@ func freedomExtra(raw json.RawMessage) string {
 		StreamSettings *xrayStream `json:"streamSettings"`
 	}
 	if json.Unmarshal(raw, &f) != nil {
-		return "broken"
+		return broken
 	}
+	var free xrayFreedom
 	// Xray fragments when the key is there at all
 	if present(f.Settings.Fragment) {
-		return "fragment"
+		fragment, err := fragmentOf(f.Settings.Fragment, false)
+		if err != nil {
+			return broken
+		}
+		free.fragment = free.fragment.with(fragment)
 	}
 	if strings.TrimSpace(f.Settings.Redirect) != "" {
-		return "redirect"
+		free.extra = "redirect"
+		return free
 	}
 	// Xray sends a PROXY protocol header of version 1 or 2, ignores others
 	if v, err := rawInt(f.Settings.ProxyProtocol); err == nil && (v == 1 || v == 2) {
-		return "proxyProtocol"
+		free.extra = "proxyProtocol"
+		return free
 	}
 	st := f.StreamSettings
 	if st == nil {
-		return ""
+		return free
 	}
 	if present(st.FinalMask) {
-		// Newer Xray fragments by a mask of the stream
 		var layers struct {
-			TCP []struct {
-				Type string `json:"type"`
-			} `json:"tcp"`
+			TCP json.RawMessage `json:"tcp"`
 			UDP json.RawMessage `json:"udp"`
 		}
-		if json.Unmarshal(st.FinalMask, &layers) != nil {
-			return "broken"
+		var udp []xrayMask
+		if json.Unmarshal(st.FinalMask, &layers) != nil || len(layers.UDP) > 0 && json.Unmarshal(layers.UDP, &udp) != nil {
+			return broken
 		}
-		for _, mask := range layers.TCP {
-			if strings.EqualFold(strings.TrimSpace(mask.Type), "fragment") {
-				return "fragment"
-			}
+		// Newer Xray fragments by a mask of the stream
+		fragment, other, err := tcpMasks(layers.TCP)
+		if err != nil {
+			return broken
 		}
-		if len(layers.TCP) > 0 || present(layers.UDP) && string(bytes.TrimSpace(layers.UDP)) != "[]" {
-			return "finalmask"
+		if other != "" {
+			free.extra = fmt.Sprintf("finalmask «%s»", token(other))
+			return free
+		}
+		if fragment != nil {
+			free.fragment = free.fragment.with(*fragment)
+		}
+		if len(udp) > 0 {
+			free.udpMask = udp[0].kind()
 		}
 	}
 	security := strings.ToLower(strings.TrimSpace(st.Security))
 	switch {
 	case st.Sockopt != nil && strings.TrimSpace(st.Sockopt.DialerProxy) != "":
-		return "dialerProxy"
+		free.extra = "dialerProxy"
 	case present(st.Address):
-		return "address"
+		free.extra = "address"
 	case security != "" && security != "none":
-		return "security"
+		free.extra = "security"
 	}
-	return ""
+	return free
 }
 
-// dialerProblem is the reason a node dialing through the outbound tagged
-// dialer is refused, "" when it is not (a proxy outbound — its chain is
-// checked by keepChains — or a plain freedom)
-func dialerProblem(dialer, extra string, isFreedom bool) string {
-	switch {
-	case !isFreedom || extra == "":
-		return ""
-	case extra == "fragment":
-		// Xray splits the TLS ClientHello into records of random length (or
-		// the first packets into segments) with pauses between them; sing-box
-		// splits it only at the labels of the server name, and over REALITY
-		// not at all (tls.fragment, tls.record_fragment): not the same packets
-		// on the wire, and a provider fragments because the plain ones are
-		// blocked
-		return fmt.Sprintf("узел подключается через «%s», а фрагментацию пакетов Xray (fragment) sing-box не повторяет — "+
-			"без неё узел может не подключиться", quotedName(dialer))
-	case extra == "broken":
+// dial applies the freedom tagged dialer to the node dialing through it: the
+// reason the node is refused, "" when it is not. Its fragmentation goes to
+// the node's TLS as the node's own would (fragmentTLS). Its UDP masks touch
+// only a node that sends UDP itself: a node over QUIC sends nothing else and
+// is refused, a Shadowsocks or SOCKS node keeps its TCP (UDP off, as with an
+// ss:// link's own UDP mask); the others carry UDP inside their TCP
+// connection.
+func (f xrayFreedom) dial(outbound Outbound, dialer string) string {
+	switch f.extra {
+	case "":
+	case "broken":
 		return fmt.Sprintf("узел подключается через «%s», а его запись повреждена", quotedName(dialer))
+	default:
+		return fmt.Sprintf("узел подключается через «%s» с параметром %s — такого в sing-box нет", quotedName(dialer), f.extra)
 	}
-	return fmt.Sprintf("узел подключается через «%s» с параметром %s — такого в sing-box нет", quotedName(dialer), extra)
+	if f.udpMask != "" {
+		switch {
+		case overQUIC(outbound):
+			return fmt.Sprintf("узел подключается через «%s» с маскировкой finalmask «%s» — такого в sing-box нет",
+				quotedName(dialer), token(f.udpMask))
+		case outbound["type"] == "shadowsocks" || outbound["type"] == "socks":
+			log.Printf("Xray profile: UDP of a node left off, its dialer masks UDP (finalmask %q)", token(f.udpMask))
+			outbound["network"] = "tcp"
+		}
+	}
+	fragmentTLS(outbound, f.fragment)
+	return ""
 }
 
 // xrayNode converts one proxy outbound; dialer is the tag its connection is
@@ -881,10 +916,12 @@ func xrayPlainProxy(protocol string, q url.Values, s xraySettings, server xraySe
 		return nil, fmt.Errorf("режим защиты «%s» для %s не поддерживается sing-box", token(security), kind)
 	}
 	// As on an ss:// link: a TCP mask is refused, a UDP one leaves UDP off
-	if err := finalMask(q.Get("fm"), false); err != nil {
+	fragment, err := finalMask(q.Get("fm"), false)
+	if err != nil {
 		return nil, err
 	}
-	udpMasked := finalMask(q.Get("fm"), true) != nil
+	_, err = finalMask(q.Get("fm"), true)
+	udpMasked := err != nil
 
 	user := s.user(server)
 	if protocol == "socks" {
@@ -901,6 +938,7 @@ func xrayPlainProxy(protocol string, q url.Values, s xraySettings, server xraySe
 		if udpMasked {
 			outbound["network"] = "tcp"
 		}
+		fragmentTLS(outbound, fragment) // no TLS here: dropped
 		return outbound, nil
 	}
 
@@ -934,6 +972,7 @@ func xrayPlainProxy(protocol string, q url.Values, s xraySettings, server xraySe
 		tls["alpn"] = []string{"http/1.1"}
 		outbound["tls"] = tls
 	}
+	fragmentTLS(outbound, fragment)
 	return outbound, nil
 }
 

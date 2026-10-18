@@ -315,29 +315,23 @@ func TestXray3xuiBalancer(t *testing.T) {
 	checkOutbound(t, byTag["bal-1-vless"], `{"server":"203.0.113.3"}`)
 }
 
-// 3x-ui v2.5 with fragmentation on: sing-box fragments otherwise (tls.fragment
-// splits the server name only, and nothing over REALITY), so the node that
-// dials through the "fragment" freedom is left out with the reason — in
-// either of Xray's spellings of the fragmentation. A plain freedom as the
-// dialer is the direct connection.
+// 3x-ui v2.5 with fragmentation on: the node dials through the "fragment"
+// freedom, which is the direct connection with Xray's fragmentation. Over
+// TLS sing-box fragments the ClientHello too ("tlshello" ->
+// tls.record_fragment, pieces sent apart -> tls.fragment); over REALITY,
+// QUIC or without TLS it has nothing alike, and the node is imported without
+// (Xray's tlshello leaves a connection without TLS alone). Either of Xray's
+// spellings of the fragmentation, and the node's own finalmask, the way
+// current 3x-ui writes it (TestXrayNodeFragment), come to the same.
 func TestXrayFragmentDialer(t *testing.T) {
 	byTag, tags, reasons := parseXray(t, xray3xuiFragment)
-	if strings.Join(tags, "|") != "NL-old-vmess" {
-		t.Fatalf("imported %q", tags)
+	if strings.Join(tags, "|") != "NL-bob|NL-old-vmess" || len(reasons) != 0 {
+		t.Fatalf("imported %q, skipped %v", tags, reasons)
 	}
+	checkOutbound(t, byTag["NL-bob"], `{"type":"vless","server":"203.0.113.20","uuid":"`+testUUID+`","flow":"xtls-rprx-vision","detour":null,
+	  "tls":{"reality":{"enabled":true},"fragment":null,"record_fragment":null}}`)
 	checkOutbound(t, byTag["NL-old-vmess"], `{"type":"vmess","server":"203.0.113.21","server_port":80,"security":"auto","tls":null,
 	  "transport":{"type":"http","method":"GET","path":"/index","host":["a.example.com","b.example.com"]}}`)
-	checkReasons(t, reasons, map[string]string{"NL-bob": "фрагментацию пакетов Xray (fragment) sing-box не повторяет"})
-
-	finalmaskFragment := strings.Replace(xray3xuiFragment,
-		`"settings": {"domainStrategy": "AsIs", "fragment": {"packets": "tlshello", "length": "100-200", "interval": "10-20"}},
-     "streamSettings": {"sockopt"`,
-		`"streamSettings": {"finalmask": {"tcp": [{"type": "Fragment", "settings": {"packets": "tlshello", "length": "100-200", "delay": "10-20"}}]}, "sockopt"`, 1)
-	if finalmaskFragment == xray3xuiFragment {
-		t.Fatal("the fixture did not change")
-	}
-	_, _, reasons = parseXray(t, finalmaskFragment)
-	checkReasons(t, reasons, map[string]string{"NL-bob": "фрагментацию пакетов Xray (fragment)"})
 
 	viaDirect := strings.Replace(xray3xuiFragment, `"dialerProxy": "fragment"`, `"dialerProxy": "direct"`, 1)
 	byTag, _, reasons = parseXray(t, viaDirect)
@@ -345,6 +339,132 @@ func TestXrayFragmentDialer(t *testing.T) {
 		t.Fatalf("imported %v, skipped %v", byTag, reasons)
 	}
 	checkOutbound(t, byTag["NL-bob"], `{"type":"vless","server":"203.0.113.20","uuid":"`+testUUID+`","flow":"xtls-rprx-vision","detour":null}`)
+
+	// One node and the freedom it dials through
+	viaFreedom := func(node, freedom string) string {
+		return `{"outbounds": [` + node + `, {"protocol": "freedom", "tag": "frag", ` + freedom + `}]}`
+	}
+	const tlsWS = `{"protocol": "vless", "tag": "n", "settings": {"address": "203.0.113.20", "port": 443, "id": "` + testUUID + `"},
+	  "streamSettings": {"network": "ws", "security": "tls", "tlsSettings": {"serverName": "nl.example.com"}, "wsSettings": {"path": "/ws"},
+	    "sockopt": {"dialerProxy": "frag"}}}`
+	const ss = `{"protocol": "shadowsocks", "tag": "n", "settings": {"servers": [{"address": "203.0.113.21", "port": 8388,
+	  "method": "chacha20-ietf-poly1305", "password": "pw"}]}, "streamSettings": {"sockopt": {"dialerProxy": "frag"}}}`
+	const vmessWS = `{"protocol": "vmess", "tag": "n", "settings": {"address": "203.0.113.22", "port": 80, "id": "` + testUUID + `"},
+	  "streamSettings": {"network": "ws", "wsSettings": {"path": "/ws"}, "sockopt": {"dialerProxy": "frag"}}}`
+	const quic = `{"protocol": "vless", "tag": "n", "settings": {"address": "203.0.113.23", "port": 443, "id": "` + testUUID + `"},
+	  "streamSettings": {"network": "quic", "security": "tls", "tlsSettings": {"serverName": "q.example.com"}, "sockopt": {"dialerProxy": "frag"}}}`
+	freedomFragment := func(fragment string) string { return `"settings": {"fragment": ` + fragment + `}` }
+	maskFragment := func(settings string) string {
+		return `"streamSettings": {"finalmask": {"tcp": [{"type": "Fragment", "settings": ` + settings + `}]}}`
+	}
+	cases := []struct {
+		name, node, freedom, want string
+	}{
+		// Pauses between the records: each one is a TCP segment of its own
+		{"tlshello with an interval", tlsWS, freedomFragment(`{"packets": "tlshello", "length": "100-200", "interval": "10-20"}`),
+			`{"detour":null,"tls":{"server_name":"nl.example.com","record_fragment":true,"fragment":true}}`},
+		{"the mask's spelling", tlsWS, maskFragment(`{"packets": "tlshello", "length": "100-200", "delay": "10-20"}`),
+			`{"detour":null,"tls":{"record_fragment":true,"fragment":true}}`},
+		// Without a pause Xray sends the records in one write
+		{"tlshello without an interval", tlsWS, freedomFragment(`{"packets": "tlshello", "length": "100-200", "interval": 0}`),
+			`{"tls":{"record_fragment":true,"fragment":null}}`},
+		{"the mask's single delay of 0", tlsWS, maskFragment(`{"packets": "tlshello", "length": "100-200", "delay": "0"}`),
+			`{"tls":{"record_fragment":true,"fragment":null}}`},
+		{"the mask's delays", tlsWS, maskFragment(`{"packets": "tlshello", "lengths": ["10-20", "100-200"], "delays": [0, 0]}`),
+			`{"tls":{"record_fragment":true,"fragment":true}}`},
+		// TCP segmentation of the first packets
+		{"packets 1-3", tlsWS, freedomFragment(`{"packets": "1-3", "length": "1-5", "interval": "1"}`),
+			`{"tls":{"record_fragment":null,"fragment":true}}`},
+		{"every packet", tlsWS, maskFragment(`{"length": "1-5"}`),
+			`{"tls":{"record_fragment":null,"fragment":true}}`},
+		{"packets past the hello", tlsWS, freedomFragment(`{"packets": "2-5", "length": "1-5", "interval": "1"}`),
+			`{"detour":null,"tls":{"record_fragment":null,"fragment":null}}`},
+		// Nothing for sing-box to fragment: the plain node
+		{"no TLS: Shadowsocks", ss, freedomFragment(`{"packets": "tlshello", "length": "100-200", "interval": "10-20"}`),
+			`{"type":"shadowsocks","detour":null,"tls":null,"network":null}`},
+		{"no TLS: VMess over ws", vmessWS, maskFragment(`{"packets": "tlshello", "length": "100-200", "delay": "10-20"}`),
+			`{"type":"vmess","detour":null,"tls":null,"transport":{"type":"ws"}}`},
+		{"QUIC", quic, freedomFragment(`{"packets": "1-1", "length": "1-5", "interval": "1"}`),
+			`{"detour":null,"tls":{"fragment":null,"record_fragment":null},"transport":{"type":"quic"}}`},
+		// The udp layer of the freedom's finalmask: nothing for a node over
+		// TCP, UDP off for one that sends UDP itself
+		{"udp masks, TCP node", tlsWS, `"streamSettings": {"finalmask": {"udp": [{"type": "noise", "settings": {"noise": []}}]}}`,
+			`{"type":"vless","detour":null,"tls":{"fragment":null}}`},
+		{"udp masks, Shadowsocks", ss, `"streamSettings": {"finalmask": {"udp": [{"type": "noise"}], "tcp": [{"type": "fragment"}]}}`,
+			`{"type":"shadowsocks","detour":null,"network":"tcp"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			byTag, _, reasons := parseXray(t, viaFreedom(c.node, c.freedom))
+			if len(reasons) != 0 || byTag["n"] == nil {
+				t.Fatalf("imported %v, skipped %v", byTag, reasons)
+			}
+			checkOutbound(t, byTag["n"], c.want)
+		})
+	}
+
+	refused := []struct {
+		name, node, freedom, reason string
+	}{
+		{"udp masks, QUIC node", quic, `"streamSettings": {"finalmask": {"udp": [{"type": "Noise"}]}}`, "через «frag» с маскировкой finalmask «noise»"},
+		{"another tcp mask", tlsWS, `"streamSettings": {"finalmask": {"tcp": [{"type": "fragment"}, {"type": "sudoku", "settings": {"password": "` + testSecret + `"}}]}}`,
+			"через «frag» с параметром finalmask «sudoku»"},
+		{"fragment Xray cannot read", tlsWS, freedomFragment(`{"packets": "tls-hello", "length": "100-200", "interval": "10-20"}`),
+			"через «frag», а его запись повреждена"},
+		{"a range Xray cannot read", tlsWS, maskFragment(`{"packets": "tlshello", "delay": "10-` + testSecret + `"}`),
+			"через «frag», а его запись повреждена"},
+		{"redirect with a fragment", tlsWS, `"settings": {"redirect": "198.51.100.2:443", "fragment": {"packets": "tlshello"}}`,
+			"через «frag» с параметром redirect"},
+	}
+	for _, c := range refused {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, err := ParseAllReport(viaFreedom(c.node, c.freedom))
+			if err == nil || !strings.Contains(err.Error(), c.reason) || strings.Contains(err.Error(), testSecret) {
+				t.Errorf("error %v, want it to say %q", err, c.reason)
+			}
+		})
+	}
+}
+
+// Current 3x-ui writes the JSON subscription's fragmentation into every
+// node's own finalmask (applyGlobalFinalMask): the node comes out as the one
+// dialing through the fragment freedom of 3x-ui v2.5 does
+func TestXrayNodeFragment(t *testing.T) {
+	const fragment = `{"packets": "tlshello", "length": "100-200", "interval": "10-20"}`
+	const mask = `{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "length": "100-200", "delay": "10-20"}}],
+	  "udp": [{"type": "udphop", "settings": {"mode": "intervalRemote", "remotePorts": "20000-30000"}}]}`
+	stream := map[string]string{
+		"reality": `"network": "tcp", "security": "reality",
+		  "realitySettings": {"publicKey": "` + testPBK + `", "fingerprint": "chrome", "shortId": "6ba85179", "serverName": "www.example.com"}`,
+		"tls": `"network": "ws", "security": "tls", "tlsSettings": {"serverName": "nl.example.com", "alpn": ["h2", "http/1.1"]},
+		  "wsSettings": {"path": "/ws"}`,
+	}
+	node := func(remarks, stream, extra string) string {
+		return `{"remarks": "` + remarks + `", "outbounds": [{"protocol": "vless", "tag": "proxy",
+		  "settings": {"address": "203.0.113.20", "port": 443, "id": "` + testUUID + `", "encryption": "none"},
+		  "streamSettings": {` + stream + extra + `}}, ` + xrayDefaultOutbounds + `,
+		  {"tag": "fragment", "protocol": "freedom", "settings": {"fragment": ` + fragment + `}}]}`
+	}
+	for name, st := range stream {
+		t.Run(name, func(t *testing.T) {
+			own, _, reasons := parseXray(t, "["+node("A", st, `, "finalmask": `+mask)+"]")
+			if len(reasons) != 0 {
+				t.Fatalf("skipped %v", reasons)
+			}
+			dialer, _, reasons := parseXray(t, "["+node("A", st, `, "sockopt": {"dialerProxy": "fragment"}`)+"]")
+			if len(reasons) != 0 {
+				t.Fatalf("skipped %v", reasons)
+			}
+			if a, b := xrayContent(own["A"]), xrayContent(dialer["A"]); a != b {
+				t.Errorf("the node's own fragmentation:\n%s\nthrough the freedom:\n%s", a, b)
+			}
+			if name == "tls" {
+				checkOutbound(t, own["A"], `{"tls":{"record_fragment":true,"fragment":true,"alpn":null},"transport":{"type":"ws"}}`)
+			} else {
+				checkOutbound(t, own["A"], `{"tls":{"reality":{"enabled":true},"record_fragment":null,"fragment":null}}`)
+			}
+		})
+	}
 }
 
 // A config of the user's own: a dialer chain becomes a detour, the outbounds
