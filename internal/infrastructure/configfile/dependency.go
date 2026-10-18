@@ -39,6 +39,9 @@ func (p dependencyProblem) String() string {
 		if kind == "" {
 			kind = "outbound"
 		}
+		if p.missing == "" {
+			return fmt.Sprintf("%s указывает на пустое имя, а %s без имени не бывает", p.origin, kind)
+		}
 		return fmt.Sprintf("%s указывает на «%s», а такого %s нет", p.origin, p.missing, kind)
 	case p.missing != "" && p.group:
 		return fmt.Sprintf("в группе «%s» есть «%s», а такого outbound нет", p.tags[0], p.missing)
@@ -224,7 +227,9 @@ func referenceProblems(cfg map[string]any) []dependencyProblem {
 	for _, route := range objects(cfg, "route") {
 		each(route, "rule_set", func(rs map[string]any) {
 			for _, tag := range ruleSetTags(rs) {
-				ruleSets[tag] = true
+				if tag != "" {
+					ruleSets[tag] = true
+				}
 			}
 		})
 	}
@@ -242,7 +247,7 @@ func referenceProblems(cfg map[string]any) []dependencyProblem {
 	check := func(present map[string]bool, p dependencyProblem, tags []string) {
 		for _, tag := range tags {
 			key := p.key + "\x00" + tag
-			if tag == "" || present[tag] || seen[key] {
+			if present[tag] || seen[key] {
 				continue
 			}
 			seen[key] = true
@@ -414,17 +419,20 @@ func ruleSetTags(rs map[string]any) []string {
 	return tags
 }
 
-// stringTag is the tag a field holding one names (none when it holds
-// anything else: sing-box check refuses that)
+// stringTag is the tag a field holding one names: none when it is empty —
+// sing-box reads "" there as not set — or holds anything else (sing-box
+// check refuses that)
 func stringTag(v any) []string {
-	if s, ok := v.(string); ok {
+	if s, ok := v.(string); ok && s != "" {
 		return []string{s}
 	}
 	return nil
 }
 
 // tagList is the tags a field sing-box reads as a tag or a list of them
-// names (badoption.Listable: rule_set, preferred_by, a rule set's tag)
+// names (badoption.Listable: rule_set, preferred_by, a rule set's tag). An
+// empty one is kept: there it is one more tag sing-box looks up — and never
+// finds — not an unset field
 func tagList(v any) []string {
 	switch v := v.(type) {
 	case string:

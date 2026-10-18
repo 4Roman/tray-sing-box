@@ -68,6 +68,20 @@ func TestStartReferenceProblems(t *testing.T) {
 			  "Rule_Set": [{"type": "remote", "Tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs"}]}}`,
 			[]string{"rule_set правила маршрутизации указывает на «gone», а такого rule-set нет"},
 		},
+		// sing-box reads "" in a list as one more tag to look up, never found
+		"empty rule set name": {
+			`{` + outbounds + `, "route": {"rules": [{"rule_set": ["ads", ""], "outbound": "direct"}, {"rule_set": "", "action": "reject"}], "rule_set": [` + ads + `]}}`,
+			[]string{"rule_set правила маршрутизации указывает на пустое имя, а rule-set без имени не бывает"},
+		},
+		"empty preferred_by name": {
+			`{` + outbounds + `, "route": {"rules": [{"preferred_by": [""], "outbound": "direct"}]}}`,
+			[]string{"preferred_by правила маршрутизации указывает на пустое имя, а outbound без имени не бывает"},
+		},
+		// Where a field holds one tag, "" is not set: no problem
+		"empty single tags": {
+			`{` + outbounds + `, "route": {"final": "", "default_http_client": "", "rule_set": [{"type": "remote", "tag": "ads", "format": "binary", "url": "https://rules.example.com/ads.srs", "download_detour": ""}]}}`,
+			nil,
+		},
 		"rule set tagged by a list": {
 			`{` + outbounds + `, "route": {"rules": [{"rule_set": "geosite-ru", "outbound": "direct"}],
 			  "rule_set": [{"type": "remote", "tag": ["geoip-ru", "geosite-ru"], "format": "binary", "url": "https://rules.example.com/{tag}.srs"}]}}`,
