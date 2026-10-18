@@ -24,10 +24,11 @@ import (
 // their "clash" URLs) or of a proxy-provider file. Every entry is translated
 // into the share link that says the same thing and read by the link
 // parsers, so every mapping and every refusal of the links applies to it
-// unchanged. What no link can carry is refused with the reason when the
-// node cannot work without it (ShadowTLS, a client certificate, SOCKS over
-// TLS), and left out when it is the client's own business (multiplexing,
-// UDP relay hints, buffer sizes, Hysteria 2 bandwidth). The groups and the
+// unchanged. What no link can carry is set on the outbound when sing-box
+// has it (UDP over TCP), refused with the reason when the node cannot work
+// without it (ShadowTLS, a client certificate, SOCKS over TLS), and left
+// out when it is the client's own business (multiplexing, UDP relay hints,
+// buffer sizes, Hysteria 2 bandwidth). The groups and the
 // rules of a profile are the provider's routing, not servers: not read. Of
 // its proxy-providers the inline lists are read, their nodes being entries
 // as well; a list mihomo would download is not followed.
@@ -446,6 +447,7 @@ func clashOutbound(v *clashValue, index int) (Outbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	maps.Copy(outbound, e.extra)
 	outbound["tag"] = name
 	if detour != "" && detour != "DIRECT" {
 		outbound["detour"] = detour
@@ -889,10 +891,20 @@ func clashShadowsocks(m clashMap) (string, error) {
 	if m.flag("tls") {
 		q.Set("security", "tls")
 	}
+	// UDP inside the TCP connection (a server reachable over TCP alone),
+	// sing-box's own protocol that mihomo speaks: no link carries it.
+	// mihomo's version is 1 when none is given (sing-box's own is 2), and a
+	// version it does not know refuses the node
+	version := m.integer("udp-over-tcp-version")
+	switch version {
+	case 0:
+		version = 1
+	case 1, 2:
+	default:
+		return "", errors.New("версия UDP over TCP (udp-over-tcp-version) может быть только 1 или 2")
+	}
 	if m.flag("udp-over-tcp") {
-		// UDP then goes to the server as UDP, which a Shadowsocks server
-		// takes as well
-		m.drop("udp-over-tcp")
+		m.e.extra = map[string]any{"udp_over_tcp": map[string]any{"enabled": true, "version": version}}
 	}
 	link := "ss://" + base64.RawURLEncoding.EncodeToString([]byte(cipher+":"+password)) + "@" + net.JoinHostPort(server, strconv.Itoa(port))
 	if len(q) > 0 {
@@ -1215,10 +1227,13 @@ func clashKey(key string) string {
 }
 
 // clashEntry is the state of one entry's translation: the first malformed
-// field (it explains a refusal best) and the options left out (logged)
+// field (it explains a refusal best), the options left out (logged) and the
+// options of the outbound that no link carries (set on the outbound the
+// link becomes)
 type clashEntry struct {
 	err     error
 	dropped []string
+	extra   map[string]any
 }
 
 // clashMap is a mapping of an entry — the entry itself or one of its option

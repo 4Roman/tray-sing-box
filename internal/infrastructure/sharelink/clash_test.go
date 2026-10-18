@@ -563,7 +563,41 @@ var acceptedClash = []clashCase{
     port: 8388
     cipher: aes-256-gcm
     password: 0123`,
-		`{"type":"shadowsocks","method":"aes-256-gcm","password":"0123"}`},
+		`{"type":"shadowsocks","method":"aes-256-gcm","password":"0123","udp_over_tcp":null}`},
+	// UDP inside the TCP connection: mihomo's version 1 when none is given
+	// (sing-box's own default is 2)
+	{"ss udp-over-tcp", `
+  - name: ss-uot
+    type: ss
+    server: 192.0.2.12
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: MDEyMzQ1Njc4OWFiY2RlZg==
+    udp: true
+    udp-over-tcp: true`,
+		`{"type":"shadowsocks","udp_over_tcp":{"enabled":true,"version":1}}`},
+	{"ss udp-over-tcp version 2", `
+  - name: ss-uot2
+    type: ss
+    server: 192.0.2.12
+    port: 8388
+    cipher: aes-128-gcm
+    password: pw
+    plugin: obfs
+    plugin-opts: {mode: http}
+    udp-over-tcp: true
+    udp-over-tcp-version: "2"`,
+		`{"type":"shadowsocks","plugin":"obfs-local","udp_over_tcp":{"enabled":true,"version":2}}`},
+	{"ss udp-over-tcp off", `
+  - name: ss-uot-off
+    type: ss
+    server: 192.0.2.12
+    port: 8388
+    cipher: aes-128-gcm
+    password: pw
+    udp-over-tcp: false
+    udp-over-tcp-version: 2`,
+		`{"type":"shadowsocks","udp_over_tcp":null}`},
 	{"ss obfs: mihomo's default host", `
   - name: ss-obfs
     type: ss
@@ -983,6 +1017,16 @@ var refusedClash = []clashRefusal{
     port: 443
     cipher: aes-128-ccm
     password: ` + testSecret, "метод шифрования"},
+	// mihomo knows versions 1 and 2 and refuses the node otherwise
+	{"ss-uot-version", `
+  - name: ss-uot-version
+    type: ss
+    server: 192.0.2.40
+    port: 8388
+    cipher: aes-256-gcm
+    password: ` + testSecret + `
+    udp-over-tcp: true
+    udp-over-tcp-version: 3`, "udp-over-tcp-version"},
 	{"ss-no-password", `
   - name: ss-no-password
     type: ss
