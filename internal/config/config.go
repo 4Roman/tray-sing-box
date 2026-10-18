@@ -86,4 +86,21 @@ const (
 	DPIProxyPort      = 3128
 	DPIBypassTag      = "dpi-bypass"     // reserved outbound tag in config.json
 	DPIParamsFileName = "dpi-params.txt" // optional ZAPRET_PARAMS, in the data dir
+
+	// Latency test (docs/design/latency-test.md): a separate short-lived
+	// sing-box, started only for the check, measures every server through
+	// its own Clash API; the running VPN is not touched
+	LatencyTestURL            = "https://www.gstatic.com/generate_204" // what urltest groups fetch too
+	LatencyProbeTimeoutMs     = 5000                                   // one delay test (sing-box takes it as int16 ms)
+	LatencyConcurrency        = 8                                      // delay tests in flight at once
+	LatencyRounds             = 2                                      // the servers that answered are measured again, the minimum counts
+	LatencyStartTimeout       = 10                                     // seconds for the test instance's API to answer
+	LatencyTestMaxSeconds     = 30                                     // the whole check; what is not measured by then is "unfinished"
+	LatencyStopTimeout        = 5                                      // seconds to wait for the killed test instance
+	LatencyMinIntervalSeconds = 10                                     // between two checks
+	LatencyIsolateRetries     = 3                                      // servers left out after failing to start alone, then the check fails
+	// "Select the fastest" keeps the active server when it is slower than
+	// the best one by at most max(FastestKeepMarginMs, FastestKeepMarginPct %)
+	FastestKeepMarginMs  = 30
+	FastestKeepMarginPct = 15
 )

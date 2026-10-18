@@ -27,6 +27,12 @@ const (
 type Delay struct {
 	Ms     int
 	Status LatencyStatus
+	// Note is what the prober has to say about the server. LatencySkipped:
+	// the note of the plan it finally ran — a server it left out because
+	// sing-box could not start it on its own carries sing-box's reason, and
+	// what depends on it says so (the plan the caller holds still calls
+	// them testable). A test instance without that outbound (404) says so.
+	Note string
 }
 
 // LatencyCandidate is an outbound of the config as the latency test sees it,
