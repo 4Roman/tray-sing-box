@@ -193,6 +193,9 @@ func parseHysteria2(link string) (Outbound, error) {
 	if err := hopping(outbound, ranges, q.Get("mport"), q.Get("mportHopInt")); err != nil {
 		return nil, err
 	}
+	if err := linkECH(outbound, q.Get("ech")); err != nil {
+		return nil, err
+	}
 	return outbound, nil
 }
 
@@ -284,6 +287,9 @@ func parseHysteria(link string) (Outbound, error) {
 	}
 
 	if err := hopping(outbound, ranges, q.Get("mport"), q.Get("mportHopInt")); err != nil {
+		return nil, err
+	}
+	if err := linkECH(outbound, q.Get("ech")); err != nil {
 		return nil, err
 	}
 	return outbound, nil

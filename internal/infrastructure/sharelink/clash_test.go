@@ -799,6 +799,60 @@ var acceptedClash = []clashCase{
     skip-cert-verify: true
     fingerprint: chrome`,
 		`{"tls":{"insecure":true,"utls":null}}`},
+	// ECH as on the links: mihomo's config list, else the HTTPS record of
+	// query-server-name (or of the server name) looked up in DNS
+	{"vless ws with an ECH config", `
+  - name: ech-ws
+    type: vless
+    server: 192.0.2.11
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: hidden.example.com
+    network: ws
+    ws-opts: {path: /ws}
+    ech-opts:
+      enable: true
+      config: ` + testECH,
+		`{"tls":{"server_name":"hidden.example.com","ech":{"enabled":true,
+		  "config":["-----BEGIN ECH CONFIGS-----","` + testECH + `","-----END ECH CONFIGS-----"]}}}`},
+	{"vmess ECH looked up for a name", `
+  - name: ech-vmess
+    type: vmess
+    server: 192.0.2.20
+    port: 443
+    uuid: ` + testUUID + `
+    cipher: auto
+    tls: true
+    servername: hidden.example.com
+    ech-opts: {enable: true, query-server-name: cover.example.com}`,
+		`{"type":"vmess","tls":{"ech":{"enabled":true,"query_server_name":"cover.example.com","config":null}}}`},
+	{"trojan ECH looked up for its sni", `
+  - name: ech-trojan
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    sni: hidden.example.com
+    ech-opts: {enable: true}`,
+		`{"tls":{"ech":{"enabled":true,"query_server_name":null,"config":null}}}`},
+	{"hysteria2 with an ECH config", `
+  - name: ech-hy2
+    type: hysteria2
+    server: 192.0.2.50
+    port: 443
+    password: pw
+    sni: hidden.example.com
+    ech-opts: {enable: true, config: ` + testECH + `}`,
+		`{"type":"hysteria2","tls":{"ech":{"enabled":true}}}`},
+	{"ECH off", `
+  - name: ech-off
+    type: anytls
+    server: 192.0.2.60
+    port: 443
+    password: pw
+    ech-opts: {enable: false, config: ` + testSecret + `}`,
+		`{"type":"anytls","tls":{"ech":null}}`},
 	// YAML merge keys: the entry's own keys win
 	{"merge keys", `
   - &base
@@ -927,7 +981,34 @@ var refusedClash = []clashRefusal{
     password: pw
     ech-opts:
       enable: true
-      config: ` + testSecret, "ECH (ech-opts)"},
+      config: ` + testSecret, "конфигурация ECH (ech-opts.config) повреждена"},
+	// sing-box looks the config up over TCP only
+	{"ech-dns-quic", `
+  - name: ech-dns-quic
+    type: tuic
+    server: 192.0.2.40
+    port: 443
+    uuid: ` + testUUID + `
+    password: pw
+    sni: hidden.example.com
+    ech-opts: {enable: true}`, "ECH с конфигурацией из DNS sing-box поверх QUIC не поддерживает"},
+	{"ech-reality", `
+  - name: ech-reality
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    servername: www.example.com
+    reality-opts: {public-key: ` + testPBK + `}
+    ech-opts: {enable: true, config: ` + testECH + `}`, "ECH вместе с REALITY"},
+	{"ech-bad-name", `
+  - name: ech-bad-name
+    type: trojan
+    server: 192.0.2.30
+    port: 443
+    password: pw
+    ech-opts: {enable: true, query-server-name: "a/` + testSecret + `"}`, "неверное имя для поиска конфигурации ECH"},
 	{"pin-insecure", `
   - name: pin-insecure
     type: vless

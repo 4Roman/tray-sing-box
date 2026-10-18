@@ -90,6 +90,9 @@ func parseTUIC(link string) (Outbound, error) {
 		tls["alpn"] = []string{"h3"}
 	}
 	outbound["tls"] = tls
+	if err := linkECH(outbound, q.Get("ech")); err != nil {
+		return nil, err
+	}
 	return outbound, nil
 }
 
@@ -141,12 +144,16 @@ func parseAnyTLS(link string) (Outbound, error) {
 		}
 	}
 
-	return Outbound{
+	outbound := Outbound{
 		"type":        "anytls",
 		"tag":         tagOrDefault(u.Fragment, "anytls", host, port),
 		"server":      host,
 		"server_port": port,
 		"password":    password,
 		"tls":         tls,
-	}, nil
+	}
+	if err := linkECH(outbound, q.Get("ech")); err != nil {
+		return nil, err
+	}
+	return outbound, nil
 }

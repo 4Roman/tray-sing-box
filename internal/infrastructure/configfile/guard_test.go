@@ -68,6 +68,10 @@ func TestGuardRefusesNewRiskyConstructs(t *testing.T) {
 		"plugin options":     `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"v2ray-plugin","plugin_opts":"tls;host=cert.example;path=/ws\\;cert=x;mux=0"}]}`,
 		"obfs options":       `{"outbounds":[{"type":"shadowsocks","tag":"s","plugin":"obfs-local","plugin_opts":"obfs=http;obfs-host=a.example"}]}`,
 		"all protocol types": `{"outbounds":[{"type":"hysteria2","tag":"a"},{"type":"shadowsocks","tag":"b"},{"type":"trojan","tag":"c"},{"type":"vmess","tag":"d"},{"type":"selector","tag":"e"},{"type":"urltest","tag":"f"}]}`,
+		// What the import writes for an Xray/Clash node's ECH and fragmentation
+		"tls ech and fragmentation": `{"outbounds":[{"type":"vless","tag":"v","tls":{"enabled":true,"server_name":"a.example","record_fragment":true,"fragment":true,
+		  "ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","AEX+DQ==","-----END ECH CONFIGS-----"]}}},
+		  {"type":"trojan","tag":"t","tls":{"enabled":true,"ech":{"enabled":true,"query_server_name":"b.example"}}}]}`,
 	}
 	for name, updated := range allowed {
 		if err := checkNoNewRisky([]byte(base), decode(t, updated)); err != nil {

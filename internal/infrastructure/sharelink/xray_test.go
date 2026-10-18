@@ -587,6 +587,23 @@ func TestXrayKeysReadAsXrayReadsThem(t *testing.T) {
 	checkOutbound(t, byTag["password-wins"], `{"tls":{"reality":{"public_key":"`+testPBK+`","short_id":"ab"}}}`)
 }
 
+// ECH of 3x-ui's JSON subscription (putClientTLSVerification copies
+// echConfigList): the config list, or the record looked up in DNS — never
+// dropped, the hidden server name would go in the clear
+func TestXrayECH(t *testing.T) {
+	node := func(tag, ech string) string {
+		return `{"protocol": "vless", "tag": "` + tag + `", "settings": {"address": "203.0.113.5", "port": 443, "id": "` + testUUID + `"},
+		  "streamSettings": {"network": "ws", "security": "tls", "wsSettings": {"path": "/ws"},
+		    "tlsSettings": {"serverName": "hidden.example.com", "echConfigList": "` + ech + `"}}}`
+	}
+	byTag, _, reasons := parseXray(t, `{"outbounds": [`+node("list", testECH)+`, `+node("dns", "cloudflare-ech.com+udp://1.1.1.1")+`,
+	  `+node("broken", testSecret)+`]}`)
+	checkOutbound(t, byTag["list"], `{"tls":{"server_name":"hidden.example.com",
+	  "ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","`+testECH+`","-----END ECH CONFIGS-----"]}}}`)
+	checkOutbound(t, byTag["dns"], `{"tls":{"ech":{"enabled":true,"query_server_name":"cloudflare-ech.com"}}}`)
+	checkReasons(t, reasons, map[string]string{"broken": "конфигурация ECH повреждена"})
+}
+
 // Without a server name TLS checks the address, as in Xray — a link would
 // take the WebSocket's host for it
 func TestXrayServerNameIsTheAddress(t *testing.T) {

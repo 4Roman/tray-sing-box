@@ -447,6 +447,9 @@ func clashOutbound(v *clashValue, index int) (Outbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := addECH(outbound, e.ech); err != nil {
+		return nil, err
+	}
 	maps.Copy(outbound, e.extra)
 	outbound["tag"] = name
 	if detour != "" && detour != "DIRECT" {
@@ -846,14 +849,26 @@ func clashTLSAddons(m clashMap) error {
 // skip-cert-verify, the pin (fingerprint unless it is a browser's name, or
 // the pin-sha256 list 3x-ui writes) and name-cert-verify (Xray's vcn). A
 // client certificate no link carries, and the server refuses the node
-// without it; nor ECH, which is there to hide the server name from the
-// network.
+// without it. ECH goes to the outbound as a link's does (addECH, after the
+// link is parsed): mihomo's config list in standard base64, or else the
+// HTTPS record of query-server-name — of the server name without one —
+// looked up in DNS.
 func clashCertificate(m clashMap, q url.Values) error {
 	if m.str("certificate") != "" || m.str("private-key") != "" {
 		return errors.New("клиентский сертификат (certificate, private-key) приложение не импортирует")
 	}
-	if m.sub("ech-opts").flag("enable") {
-		return errors.New("ECH (ech-opts) приложение не импортирует")
+	if ech := m.sub("ech-opts"); ech.flag("enable") {
+		spec := &echSpec{dns: true, query: strings.TrimSpace(ech.str("query-server-name"))}
+		if config := strings.TrimSpace(ech.str("config")); config != "" {
+			list, err := base64.StdEncoding.DecodeString(config)
+			if err != nil || !validECHConfigList(list) {
+				return errors.New("конфигурация ECH (ech-opts.config) повреждена")
+			}
+			spec = &echSpec{list: list}
+		} else if spec.query != "" && !hostPattern.MatchString(spec.query) {
+			return errors.New("неверное имя для поиска конфигурации ECH (ech-opts.query-server-name)")
+		}
+		m.e.ech = spec
 	}
 	if m.flag("skip-cert-verify") {
 		q.Set("insecure", "1")
@@ -1263,6 +1278,7 @@ type clashEntry struct {
 	err     error
 	dropped []string
 	extra   map[string]any
+	ech     *echSpec // its ECH, which no link of the entry carries
 }
 
 // clashMap is a mapping of an entry — the entry itself or one of its option

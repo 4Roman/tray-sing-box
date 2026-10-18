@@ -1,9 +1,14 @@
 package sharelink
 
 import (
+	"bytes"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"net"
 	"net/url"
 	"reflect"
 	"strings"
@@ -20,6 +25,29 @@ const (
 	// come back in an error or a skip reason
 	testSecret = "S3cretMark"
 )
+
+// testECH is an ECHConfigList in standard base64, as Xray's echConfigList,
+// a link's ech= and mihomo's ech-opts.config carry it: one config for the
+// public name public.example.com, built as sing-box's ECHKeygenDefault
+// builds one (any 32 bytes are an X25519 public key). TestECHConfigList
+// checks that Go's TLS takes it.
+var testECH = func() string {
+	be := binary.BigEndian
+	config := []byte{0}                      // config_id
+	config = be.AppendUint16(config, 0x0020) // DHKEM(X25519, HKDF-SHA256)
+	config = be.AppendUint16(config, 32)
+	config = append(config, bytes.Repeat([]byte{7}, 32)...)
+	config = be.AppendUint16(config, 4)
+	config = be.AppendUint16(config, 1) // HKDF-SHA256
+	config = be.AppendUint16(config, 1) // AES-128-GCM
+	config = append(config, 0)          // maximum_name_length
+	config = append(config, byte(len("public.example.com")))
+	config = append(config, "public.example.com"...)
+	config = be.AppendUint16(config, 0) // no extensions
+	entry := be.AppendUint16(be.AppendUint16(nil, 0xfe0d), uint16(len(config)))
+	entry = append(entry, config...)
+	return base64.StdEncoding.EncodeToString(append(be.AppendUint16(nil, uint16(len(entry))), entry...))
+}()
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
@@ -154,6 +182,34 @@ var acceptedLinks = []linkCase{
 		"vless://" + testUUID + "@192.0.2.10:443?security=reality&sni=www.example.com&pbk=" + testPBK + "&fm=" +
 			url.QueryEscape(`{"tcp":[{"type":"fragment","settings":{"packets":"tlshello","length":"100-200","delay":"10-20"}}]}`) + "#fm-fragment-reality",
 		`{"tls":{"reality":{"enabled":true},"record_fragment":null,"fragment":null}}`},
+
+	// ECH, as 3x-ui writes Xray's echConfigList into ech=: the config list
+	// (sing-box's PEM block), or a lookup in DNS — of the name before '+',
+	// else of the server name
+	{"ech config list",
+		"vless://" + testUUID + "@192.0.2.10:443?type=ws&path=%2Fws&security=tls&sni=hidden.example.com&ech=" + url.QueryEscape(testECH) + "#ech",
+		`{"tls":{"server_name":"hidden.example.com","utls":{"enabled":true},
+		  "ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","` + testECH + `","-----END ECH CONFIGS-----"],"query_server_name":null}}}`},
+	{"ech looked up for a name",
+		"trojan://secret@192.0.2.30:443?sni=hidden.example.com&ech=" + url.QueryEscape("cloudflare-ech.com+https://1.1.1.1/dns-query") + "#ech-dns",
+		`{"tls":{"ech":{"enabled":true,"query_server_name":"cloudflare-ech.com","config":null}}}`},
+	{"ech looked up for the server name",
+		"trojan://secret@192.0.2.30:443?sni=hidden.example.com&ech=" + url.QueryEscape("udp://1.1.1.1") + "#ech-dns-sni",
+		`{"tls":{"ech":{"enabled":true,"query_server_name":null,"config":null}}}`},
+	{"vmess ech",
+		vmessJSON(`{"ps":"vm-ech","add":"192.0.2.20","port":443,"id":"` + testUUID + `","net":"ws","path":"/ws","tls":"tls","sni":"hidden.example.com","ech":"` + testECH + `"}`),
+		`{"tls":{"ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","` + testECH + `","-----END ECH CONFIGS-----"]}}}`},
+	// QUIC takes a config list (only a lookup it cannot do)
+	{"hysteria2 ech config list",
+		"hysteria2://pw@192.0.2.50:443?sni=hidden.example.com&ech=" + url.QueryEscape(testECH) + "#hy2-ech",
+		`{"type":"hysteria2","tls":{"ech":{"enabled":true,"config":["-----BEGIN ECH CONFIGS-----","` + testECH + `","-----END ECH CONFIGS-----"]}}}`},
+	{"anytls ech lookup",
+		"anytls://pw@192.0.2.60:443/?sni=hidden.example.com&ech=" + url.QueryEscape("https://dns.example/dns-query") + "#anytls-ech",
+		`{"type":"anytls","tls":{"ech":{"enabled":true}}}`},
+	// Without TLS there is no hello to encrypt
+	{"ech without TLS",
+		"vless://" + testUUID + "@192.0.2.10:80?security=none&ech=" + url.QueryEscape(testECH) + "#ech-plain",
+		`{"tls":null}`},
 	// The udp layer's masks: Xray applies them to UDP only, never to these
 	// TCP transports
 	{"finalmask udp masks leave a TCP stream alone",
@@ -430,6 +486,18 @@ var refusedLinks = []refusalCase{
 	{"fm-broken", "vless://" + testUUID + "@192.0.2.10:443?security=tls&fm=%7B" + testSecret + "#fm-broken", "fm (finalmask) в ссылке повреждён"},
 	{"vm-fm", vmessJSON(`{"ps":"vm-fm","add":"192.0.2.20","port":"443","id":"` + testUUID + `","fm":{"tcp":[{"type":"header-custom","settings":{"clients":["` + testSecret + `"]}}]}}`), "маскировка finalmask «header-custom»"},
 	{"grpc-custom-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fcustom%2Fpath%7Cp2&security=tls#grpc-custom-path", "собственный путь gRPC"},
+	// ECH is never dropped: refused where sing-box cannot do it as meant
+	{"ech-reality", "vless://" + testUUID + "@192.0.2.10:443?security=reality&sni=www.example.com&pbk=" + testPBK + "&ech=" + url.QueryEscape(testECH) + "#ech-reality",
+		"ECH вместе с REALITY"},
+	{"ech-dns-quic", "hysteria2://" + testSecret + "@192.0.2.50:443?sni=hidden.example.com&ech=" + url.QueryEscape("udp://1.1.1.1") + "#ech-dns-quic",
+		"ECH с конфигурацией из DNS sing-box поверх QUIC не поддерживает"},
+	{"ech-dns-ip", "trojan://" + testSecret + "@192.0.2.30:443?ech=" + url.QueryEscape("https://1.1.1.1/dns-query") + "#ech-dns-ip",
+		"нужно имя сервера, а не IP-адрес"},
+	{"ech-broken", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=a.example.com&ech=" + testSecret + "#ech-broken", "конфигурация ECH повреждена"},
+	{"ech-not-a-list", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=a.example.com&ech=" + url.QueryEscape(b64(testSecret+"-is-no-ECHConfigList")) + "#ech-not-a-list",
+		"конфигурация ECH повреждена"},
+	{"ech-empty-name", "vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=a.example.com&ech=" + url.QueryEscape("+udp://1.1.1.1") + "#ech-empty-name",
+		"конфигурация ECH повреждена"},
 	{"grpc-root-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fsvc&security=tls#grpc-root-path", "собственный путь gRPC"},
 	{"grpc-deep-path", "vless://" + testUUID + "@192.0.2.10:443?type=grpc&serviceName=%2Fa%2Fb%2FTun&security=tls#grpc-deep-path", "собственный путь gRPC"},
 	{"vm-grpc-path", vmessJSON(`{"ps":"vm-grpc-path","add":"192.0.2.20","port":"443","id":"` + testUUID + `","net":"grpc","path":"/x/y","tls":"tls"}`), "собственный путь gRPC"},
@@ -644,6 +712,60 @@ func TestRefusedLinks(t *testing.T) {
 				t.Errorf("the reason repeats the name: %q", skipped[0].Reason)
 			}
 		})
+	}
+}
+
+// The ECH of a node is what sing-box reads: its PEM block decodes the way
+// sing-box decodes tls.ech.config (parseECHClientConfig: the lines joined,
+// one "ECH CONFIGS" block, nothing after it), and the config list in it is
+// one Go's TLS — sing-box's — starts a handshake with. A list Go's TLS
+// refuses at every connection is refused by the import.
+func TestECHConfigList(t *testing.T) {
+	o, err := Parse("vless://" + testUUID + "@192.0.2.10:443?security=tls&sni=hidden.example.com&ech=" + url.QueryEscape(testECH) + "#ech")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ech, _ := o["tls"].(map[string]any)["ech"].(map[string]any)
+	lines, _ := ech["config"].([]string)
+	block, rest := pem.Decode([]byte(strings.Join(lines, "\n")))
+	want, _ := base64.StdEncoding.DecodeString(testECH)
+	if block == nil || block.Type != "ECH CONFIGS" || len(rest) > 0 || !bytes.Equal(block.Bytes, want) {
+		t.Fatalf("tls.ech.config %q is not the list as sing-box reads it", lines)
+	}
+
+	// Go's TLS client takes the list: it writes its ClientHello
+	hello := func(list []byte) error {
+		client, server := net.Pipe()
+		defer client.Close()
+		defer server.Close()
+		done := make(chan error, 1)
+		go func() {
+			conn := tls.Client(client, &tls.Config{ServerName: "hidden.example.com", MinVersion: tls.VersionTLS13, EncryptedClientHelloConfigList: list})
+			done <- conn.Handshake()
+		}()
+		read := make(chan error, 1)
+		go func() {
+			_, err := server.Read(make([]byte, 1))
+			read <- err
+		}()
+		select {
+		case err := <-done:
+			return err
+		case err := <-read:
+			return err
+		}
+	}
+	if err := hello(want); err != nil {
+		t.Fatalf("Go's TLS refuses the test list: %v", err)
+	}
+	// The control: a list of another version only is refused by both
+	other := bytes.Clone(want)
+	other[2], other[3] = 0xfe, 0x0a
+	if hello(other) == nil {
+		t.Fatal("Go's TLS took a list without a config it speaks: the control does not work")
+	}
+	if validECHConfigList(other) {
+		t.Error("the import takes a list Go's TLS refuses")
 	}
 }
 

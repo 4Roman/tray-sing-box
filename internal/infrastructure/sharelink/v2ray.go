@@ -384,7 +384,7 @@ func addTLSAndTransport(outbound Outbound, q url.Values, host string) error {
 		outbound["transport"] = transport
 	}
 	fragmentTLS(outbound, fragment)
-	return nil
+	return linkECH(outbound, q.Get("ech"))
 }
 
 // finalMask checks Xray's finalmask, which 3x-ui and v2rayN put into a link
@@ -676,6 +676,7 @@ type vmessLink struct {
 	Fm       json.RawMessage `json:"fm"`  // Xray's finalmask, as a JSON text or an object
 	Pbk      string          `json:"pbk"` // REALITY's public key (Marzban)
 	Sid      string          `json:"sid"` // REALITY's short_id
+	Ech      string          `json:"ech"` // Xray's echConfigList (3x-ui)
 }
 
 // rawInt parses a JSON value that may be a number or a quoted number
@@ -846,6 +847,9 @@ func parseVMess(link string) (Outbound, error) {
 		outbound["transport"] = transport
 	}
 	fragmentTLS(outbound, fragment)
+	if err := linkECH(outbound, v.Ech); err != nil {
+		return nil, err
+	}
 	return outbound, nil
 }
 

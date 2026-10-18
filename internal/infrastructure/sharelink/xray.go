@@ -692,8 +692,8 @@ func xraySSMethod(raw string) string {
 
 // streamQuery is the share-link query that says what the stream settings
 // say: type and the transport's parameters, security and the TLS or REALITY
-// ones, fm. What the link parsers do not read (spx, pqv, ech, authority,
-// mode) goes along all the same, as a link carries it; headers are the
+// ones, fm. What the link parsers do not read (spx, pqv, authority, mode)
+// goes along all the same, as a link carries it; headers are the
 // transport's headers besides Host, which a link has no place for.
 func streamQuery(st *xrayStream, address string) (url.Values, map[string]string, error) {
 	q := url.Values{}
@@ -973,6 +973,9 @@ func xrayPlainProxy(protocol string, q url.Values, s xraySettings, server xraySe
 		outbound["tls"] = tls
 	}
 	fragmentTLS(outbound, fragment)
+	if err := linkECH(outbound, q.Get("ech")); err != nil {
+		return nil, err
+	}
 	return outbound, nil
 }
 

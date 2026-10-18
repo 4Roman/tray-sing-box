@@ -14,6 +14,7 @@ package sharelink
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -662,6 +663,113 @@ func certificateCheck(q url.Values, serverName string) (insecure bool, err error
 		}
 	}
 	return insecure, nil
+}
+
+// echSpec is a node's ECH (Encrypted Client Hello): the ECHConfigList
+// itself, or its lookup in DNS — the HTTPS record of query, of the TLS
+// server name when query is empty
+type echSpec struct {
+	list  []byte
+	dns   bool
+	query string
+}
+
+var errECHBroken = errors.New("конфигурация ECH повреждена")
+
+// xrayECH reads Xray's echConfigList, which a link's ech= carries as it is
+// (3x-ui, v2rayN): the ECHConfigList in standard base64, or a DNS server
+// (udp://…, https://…) to look it up at, "name+server" for the record of
+// name instead of the server name's. sing-box looks the record up through
+// its own DNS: the server is not carried over. nil for an empty value.
+func xrayECH(value string) (*echSpec, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	if strings.Contains(value, "://") {
+		spec := &echSpec{dns: true}
+		if name, _, named := strings.Cut(value, "+"); named {
+			// Xray refuses an empty name
+			if !hostPattern.MatchString(name) {
+				return nil, errECHBroken
+			}
+			spec.query = name
+		}
+		log.Printf("Share link: the DNS server of the ECH lookup is not carried over, sing-box looks the record up through its own DNS")
+		return spec, nil
+	}
+	list, err := base64.StdEncoding.DecodeString(value)
+	if err != nil || !validECHConfigList(list) {
+		return nil, errECHBroken
+	}
+	return &echSpec{list: list}, nil
+}
+
+// validECHConfigList: an ECHConfigList with a config of the version TLS
+// speaks (0xfe0d), else Go's TLS — sing-box's — refuses it at every
+// connection, while `sing-box check` passes it
+func validECHConfigList(list []byte) bool {
+	if len(list) < 2 || int(binary.BigEndian.Uint16(list)) != len(list)-2 {
+		return false
+	}
+	known := false
+	for rest := list[2:]; len(rest) > 0; {
+		if len(rest) < 4 {
+			return false
+		}
+		version, length := binary.BigEndian.Uint16(rest), int(binary.BigEndian.Uint16(rest[2:]))
+		if len(rest) < 4+length {
+			return false
+		}
+		known = known || version == 0xfe0d
+		rest = rest[4+length:]
+	}
+	return known
+}
+
+// linkECH sets the ECH of a link's ech= (xrayECH) on its outbound (addECH)
+func linkECH(outbound Outbound, value string) error {
+	spec, err := xrayECH(value)
+	if err != nil {
+		return err
+	}
+	return addECH(outbound, spec)
+}
+
+// addECH sets a node's ECH: sing-box's tls.ech with the config list as its
+// PEM block, or with the lookup in DNS. ECH hides the server name from the
+// network; never dropped, it is refused where sing-box cannot do it as
+// meant: with REALITY ("Reality is conflict with ECH"), a lookup over QUIC
+// (sing-box looks the record up in the TLS handshake of a TCP connection
+// only, a QUIC node would send the name in the clear), a lookup without a
+// name to look up (an IP address as the server name: Xray refuses that
+// too). A node without TLS has no hello to encrypt.
+func addECH(outbound Outbound, spec *echSpec) error {
+	tls, _ := outbound["tls"].(map[string]any)
+	if spec == nil || tls == nil {
+		return nil
+	}
+	if _, reality := tls["reality"]; reality {
+		return errors.New("ECH вместе с REALITY не поддерживается sing-box")
+	}
+	ech := map[string]any{"enabled": true}
+	if spec.dns {
+		if overQUIC(outbound) {
+			return errors.New("ECH с конфигурацией из DNS sing-box поверх QUIC не поддерживает — имя сервера ушло бы открытым")
+		}
+		serverName, _ := tls["server_name"].(string)
+		name := firstNonEmpty(spec.query, serverName)
+		if name == "" || net.ParseIP(name) != nil {
+			return errors.New("для ECH с конфигурацией из DNS нужно имя сервера, а не IP-адрес")
+		}
+		if !strings.EqualFold(name, serverName) {
+			ech["query_server_name"] = name
+		}
+	} else {
+		ech["config"] = []string{"-----BEGIN ECH CONFIGS-----", base64.StdEncoding.EncodeToString(spec.list), "-----END ECH CONFIGS-----"}
+	}
+	tls["ech"] = ech
+	return nil
 }
 
 // foldedGet is q.Get with the key matched regardless of case: the clients
