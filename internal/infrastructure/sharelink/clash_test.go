@@ -1213,6 +1213,40 @@ func TestClashValuesStayValues(t *testing.T) {
 	}
 }
 
+// A value tagged !!binary is base64 to YAML, and mihomo connects with what
+// it decodes to: so does the node. One that is no base64, or does not come
+// to text, is a malformed field.
+func TestClashBinaryValues(t *testing.T) {
+	text := clashProxyList(
+		"  - {name: !!binary REU=, type: trojan, server: 192.0.2.30, port: 443, password: !!binary aGVsbG8=}",
+		// Line breaks are no part of the base64
+		"  - name: NL\n    type: trojan\n    server: 192.0.2.31\n    port: !!binary NDQz\n    password: !!binary |\n      aGVs\n      bG8=",
+		"  - {!!binary c2VydmVy: 192.0.2.32, name: key, type: trojan, port: 443, password: pw}",
+		"  - {name: bad, type: trojan, server: 192.0.2.33, port: 443, password: !!binary not-base64}",
+		"  - {name: latin1, type: trojan, server: 192.0.2.34, port: 443, password: !!binary 6Q==}",
+		"  - {!<tag:yaml.org,2002:binary> bmFtZQ==: long, type: trojan, server: 192.0.2.35, port: 443, password: !!binary 6Q==}",
+		"  - {name: !!binary Rkk=, type: trojan, Type: trojan}",
+	)
+	imported, skipped, err := parseQuickly(t, text)
+	if err != nil || strings.Join(imported, ",") != "DE,NL,key" {
+		t.Fatalf("imported %q, skipped %q, error %v", imported, skipped, err)
+	}
+	want := []string{"bad: поле «password» повреждено", "latin1: поле «password» повреждено", "long: поле «password» повреждено",
+		"FI: параметр «type» указан в узле дважды"}
+	if strings.Join(skipped, "|") != strings.Join(want, "|") {
+		t.Errorf("skipped %q", skipped)
+	}
+	outbounds, _, _ := ParseAllReport(text)
+	for _, o := range outbounds[:2] {
+		if o["password"] != "hello" || o["server_port"] != 443 {
+			t.Errorf("%s: password %q, port %v", o.Tag(), o["password"], o["server_port"])
+		}
+	}
+	if outbounds[2]["server"] != "192.0.2.32" {
+		t.Errorf("server %v", outbounds[2]["server"])
+	}
+}
+
 // Repeated names get a suffix, as the nodes of any import
 func TestClashRepeatedNames(t *testing.T) {
 	entry := "  - {name: DE, type: trojan, server: 192.0.2.30, port: 443, password: pw}"

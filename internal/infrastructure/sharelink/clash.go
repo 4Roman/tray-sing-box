@@ -31,7 +31,8 @@ import (
 // Values are read as the provider wrote them, not as YAML types them: an
 // unquoted short-id 2351e1 is a float to YAML (mihomo then gets
 // "2.351E+04") and a password 0123 an octal number, while the generator
-// meant the text. Keys are matched the way mihomo matches them:
+// meant the text; only a value tagged !!binary is decoded, mihomo gets the
+// decoded value as well. Keys are matched the way mihomo matches them:
 // case-insensitively and with '_' for '-'.
 
 var (
@@ -169,8 +170,11 @@ func clashName(v *clashValue, n *yaml.Node, index int) string {
 	}
 	if v == nil && n.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(n.Content); i += 2 {
-			if value := n.Content[i+1]; clashKey(n.Content[i].Value) == "name" && value.Kind == yaml.ScalarNode && plainName(value.Value) {
-				return shortName(value.Value)
+			key, _, _ := scalarText(n.Content[i])
+			if value := n.Content[i+1]; clashKey(key) == "name" && value.Kind == yaml.ScalarNode {
+				if name, _, ok := scalarText(value); ok && plainName(name) {
+					return shortName(name)
+				}
 			}
 		}
 	}
@@ -1162,7 +1166,12 @@ func (r *yamlReader) value(n *yaml.Node) (*clashValue, error) {
 func (r *yamlReader) convert(n *yaml.Node) (*clashValue, error) {
 	switch n.Kind {
 	case yaml.ScalarNode:
-		return &clashValue{kind: yaml.ScalarNode, text: n.Value, tag: n.ShortTag(), size: 1 + int64(len(n.Value))}, nil
+		text, tag, ok := scalarText(n)
+		if !ok {
+			// A value of no kind: every reader takes it for a malformed field
+			return &clashValue{size: 1}, nil
+		}
+		return &clashValue{kind: yaml.ScalarNode, text: text, tag: tag, size: 1 + int64(len(text))}, nil
 	case yaml.SequenceNode:
 		v := &clashValue{kind: yaml.SequenceNode, items: make([]*clashValue, 0, len(n.Content)), size: 1}
 		for _, item := range n.Content {
@@ -1178,6 +1187,21 @@ func (r *yamlReader) convert(n *yaml.Node) (*clashValue, error) {
 		return r.mapping(n)
 	}
 	return nil, errClashEntry
+}
+
+// scalarText is the value of a scalar as YAML gives it, with its type
+// (ShortTag). An explicit !!binary is base64, line breaks ignored, as
+// yaml.v3 decodes it for mihomo; ok is false when it is none or does not
+// come to text (the bytes would not survive the config's JSON).
+func scalarText(n *yaml.Node) (text, tag string, ok bool) {
+	if tag = n.ShortTag(); tag != "!!binary" {
+		return n.Value, tag, true
+	}
+	data, err := base64.StdEncoding.DecodeString(n.Value)
+	if err != nil || !utf8.Valid(data) {
+		return "", "", false
+	}
+	return string(data), "!!str", true
 }
 
 // mapping converts a YAML mapping with its merge keys ("<<: *base"): the
@@ -1196,7 +1220,11 @@ func (r *yamlReader) mapping(n *yaml.Node) (*clashValue, error) {
 			merges = append(merges, n.Content[i+1])
 			continue
 		}
-		key := clashKey(k.Value)
+		text, _, ok := scalarText(k)
+		if !ok {
+			return nil, errClashEntry
+		}
+		key := clashKey(text)
 		if _, twice := v.fields[key]; twice {
 			return nil, fmt.Errorf("параметр «%s» указан в узле дважды", clashField(key))
 		}
