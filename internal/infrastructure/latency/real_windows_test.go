@@ -145,6 +145,51 @@ func TestRealSingBox(t *testing.T) {
 		}
 	})
 
+	// The main selector as the DNS detour, its default one sing-box cannot
+	// create: the test instance — the DNS server with the group copied
+	// without it — starts, and the other members are measured (offline:
+	// they do not answer; a local relay would be the info node of a
+	// provider to the plan)
+	t.Run("the DNS server's group without a member it cannot carry", func(t *testing.T) {
+		picks := 0
+		setHook(t, &pickPort, func() (int, error) {
+			picks++
+			return freeLoopbackPort()
+		})
+		plan := filePlan(t, data, map[string]any{
+			"dns": map[string]any{"servers": []any{
+				map[string]any{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+				map[string]any{"type": "udp", "tag": "local-dns", "server": "192.0.2.53"},
+			}, "final": "remote"},
+			"outbounds": []any{
+				map[string]any{"type": "selector", "tag": "proxy", "outbounds": []any{"good", "rea", "other"}, "default": "rea"},
+				socksNode("good", "192.0.2.21", 1080, ""),
+				map[string]any{"type": "vless", "tag": "rea", "server": "192.0.2.2", "server_port": 443,
+					"uuid": "11111111-2222-3333-4444-555555555555",
+					"tls": map[string]any{"enabled": true, "server_name": "example.com",
+						"reality": map[string]any{"enabled": true, "public_key": "jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0", "short_id": "0123abcd"}}},
+				socksNode("other", "192.0.2.22", 1080, ""),
+			},
+			"route": map[string]any{"final": "proxy", "default_domain_resolver": "local-dns"},
+		})
+		got, err := measure(t, p, plan, "good", "rea", "other")
+		if err != nil {
+			t.Fatal(err)
+		}
+		gone(t)
+		if r := got["rea"]; r.Status != domain.LatencySkipped || !strings.Contains(r.Note, "uTLS is required by reality client") {
+			t.Errorf("rea: %+v, want skipped with sing-box's reason", r)
+		}
+		for _, tag := range []string{"good", "other"} {
+			if s := got[tag].Status; s != domain.LatencyTimeout && s != domain.LatencyError {
+				t.Errorf("%s: %+v, want measured (a timeout or an error)", tag, got[tag])
+			}
+		}
+		if picks != 2 {
+			t.Errorf("%d starts, want 2", picks)
+		}
+	})
+
 	// How long the instance takes to answer with many outbounds (U8)
 	t.Run("many outbounds", func(t *testing.T) {
 		var nodes []map[string]any

@@ -271,33 +271,37 @@ func TestProbeClosure(t *testing.T) {
 }
 
 // What the closure cannot carry makes everything that reaches it untestable,
-// named in the note — also when every outbound reaches it through the DNS
+// named in the note — also a DNS server that resolves the outbound's name
+// (by dns.final, the only server, route.default_domain_resolver)
 func TestProbeClosureProblems(t *testing.T) {
 	node := func(tag, extra string) string {
 		return `{"type": "vless", "tag": "` + tag + `", "server": "192.0.2.1", "server_port": 443, "uuid": "` + uuidA + `"` + extra + `}`
+	}
+	named := func(tag, extra string) string {
+		return `{"type": "vless", "tag": "` + tag + `", "server": "node.example.com", "server_port": 443, "uuid": "` + uuidA + `"` + extra + `}`
 	}
 	cases := []struct {
 		name, config, note string
 	}{
 		{"missing DNS server", `{"outbounds": [` + node("a", `, "Domain_Resolver": "nowhere"`) + `]}`, "nowhere"},
 		{"DNS server of a service", `{"dns": {"servers": [{"type": "resolved", "tag": "sd", "service": "resolved-svc"}]},
-			"outbounds": [` + node("a", "") + `]}`, "sd"},
+			"outbounds": [` + named("a", "") + `]}`, "sd"},
 		{"DNS server of an endpoint as dns.final", `{"dns": {"servers": [
 			{"type": "udp", "tag": "u", "server": "192.0.2.50"}, {"type": "openvpn", "tag": "ov", "endpoint": "x"}], "final": "ov"},
-			"outbounds": [` + node("a", "") + `]}`, "ov"},
+			"outbounds": [` + named("a", "") + `]}`, "ov"},
 		{"DNS server of a type sing-box may add later", `{"dns": {"servers": [{"type": "doq-next", "tag": "new"}]},
-			"outbounds": [` + node("a", "") + `]}`, "new"},
+			"outbounds": [` + named("a", "") + `]}`, "new"},
 		{"DNS server in a network namespace", `{"dns": {"servers": [{"type": "udp", "tag": "nsd", "server": "192.0.2.50", "Netns": "ns"}]},
-			"outbounds": [` + node("a", "") + `]}`, "nsd"},
+			"outbounds": [` + named("a", "") + `]}`, "nsd"},
 		{"DNS detour through an outbound outside the allow-list", `{"dns": {"servers": [
 			{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "tor1"}]},
-			"outbounds": [{"type": "tor", "tag": "tor1"}, ` + node("a", "") + `]}`, "tor1"},
+			"outbounds": [{"type": "tor", "tag": "tor1"}, ` + named("a", "") + `]}`, "tor1"},
 		{"a group member that is an endpoint", `{"endpoints": [{"type": "wireguard", "tag": "wg"}],
 			"outbounds": [` + node("a", `, "detour": "g"`) + `, {"type": "selector", "tag": "g", "outbounds": ["wg"]}]}`, "wg"},
 		{"a dependency with a realm", `{"outbounds": [` + node("a", `, "detour": "h"`) + `,
 			{"type": "hysteria2", "tag": "h", "server": "192.0.2.5", "server_port": 443, "Realm": {"server_url": "https://r"}}]}`, "h"},
 		{"a dependency with a network namespace", `{"outbounds": [` + node("a", `, "detour": "n"`) + `, ` + node("n", `, "NetNs": "ns"`) + `]}`, "n"},
-		{"default_domain_resolver missing", `{"outbounds": [` + node("a", "") + `], "route": {"default_domain_resolver": "gone"}}`, "gone"},
+		{"default_domain_resolver missing", `{"outbounds": [` + named("a", "") + `], "route": {"default_domain_resolver": "gone"}}`, "gone"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,6 +320,370 @@ func TestProbeClosureProblems(t *testing.T) {
 				t.Errorf("probe config carries the dns section %v", dns)
 			}
 		})
+	}
+}
+
+// A DNS server every outbound may need (dns.final) is carried for the
+// config's sake: a group its detour reaches is copied without the members
+// the test instance cannot carry — an endpoint, a type outside the
+// allow-list, one sing-box could not create on its own — and without a
+// default among them. They are no problem of the servers that never dial
+// through that group (the main selector as the DNS detour used to veto
+// every server for one broken member of it).
+func TestProbeGlobalDNSGroupPruned(t *testing.T) {
+	cfg := probeConfig(t, `{
+	  "dns": {
+	    "servers": [
+	      {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+	      {"type": "udp", "tag": "local-dns", "server": "192.0.2.53"}
+	    ],
+	    "final": "remote"
+	  },
+	  "endpoints": [{"type": "wireguard", "tag": "warp", "address": ["10.0.0.2/32"], "private_key": "wg-private-key-value"}],
+	  "outbounds": [
+	    {"type": "selector", "tag": "proxy", "Outbounds": ["good", "warp", "tor1", "broken", "other"], "Default": "warp"},
+	    {"type": "vless", "tag": "good", "server": "good.example.com", "server_port": 443, "uuid": "`+uuidA+`"},
+	    {"type": "tor", "tag": "tor1"},
+	    {"type": "vless", "tag": "broken", "server": "192.0.2.11", "server_port": 443, "uuid": "`+uuidA+`"},
+	    {"type": "trojan", "tag": "other", "server": "192.0.2.12", "server_port": 443, "password": "trojan-password"},
+	    {"type": "trojan", "tag": "via-proxy", "server": "192.0.2.13", "server_port": 443, "password": "trojan-password", "detour": "proxy"}
+	  ],
+	  "route": {"final": "proxy", "default_domain_resolver": "local-dns"}
+	}`)
+	plan := probePlan(cfg)
+	if c := candidateByTag(t, plan, "via-proxy"); c.Testable || c.Note != "не проверяется: зависит от «tor1»" {
+		t.Errorf("a server dialing through the group itself: %+v", c)
+	}
+	// sing-box cannot create "broken" on its own
+	next, ok := plan.Exclude("FATAL[0000] initialize outbound[2]: uTLS is required by reality client")
+	if !ok {
+		t.Fatal("Exclude refused")
+	}
+	for _, p := range []*domain.ProbePlan{plan, next} {
+		for _, tag := range []string{"good", "other"} {
+			if c := candidateByTag(t, p, tag); !c.Testable || !c.Eligible || c.Note != "" {
+				t.Errorf("%s: %+v, want testable: it never dials through the DNS server's group", tag, c)
+			}
+		}
+	}
+	if c := candidateByTag(t, next, "broken"); c.Testable || !strings.HasPrefix(c.Note, "не проверяется: sing-box не смог его запустить отдельно: ") {
+		t.Errorf("the outbound sing-box refused: %+v", c)
+	}
+	outbounds, servers := probeTags(t, next)
+	if want := []string{"proxy", "good", "other"}; !reflect.DeepEqual(outbounds, want) {
+		t.Errorf("probe outbounds = %v, want %v", outbounds, want)
+	}
+	if want := []string{"remote", "local-dns"}; !reflect.DeepEqual(servers, want) {
+		t.Errorf("probe DNS servers = %v, want %v", servers, want)
+	}
+	group := next.Config["outbounds"].([]any)[0].(map[string]any)
+	if want := map[string]any{"type": "selector", "tag": "proxy", "Outbounds": []any{"good", "other"}}; !reflect.DeepEqual(group, want) {
+		t.Errorf("the group as the test instance gets it: %v, want %v (its default was left out)", group, want)
+	}
+	// The group in config.json is untouched
+	if members := cfg["outbounds"].([]any)[0].(map[string]any)["Outbounds"].([]any); len(members) != 5 {
+		t.Errorf("the config's group changed: %v", members)
+	}
+	if dns := next.Config["dns"].(map[string]any); dns["final"] != "remote" {
+		t.Errorf("dns.final = %v", dns["final"])
+	}
+
+	// A default the test instance carries stays
+	text := strings.Replace(canonical(cfg), `"Default":"warp"`, `"Default":"other"`, 1)
+	kept := probePlan(probeConfig(t, text))
+	if group := kept.Config["outbounds"].([]any)[0].(map[string]any); group["Default"] != "other" {
+		t.Errorf("a carried default was dropped: %v", group)
+	}
+}
+
+// A DNS server or default domain resolver of the config the test instance
+// cannot carry is no problem of a server that never resolves through it: an
+// IP address needs no DNS, a detour resolves the name itself. It is left
+// out (and dns.final, route.default_domain_resolver naming it with it); a
+// server whose name it resolves is not tested.
+func TestProbeGlobalDNSOnlyWhereNeeded(t *testing.T) {
+	cases := []struct {
+		name, dns, route string
+		problem          string
+		servers          []string
+	}{
+		{"the only server, of a service", `{"servers": [{"type": "resolved", "tag": "sd", "service": "svc"}]}`, `{}`, "sd", nil},
+		{"dns.final of an endpoint", `{"servers": [{"type": "udp", "tag": "u", "server": "192.0.2.50"},
+			{"type": "openvpn", "tag": "ov", "endpoint": "x"}], "final": "ov"}`, `{}`, "ov", nil},
+		{"dns.final through a detour outside the allow-list", `{"servers": [{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "tor1"}]}`,
+			`{}`, "tor1", nil},
+		{"default_domain_resolver missing", `{"servers": [{"type": "udp", "tag": "u", "server": "192.0.2.50"}]}`,
+			`{"default_domain_resolver": "gone"}`, "gone", []string{"u"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := probePlan(probeConfig(t, `{"dns": `+tc.dns+`, "route": `+tc.route+`,
+			  "outbounds": [
+			    {"type": "tor", "tag": "tor1"},
+			    {"type": "vless", "tag": "by-ip", "server": "192.0.2.1", "server_port": 443, "uuid": "`+uuidA+`"},
+			    {"type": "vless", "tag": "by-name", "server": "node.example.com", "server_port": 443, "uuid": "`+uuidA+`"},
+			    {"type": "vless", "tag": "hop", "server": "192.0.2.2", "server_port": 443, "uuid": "`+uuidA+`"},
+			    {"type": "vless", "tag": "chained", "server": "chained.example.com", "server_port": 443, "uuid": "`+uuidA+`", "detour": "hop"}
+			  ]}`))
+			for _, tag := range []string{"by-ip", "chained"} {
+				if c := candidateByTag(t, plan, tag); !c.Testable || !c.Eligible || c.Note != "" {
+					t.Errorf("%s: %+v, want testable", tag, c)
+				}
+			}
+			if c := candidateByTag(t, plan, "hop"); !c.Testable {
+				t.Errorf("hop: %+v, want testable", c)
+			}
+			if c := candidateByTag(t, plan, "by-name"); c.Testable || c.Note != "не проверяется: зависит от «"+tc.problem+"»" {
+				t.Errorf("by-name: %+v, want the note on %q", c, tc.problem)
+			}
+			outbounds, servers := probeTags(t, plan)
+			if want := []string{"by-ip", "hop", "chained"}; !reflect.DeepEqual(outbounds, want) {
+				t.Errorf("probe outbounds = %v, want %v", outbounds, want)
+			}
+			if !reflect.DeepEqual(servers, tc.servers) {
+				t.Errorf("probe DNS servers = %v, want %v", servers, tc.servers)
+			}
+			if dns, _ := plan.Config["dns"].(map[string]any); dns != nil {
+				if final, ok := dns["final"]; ok {
+					t.Errorf("dns.final %v names a server the test instance does not carry", final)
+				}
+			}
+			if _, ok := plan.Config["route"].(map[string]any)["default_domain_resolver"]; ok {
+				t.Error("route.default_domain_resolver names a server the test instance does not carry")
+			}
+		})
+	}
+}
+
+// legacyResolutionConfig: two DNS servers and no route.default_domain_resolver
+// — a server's name without a domain_resolver of its own is resolved by
+// the DNS rules then (sing-box before 1.12, or a later one with
+// ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER), not by dns.final
+func legacyResolutionConfig(rules, route string) string {
+	return `{
+	  "dns": {
+	    "servers": [
+	      {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+	      {"type": "udp", "tag": "local", "server": "223.5.5.5"},
+	      {"type": "fakeip", "tag": "fake", "inet4_range": "198.18.0.0/15"}
+	    ],
+	    "rules": ` + rules + `,
+	    "final": "remote"
+	  },
+	  "outbounds": [
+	    {"type": "selector", "tag": "proxy", "outbounds": ["a", "b"]},
+	    {"type": "vless", "tag": "a", "server": "a.example.com", "server_port": 443, "uuid": "` + uuidA + `"},
+	    {"type": "trojan", "tag": "b", "server": "b.example.com", "server_port": 443, "password": "trojan-password"},
+	    {"type": "vless", "tag": "by-ip", "server": "192.0.2.1", "server_port": 443, "uuid": "` + uuidA + `"},
+	    {"type": "vless", "tag": "own-resolver", "server": "c.example.com", "server_port": 443, "uuid": "` + uuidA + `", "domain_resolver": "local"}
+	  ],
+	  "route": ` + route + `
+	}`
+}
+
+// probeRules are the DNS rules of the test instance's config
+func probeRules(plan *domain.ProbePlan) []any {
+	dns, _ := plan.Config["dns"].(map[string]any)
+	rules, _ := dns["rules"].([]any)
+	return rules
+}
+
+// The DNS rules that decide by the outbound alone are copied with the
+// servers they name, so the test instance resolves a server's name where
+// the VPN does; a node whose resolution depends on a rule the test cannot
+// repeat is not tested
+func TestProbeLegacyResolution(t *testing.T) {
+	const anyLocal = `{"outbound": "any", "server": "local"}`
+	cases := []struct {
+		name, rules string
+		servers     []string
+		copied      []string // the rules copied, canonical
+	}{
+		{"outbound any", `[` + anyLocal + `]`, []string{"remote", "local"}, []string{`{"outbound":"any","server":"local"}`}},
+		{"a default rule by its type", `[{"type": "default", "outbound": "any", "invert": false, "server": "local"}]`, []string{"remote", "local"},
+			[]string{`{"invert":false,"outbound":"any","server":"local","type":"default"}`}},
+		{"the node's own tag; the other one by dns.final", `[{"Outbound": ["a"], "server": "local"}]`, []string{"remote", "local"},
+			[]string{`{"Outbound":["a"],"server":"local"}`}},
+		{"a fakeip server and another outbound's rule decide nothing", `[
+			{"query_type": ["A", "AAAA"], "server": "fake"},
+			{"outbound": "zz", "domain_suffix": [".example.com"], "server": "remote"},
+			{"outbound": "any", "server": "gone"},
+			` + anyLocal + `]`, []string{"remote", "local"}, []string{`{"outbound":"any","server":"local"}`}},
+		{"options before the server", `[
+			{"outbound": "any", "action": "route-options", "strategy": "ipv4_only"},
+			{"outbound": ["a", "b"], "action": "route", "server": "local", "disable_cache": true}]`, []string{"remote", "local"},
+			[]string{`{"action":"route-options","outbound":"any","strategy":"ipv4_only"}`,
+				`{"action":"route","disable_cache":true,"outbound":["a","b"],"server":"local"}`}},
+		// local only for own-resolver
+		{"no rule at all: dns.final", `[]`, []string{"remote", "local"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := probePlan(probeConfig(t, legacyResolutionConfig(tc.rules, `{"final": "proxy"}`)))
+			for _, tag := range []string{"a", "b", "by-ip", "own-resolver"} {
+				if c := candidateByTag(t, plan, tag); !c.Testable || !c.Eligible || c.Note != "" {
+					t.Errorf("%s: %+v, want testable", tag, c)
+				}
+			}
+			if _, servers := probeTags(t, plan); !reflect.DeepEqual(servers, tc.servers) {
+				t.Errorf("probe DNS servers = %v, want %v", servers, tc.servers)
+			}
+			var copied []string
+			for _, rule := range probeRules(plan) {
+				copied = append(copied, canonical(rule))
+			}
+			if !reflect.DeepEqual(copied, tc.copied) {
+				t.Errorf("probe DNS rules = %v, want %v", copied, tc.copied)
+			}
+		})
+	}
+
+	// A rule the test cannot repeat before the node's server is decided:
+	// the names are not resolved where the VPN resolves them
+	const note = "не проверяется: имя его сервера разрешается по правилам DNS, которые проверка повторить не может"
+	for name, rules := range map[string]string{
+		"a rule set":             `[{"rule_set": "geosite-cn", "server": "local"}, ` + anyLocal + `]`,
+		"a domain":               `[{"domain_suffix": [".example.com"], "server": "local"}]`,
+		"the outbound and more":  `[{"outbound": "any", "clash_mode": "Direct", "server": "local"}]`,
+		"inverted":               `[{"outbound": "any", "invert": true, "server": "local"}]`,
+		"logical":                `[{"type": "logical", "mode": "or", "rules": [{"outbound": "any"}], "server": "local"}]`,
+		"rejected":               `[{"outbound": "any", "action": "reject"}]`,
+		"a predefined answer":    `[{"outbound": ["a", "b"], "action": "predefined", "answer": ["a.example.com. IN A 192.0.2.9"]}]`,
+		"a route without server": `[{"outbound": "any", "action": "route"}]`,
+		"two spellings of rules": `[` + anyLocal + `], "Rules": [` + anyLocal + `]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := probePlan(probeConfig(t, legacyResolutionConfig(rules, `{"final": "proxy"}`)))
+			for _, tag := range []string{"a", "b"} {
+				if c := candidateByTag(t, plan, tag); c.Testable || c.Note != note {
+					t.Errorf("%s: %+v, want the note %q", tag, c, note)
+				}
+			}
+			for _, tag := range []string{"by-ip", "own-resolver"} {
+				if c := candidateByTag(t, plan, tag); !c.Testable || !c.Eligible {
+					t.Errorf("%s: %+v, want testable", tag, c)
+				}
+			}
+			if rules := probeRules(plan); len(rules) != 0 {
+				t.Errorf("rules copied: %v", rules)
+			}
+			// "proxy" has no member left to carry, nor has dns.final's detour
+			if outbounds, servers := probeTags(t, plan); !reflect.DeepEqual(outbounds, []string{"by-ip", "own-resolver"}) || !reflect.DeepEqual(servers, []string{"local"}) {
+				t.Errorf("probe config carries %v / %v", outbounds, servers)
+			}
+		})
+	}
+
+	// Where sing-box does not ask the rules, nothing of them is needed
+	for name, cfg := range map[string]string{
+		"route.default_domain_resolver": legacyResolutionConfig(`[{"rule_set": "geosite-cn", "server": "local"}]`, `{"final": "proxy", "default_domain_resolver": "local"}`),
+		"a single DNS server": strings.Replace(legacyResolutionConfig(`[{"rule_set": "geosite-cn", "server": "local"}]`, `{"final": "proxy"}`),
+			`{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+	      {"type": "udp", "tag": "local", "server": "223.5.5.5"},
+	      {"type": "fakeip", "tag": "fake", "inet4_range": "198.18.0.0/15"}`, `{"type": "udp", "tag": "local", "server": "223.5.5.5"}`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := strings.Replace(cfg, `"final": "remote"`, `"final": "local"`, 1)
+			plan := probePlan(probeConfig(t, text))
+			for _, tag := range []string{"a", "b"} {
+				if c := candidateByTag(t, plan, tag); !c.Testable || c.Note != "" {
+					t.Errorf("%s: %+v, want testable", tag, c)
+				}
+			}
+			if rules := probeRules(plan); len(rules) != 0 {
+				t.Errorf("rules copied: %v", rules)
+			}
+		})
+	}
+
+	// A hop resolved by such a rule takes the server dialing through it along
+	// — a direct outbound as the hop as well: it resolves every name it dials
+	chain := func(rules string) *domain.ProbePlan {
+		return probePlan(probeConfig(t, `{
+		  "dns": {"servers": [{"type": "udp", "tag": "u1", "server": "192.0.2.50"}, {"type": "udp", "tag": "u2", "server": "192.0.2.51"}],
+		          "rules": `+rules+`},
+		  "outbounds": [
+		    {"type": "vless", "tag": "hop", "server": "hop.example.com", "server_port": 443, "uuid": "`+uuidA+`"},
+		    {"type": "vless", "tag": "via-hop", "server": "192.0.2.1", "server_port": 443, "uuid": "`+uuidA+`", "detour": "hop"},
+		    {"type": "direct", "tag": "direct"},
+		    {"type": "vless", "tag": "via-direct", "server": "via.example.com", "server_port": 443, "uuid": "`+uuidA+`", "detour": "direct"}
+		  ]}`))
+	}
+	plan := chain(`[{"domain": ["hop.example.com"], "server": "u2"}]`)
+	if c := candidateByTag(t, plan, "hop"); c.Testable || c.Note != note {
+		t.Errorf("hop: %+v", c)
+	}
+	if c := candidateByTag(t, plan, "via-hop"); c.Testable || c.Note != "не проверяется: зависит от «hop»" {
+		t.Errorf("via-hop: %+v", c)
+	}
+	if c := candidateByTag(t, plan, "via-direct"); c.Testable || c.Note != "не проверяется: зависит от «direct»" {
+		t.Errorf("via-direct: %+v", c)
+	}
+	plan = chain(`[{"outbound": "hop", "server": "u2"}]`)
+	for _, tag := range []string{"via-hop", "via-direct"} {
+		if c := candidateByTag(t, plan, tag); !c.Testable || !c.Eligible {
+			t.Errorf("%s: %+v", tag, c)
+		}
+	}
+	// u1 is dns.final (the first server), u2 the rule's
+	if _, servers := probeTags(t, plan); !reflect.DeepEqual(servers, []string{"u1", "u2"}) || len(probeRules(plan)) != 1 {
+		t.Errorf("probe DNS servers = %v, rules %v", servers, probeRules(plan))
+	}
+}
+
+// A DNS server of the format before sing-box 1.14 with an empty detour
+// dials through the default outbound (route.final, otherwise the first
+// outbound): the test instance carries it and makes it its own default too
+// (sing-box 1.12 and 1.13: docs/configuration/dns/server/legacy.md)
+func TestProbeLegacyDNSServerDetour(t *testing.T) {
+	config := func(server, route string) string {
+		return `{"dns": {"servers": [` + server + `]},
+		  "endpoints": [{"type": "wireguard", "tag": "wg"}],
+		  "outbounds": [
+		    {"type": "selector", "tag": "proxy", "outbounds": ["a"]},
+		    {"type": "vless", "tag": "a", "server": "a.example.com", "server_port": 443, "uuid": "` + uuidA + `"},
+		    {"type": "direct", "tag": "direct"}
+		  ],
+		  "route": ` + route + `}`
+	}
+	const cf = `{"tag": "cf", "address": "1.1.1.1"}`
+	split := `{"rules": [{"domain": ["x.example"], "outbound": "proxy"}], "final": "direct"}`
+	cases := []struct {
+		name, server, route string
+		outbounds           []string
+		final               any // the probe's route.final, nil: none
+	}{
+		{"route.final", cf, split, []string{"a", "direct"}, "direct"},
+		{"in any spelling", `{"tag": "cf", "address": "tls://1.1.1.1", "type": "legacy"}`, `{"Final": "direct"}`, []string{"a", "direct"}, "direct"},
+		{"without route.final the first outbound", cf, `{}`, []string{"proxy", "a"}, "proxy"},
+		{"an explicit detour", `{"tag": "cf", "address": "1.1.1.1", "detour": "a"}`, split, []string{"a"}, nil},
+		{"the system resolver dials nothing", `{"tag": "cf", "address": "local"}`, split, []string{"a"}, nil},
+		{"a server of the current format dials directly", `{"type": "udp", "tag": "cf", "server": "1.1.1.1"}`, split, []string{"a"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := probePlan(probeConfig(t, config(tc.server, tc.route)))
+			if c := candidateByTag(t, plan, "a"); !c.Testable || !c.Eligible {
+				t.Errorf("a: %+v", c)
+			}
+			if outbounds, servers := probeTags(t, plan); !reflect.DeepEqual(outbounds, tc.outbounds) || !reflect.DeepEqual(servers, []string{"cf"}) {
+				t.Errorf("probe config carries %v / %v, want %v / [cf]", outbounds, servers, tc.outbounds)
+			}
+			if final := plan.Config["route"].(map[string]any)["final"]; final != tc.final {
+				t.Errorf("probe route.final = %v, want %v", final, tc.final)
+			}
+		})
+	}
+	// The default outbound an endpoint: the server cannot be carried
+	plan := probePlan(probeConfig(t, config(cf, `{"final": "wg"}`)))
+	if c := candidateByTag(t, plan, "a"); c.Testable || c.Note != "не проверяется: зависит от «wg»" {
+		t.Errorf("a: %+v", c)
+	}
+	// ... nor when it is an outbound without a tag (sing-box names it "0")
+	untagged := strings.Replace(config(cf, `{}`), `"outbounds": [`, `"outbounds": [{"type": "direct"}, `, 1)
+	plan = probePlan(probeConfig(t, untagged))
+	if c := candidateByTag(t, plan, "a"); c.Testable || c.Note != "не проверяется: зависит от «cf»" {
+		t.Errorf("a with an untagged first outbound: %+v", c)
 	}
 }
 

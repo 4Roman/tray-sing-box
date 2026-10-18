@@ -214,3 +214,119 @@ func TestProbeExcludeRealCheck(t *testing.T) {
 	}
 	t.Logf("note: %s", candidateByTag(t, next, "no-utls").Note)
 }
+
+// The main selector as the DNS detour, one member of it sing-box cannot
+// create on its own (the VPN does not start: the user checks which servers
+// still work): after Exclude the other members stay testable — the DNS
+// server is carried with the group copied without that member and without
+// it as the default — and the test instance passes the real check
+func TestProbeGlobalDNSGroupRealCheck(t *testing.T) {
+	validate := realValidator(t)
+	const config = `{
+	  "dns": {
+	    "servers": [
+	      {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+	      {"type": "udp", "tag": "local-dns", "server": "223.5.5.5"}
+	    ],
+	    "final": "remote"
+	  },
+	  "outbounds": [
+	    {"type": "selector", "tag": "proxy", "outbounds": ["good", "broken", "other"], "default": "broken"},
+	    {"type": "vless", "tag": "good", "server": "good.example.com", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555",
+	     "tls": {"enabled": true, "server_name": "good.example.com"}},
+	    {"type": "vless", "tag": "broken", "server": "192.0.2.11", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555556",
+	     "flow": "xtls-rprx-vision",
+	     "tls": {"enabled": true, "server_name": "www.example.com",
+	             "reality": {"enabled": true, "public_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", "short_id": "6ba85179"}}},
+	    {"type": "trojan", "tag": "other", "server": "192.0.2.12", "server_port": 443, "password": "trojan-password",
+	     "tls": {"enabled": true, "server_name": "other.example.com"}},
+	    {"type": "direct", "tag": "direct"}
+	  ],
+	  "route": {"final": "proxy", "default_domain_resolver": "local-dns"}
+	}`
+	if err := validate([]byte(config)); err == nil || !strings.Contains(err.Error(), "uTLS is required by reality client") {
+		t.Fatalf("the source config: %v, want sing-box to refuse the REALITY node without uTLS", err)
+	}
+	plan := probePlan(probeConfig(t, config))
+	err := validate(withProbeAPI(t, plan))
+	if err == nil {
+		t.Fatal("sing-box check passed the probe config with the broken node")
+	}
+	next, ok := plan.Exclude(plan.Redact(err.Error()))
+	if !ok {
+		t.Fatalf("Exclude did not find the outbound in sing-box's answer: %v", err)
+	}
+	if c := candidateByTag(t, next, "broken"); c.Testable {
+		t.Errorf("broken: %+v", c)
+	}
+	for _, tag := range []string{"good", "other"} {
+		if c := candidateByTag(t, next, tag); !c.Testable || !c.Eligible || c.Note != "" {
+			t.Errorf("%s: %+v, want testable", tag, c)
+		}
+	}
+	outbounds, servers := probeTags(t, next)
+	if !reflect.DeepEqual(outbounds, []string{"proxy", "good", "other"}) || !reflect.DeepEqual(servers, []string{"remote", "local-dns"}) {
+		t.Errorf("probe config carries %v / %v", outbounds, servers)
+	}
+	if err := validate(withProbeAPI(t, next)); err != nil {
+		t.Errorf("after the exclusion the probe config does not pass: %v", err)
+	}
+}
+
+// A config that resolves server names through the DNS rules: the rules the
+// test instance copies make sing-box judge it the way it judges config.json
+// — refused without ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM and
+// ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER (SingBoxEnv passes the user's
+// switches to both), accepted with them
+func TestProbeLegacyResolutionRealCheck(t *testing.T) {
+	validate := realValidator(t)
+	const config = `{
+	  "dns": {
+	    "servers": [
+	      {"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "proxy"},
+	      {"type": "udp", "tag": "local", "server": "223.5.5.5"}
+	    ],
+	    "rules": [{"outbound": "any", "server": "local"}],
+	    "final": "remote"
+	  },
+	  "outbounds": [
+	    {"type": "selector", "tag": "proxy", "outbounds": ["a", "b"]},
+	    {"type": "vless", "tag": "a", "server": "a.example.com", "server_port": 443, "uuid": "11111111-2222-4333-8444-555555555555",
+	     "tls": {"enabled": true, "server_name": "a.example.com"}},
+	    {"type": "trojan", "tag": "b", "server": "b.example.com", "server_port": 443, "password": "trojan-password",
+	     "tls": {"enabled": true, "server_name": "b.example.com"}}
+	  ],
+	  "route": {"final": "proxy"}
+	}`
+	plan := probePlan(probeConfig(t, config))
+	for _, tag := range []string{"a", "b"} {
+		if c := candidateByTag(t, plan, tag); !c.Testable || !c.Eligible {
+			t.Errorf("%s: %+v", tag, c)
+		}
+	}
+	if rules := probeRules(plan); len(rules) != 1 {
+		t.Fatalf("probe DNS rules %v, want the outbound rule", rules)
+	}
+	if _, servers := probeTags(t, plan); !reflect.DeepEqual(servers, []string{"remote", "local"}) {
+		t.Errorf("probe DNS servers %v", servers)
+	}
+	probe := withProbeAPI(t, plan)
+	for _, tc := range []struct {
+		rule, resolver string
+		pass           bool
+	}{
+		{"false", "false", false},
+		{"true", "false", false},
+		{"false", "true", false},
+		{"true", "true", true},
+	} {
+		t.Run("OUTBOUND_DNS_RULE_ITEM="+tc.rule+",MISSING_DOMAIN_RESOLVER="+tc.resolver, func(t *testing.T) {
+			t.Setenv("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", tc.rule)
+			t.Setenv("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", tc.resolver)
+			source, test := validate([]byte(config)), validate(probe)
+			if (source == nil) != tc.pass || (test == nil) != tc.pass {
+				t.Errorf("config.json: %v; the test instance: %v; want both to pass: %v", source, test, tc.pass)
+			}
+		})
+	}
+}
