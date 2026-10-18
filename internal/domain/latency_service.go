@@ -195,7 +195,10 @@ type LatencyService struct {
 	// lastEnded: last is the report of that test instance (it may have
 	// failed, leaving an older one)
 	lastEnded bool
-	cancel    context.CancelFunc // of the running check, nil between checks
+	// stale: the config last was measured on has changed since (the server
+	// it chose is gone): still shown, never decided on again
+	stale  bool
+	cancel context.CancelFunc // of the running check, nil between checks
 
 	// Test hooks
 	now      func() time.Time
@@ -287,6 +290,13 @@ func (s *LatencyService) SelectFastest(ctx context.Context, confirm bool) (*Late
 
 	restarted, err := s.use(outcome.Tag)
 	if errors.Is(err, ErrNoSuchOutbound) {
+		// The retry the message asks for must measure the new config, not
+		// pick the same gone server from this report again
+		s.mu.Lock()
+		if s.last == report {
+			s.stale = true
+		}
+		s.mu.Unlock()
 		return report, nil, fmt.Errorf(msgFastestGone, DisplayName(outcome.Tag))
 	}
 	if err != nil {
@@ -347,7 +357,7 @@ func (s *LatencyService) recent(confirm bool) *LatencyReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch {
-	case s.last == nil:
+	case s.last == nil || s.stale:
 		return nil
 	case s.lastEnded && s.now().Sub(s.ended) < s.interval:
 		return s.last
@@ -398,7 +408,7 @@ func (s *LatencyService) check(ctx context.Context) (*LatencyReport, error) {
 
 	report := buildReport(plan, rt, delays, s.now())
 	s.mu.Lock()
-	s.last, s.lastEnded = report, measured
+	s.last, s.lastEnded, s.stale = report, measured, false
 	s.mu.Unlock()
 	return report, nil
 }

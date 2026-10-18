@@ -501,7 +501,9 @@ func TestSelectFastestWithoutASwitch(t *testing.T) {
 // The fastest server was removed during the check (a subscription refresh):
 // SwitchOutbound's error in the user's words; the report still comes back
 func TestSelectFastestServerGone(t *testing.T) {
-	svc, _ := newTestLatencyService(twoCandidates(nodeRouting("a")), twoServers(), func(tag string) (bool, error) {
+	prober, uses := twoServers(), 0
+	svc, clock := newTestLatencyService(twoCandidates(nodeRouting("a")), prober, func(tag string) (bool, error) {
+		uses++
 		return false, fmt.Errorf("outbound %q %w", tag, ErrNoSuchOutbound)
 	}, &trackingLock{})
 	report, outcome, err := svc.SelectFastest(context.Background(), false)
@@ -510,6 +512,21 @@ func TestSelectFastestServerGone(t *testing.T) {
 	}
 	if report == nil || outcome != nil {
 		t.Fatalf("report %v, outcome %v", report, outcome)
+	}
+	// The retry the message asks for does not pick the gone server from the
+	// same report again — neither at once nor as a confirmation: it measures
+	// the new config once the interval allows
+	for _, confirm := range []bool{false, true} {
+		if _, _, err := svc.SelectFastest(context.Background(), confirm); !errors.Is(err, ErrLatencyTooSoon) || uses != 1 {
+			t.Fatalf("retry (confirm %v): error %v, use called %d times", confirm, err, uses)
+		}
+	}
+	if svc.Last() != report {
+		t.Fatal("the report is still the one shown")
+	}
+	clock.advance(config.LatencyMinIntervalSeconds * time.Second)
+	if _, _, err := svc.SelectFastest(context.Background(), false); err == nil || prober.callCount() != 2 || uses != 2 {
+		t.Fatalf("after the interval: error %v, measured %d times, use called %d times", err, prober.callCount(), uses)
 	}
 
 	// Any other failure (the VPN restart after the switch) as it is

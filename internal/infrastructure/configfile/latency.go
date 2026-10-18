@@ -874,10 +874,11 @@ func excludedReason(message string) string {
 // the first outbound, sing-box's default then. ProxyRefs are the distinct
 // proxies among all of them, the ones SwitchOutbound would repoint, Groups
 // the distinct groups, which it leaves where they are. An endpoint (a
-// WireGuard one) is the target when no proxy or group is: SwitchOutbound
-// repoints no rule to one, but with no proxy referenced it sets
-// route.final — and so would move the traffic off it. Next to a proxy or a
-// group it stays where it is, like direct: no split routing.
+// WireGuard one) that is route.final is the target when no proxy or group
+// is: SwitchOutbound repoints no rule to one, but with no proxy referenced
+// it sets route.final — and so would move the traffic off it. An endpoint
+// only rules name stays where it is whatever the switch does, like direct:
+// neither the target nor split routing.
 func routingTarget(cfg map[string]any) domain.RoutingTarget {
 	kinds := map[string]string{} // tag -> kind, "" for direct/block/dns and relays
 	first, firstSeen := "", false
@@ -930,12 +931,8 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 
 	rt := domain.RoutingTarget{Final: final}
 	seen := map[string]bool{}
-	endpoint := ""
 	for _, ref := range refs {
 		kind := kinds[ref]
-		if kind == domain.RoutingEndpoint && endpoint == "" {
-			endpoint = ref
-		}
 		if kind == "" || kind == domain.RoutingEndpoint {
 			continue
 		}
@@ -952,8 +949,8 @@ func routingTarget(cfg map[string]any) domain.RoutingTarget {
 			rt.Groups = append(rt.Groups, ref)
 		}
 	}
-	if rt.Kind == "" && endpoint != "" {
-		rt.Kind, rt.Tag = domain.RoutingEndpoint, endpoint
+	if rt.Kind == "" && kinds[final] == domain.RoutingEndpoint {
+		rt.Kind, rt.Tag = domain.RoutingEndpoint, final
 	}
 	rt.InRules = rt.Tag != "" && slices.Contains(refs[:ruleRefs], rt.Tag)
 	return rt

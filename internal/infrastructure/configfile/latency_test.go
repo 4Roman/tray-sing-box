@@ -1053,12 +1053,14 @@ func TestRoutingTarget(t *testing.T) {
 			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "b", ProxyRefs: []string{"b", "a"}, Final: "a", InRules: true}},
 		{"without final the first outbound is the default", `{"rules": [{"outbound": "direct"}]}`,
 			domain.RoutingTarget{Kind: domain.RoutingSelector, Tag: "proxy", Groups: []string{"proxy"}, Final: "proxy"}},
-		// An endpoint (a WireGuard one, WARP) takes the traffic no server or
-		// group takes: SwitchOutbound would move route.final off it
+		// An endpoint (a WireGuard one, WARP) as route.final takes the traffic
+		// no server or group takes: SwitchOutbound would move route.final off it
 		{"an endpoint as final", `{"rules": [{"domain": ["x"], "outbound": "direct"}], "final": "wg"}`,
 			domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "wg", Final: "wg"}},
-		{"an endpoint by a rule, no server", `{"rules": [{"domain": ["x"], "outbound": "wg"}], "final": "direct"}`,
-			domain.RoutingTarget{Kind: domain.RoutingEndpoint, Tag: "wg", Final: "direct", InRules: true}},
+		// One only a rule names keeps that rule whatever the switch does: the
+		// traffic otherwise goes direct, through no server
+		{"an endpoint by a rule, final direct", `{"rules": [{"domain": ["x"], "outbound": "wg"}], "final": "direct"}`,
+			domain.RoutingTarget{Final: "direct"}},
 		// ... and none next to one: SwitchOutbound repoints no rule to it
 		{"a rule to an endpoint, a server as final", `{"rules": [{"domain": ["x"], "outbound": "wg"}], "final": "a"}`,
 			domain.RoutingTarget{Kind: domain.RoutingNode, Tag: "a", ProxyRefs: []string{"a"}, Final: "a"}},
