@@ -322,9 +322,9 @@ var acceptedClash = []clashCase{
       headers:
         Host: v.example.com
       max-early-data: 2048
-      early-data-header-name: Sec-WebSocket-Protocol`,
+      early-data-header-name: X-Early-Data`,
 		`{"security":"chacha20-poly1305","tls":null,"transport":{"type":"ws","path":"/vm","headers":{"Host":"v.example.com"},
-		  "max_early_data":2048,"early_data_header_name":"Sec-WebSocket-Protocol"}}`},
+		  "max_early_data":2048,"early_data_header_name":"X-Early-Data"}}`},
 	{"vmess h2: the server, not the h2 host, is the server name", `
   - name: vm-h2
     type: vmess
@@ -397,6 +397,24 @@ var acceptedClash = []clashCase{
       headers:
         Host: cdn.example.com`,
 		`{"tls":{"server_name":"192.0.2.30"},"transport":{"type":"ws","headers":{"Host":"cdn.example.com"}}}`},
+	// The key the other protocol reads is what the generator meant
+	{"trojan with servername only", `
+  - name: tr-servername
+    server: 192.0.2.30
+    port: 443
+    type: trojan
+    password: example
+    servername: t.example.com`,
+		`{"tls":{"server_name":"t.example.com"}}`},
+	{"vless with sni only", `
+  - name: vless-sni
+    type: vless
+    server: 192.0.2.10
+    port: 443
+    uuid: ` + testUUID + `
+    tls: true
+    sni: v.example.com`,
+		`{"tls":{"server_name":"v.example.com"}}`},
 	{"trojan with tls false (3x-ui's plain trojan)", `
   - name: tr-plain
     server: 192.0.2.30
@@ -482,8 +500,9 @@ var acceptedClash = []clashCase{
     type: hysteria2
     server: 192.0.2.50
     ports: 20000-30000
-    password: pw`,
-		`{"server_port":20000,"server_ports":["20000:30000"],"tls":{"server_name":"192.0.2.50"}}`},
+    password: pw
+    alpn: h3`,
+		`{"server_port":20000,"server_ports":["20000:30000"],"tls":{"server_name":"192.0.2.50","alpn":["h3"]}}`},
 	{"hysteria v1", `
   - name: hy1
     type: hysteria
@@ -964,7 +983,7 @@ var refusedClash = []clashRefusal{
     type: trojan
     server: 192.0.2.30
     port: 70000
-    password: ` + testSecret, "неверный порт"},
+    password: ` + testSecret, "неверный порт (port)"},
 	{"no-port", `
   - name: no-port
     type: vless
@@ -1075,10 +1094,15 @@ func TestClashProfileShapes(t *testing.T) {
 			t.Errorf("%.50q: error %v, want %v", c.text, err, c.want)
 		}
 	}
-	// The parser's message quotes the text: only the line is passed on
-	_, _, err := ParseAllReport("proxies:\n  - name: \"" + testSecret + "\n    type: [trojan\n")
-	if !errors.Is(err, errClashBroken) || !strings.Contains(err.Error(), "строка") || strings.Contains(err.Error(), testSecret) {
-		t.Errorf("broken YAML: %v", err)
+	// The parser's message may quote the text: only the line is passed on
+	for _, text := range []string{
+		"proxies:\n  - name: \"" + testSecret + "\n    type: [trojan\n",
+		"proxies:\n  - name: x\n    password: *" + testSecret + "\n",
+	} {
+		_, _, err := ParseAllReport(text)
+		if !errors.Is(err, errClashBroken) || strings.Contains(err.Error(), testSecret) {
+			t.Errorf("broken YAML: %v", err)
+		}
 	}
 
 	// No Clash profile: read as before
